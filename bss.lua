@@ -403,27 +403,32 @@ end
 --  CHOOSE BEST FIELD (dựa theo màu ong)
 -- ════════════════════════════════════════════════════
 local function ChooseBestField()
+    -- Nếu chưa có Diamond Mask VÀ cần Blue Extract:
+    -- CHỈ farm Blue Flower Field — không chen vào candidates Blue
+    -- để tránh chọn nhầm Spider Field hoặc Bamboo Field
+    if not State.diamond_mask_crafted and State.blue_extract < 250 then
+        return "Blue Flower Field"
+    end
+
+    -- Sau khi có Diamond Mask → chọn field theo màu ong
     local red, blue, total = 0, 0, #State.bees
     for _, b in ipairs(State.bees) do
         if b.color == "Red"  then red  += 1 end
         if b.color == "Blue" then blue += 1 end
     end
 
-    local candidates
-    if total > 0 and red/total > 0.6 then
-        candidates = {"Rose Field","Mushroom Field","Strawberry Field","Pepper Patch"}
-    elseif total > 0 and blue/total > 0.6 then
-        candidates = {"Bamboo Field","Pine Tree Forest","Blue Flower Field","Spider Field"}
+    -- Không có ong hoặc ong mixed → Clover Field (safe default)
+    if total == 0 then
+        return "Clover Field"
+    end
+
+    if red / total > 0.6 then
+        return "Rose Field"
+    elseif blue / total > 0.6 then
+        return "Bamboo Field"
     else
-        candidates = {"Clover Field","Sunflower Field","Mountain Top Field"}
+        return "Clover Field"
     end
-
-    -- Ưu tiên Blue Flower Field nếu cần Blue Extract
-    if not State.diamond_mask_crafted and State.blue_extract < 250 then
-        table.insert(candidates, 1, "Blue Flower Field")
-    end
-
-    return candidates[1]
 end
 
 -- ════════════════════════════════════════════════════
@@ -705,14 +710,14 @@ local function Step6_Farm()
     Log("🌻", string.format("Farm %s | Ong: %dR/%dB/%dW", fieldName,
         red, blue, white))
 
-    -- 3 rounds farm → convert
-    for round = 1, 3 do
-        if not State.running then break end
+    -- 1 round mỗi vòng lặp chính (main loop tự lặp lại)
+    -- Tránh block quá lâu, cho phép các STEP khác chạy xen kẽ
+    if State.running then
         FarmField(fieldName)
         ConvertHoney()
         ReadState()
-        Log("📊", string.format("Round %d | Honey: %d | BlueExtract: %d/250",
-            round, State.honey, State.blue_extract))
+        Log("📊", string.format("Honey: %d | BlueExtract: %d/250",
+            State.honey, State.blue_extract))
     end
 end
 
@@ -1011,13 +1016,14 @@ task.spawn(function()
             -- ── STEP 4: Mua beequip ──
             Step5_BuyBeequip()
 
-            -- ── STEP 5: Farm pollen ──
-            Step6_Farm()
-
             -- ── STEP 6: Boost management ──
             Step7_Boost()
 
-            -- ── Log tiến độ mỗi 10 vòng ──
+            -- ── FARM luôn chạy sau mỗi vòng ──
+            -- Đảm bảo honey tăng liên tục, không bị block bởi các step khác
+            Step6_Farm()
+
+            -- ── Log tiến độ ──
             PrintProgress()
 
         end)
