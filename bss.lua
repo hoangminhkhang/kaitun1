@@ -141,16 +141,54 @@ end
 
 local function SafeTP(pos)
     if not (HRP and pos) then return end
+    -- Xóa velocity trước khi teleport
+    local bv = HRP:FindFirstChildOfClass("BodyVelocity")
+    if bv then bv:Destroy() end
+    local bg = HRP:FindFirstChildOfClass("BodyGyro")
+    if bg then bg:Destroy() end
+    -- Reset humanoid state
+    if Hum then
+        Hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+    end
     HRP.CFrame = CFrame.new(pos + Vector3.new(0, 4.5, 0))
-    task.wait(0.2)
+    HRP.AssemblyLinearVelocity  = Vector3.zero
+    HRP.AssemblyAngularVelocity = Vector3.zero
+    task.wait(0.35)  -- chờ physics settle
 end
 
 local function MoveTo(pos, timeout)
-    if not (Hum and pos) then return end
+    if not (Hum and HRP and pos) then return end
+    -- Đảm bảo có thể di chuyển
+    if Hum.WalkSpeed < 1 then Hum.WalkSpeed = 16 end
+    if Hum.Health <= 0 then return end
+
+    -- Nếu đã gần rồi thì không MoveTo nữa (tránh đứng xoay người)
+    if (HRP.Position - pos).Magnitude < 3 then return end
+
     Hum:MoveTo(pos)
     local t, done = 0, false
+    local prevDist = (HRP.Position - pos).Magnitude
+    local stuckCount = 0
+
     local c = Hum.MoveToFinished:Connect(function() done = true end)
-    while not done and t < (timeout or 8) do task.wait(0.1); t += 0.1 end
+    while not done and t < (timeout or 5) do
+        task.wait(0.1); t += 0.1
+        -- Detect stuck: nếu 1 giây không tiến → dừng (tránh đâm tường)
+        if t % 1 < 0.1 then
+            local curDist = (HRP.Position - pos).Magnitude
+            if math.abs(curDist - prevDist) < 0.5 then
+                stuckCount += 1
+                if stuckCount >= 2 then
+                    -- Stuck → dừng di chuyển, bỏ qua điểm này
+                    Hum:MoveTo(HRP.Position)
+                    break
+                end
+            else
+                stuckCount = 0
+            end
+            prevDist = curDist
+        end
+    end
     c:Disconnect()
 end
 
@@ -307,14 +345,18 @@ end
 -- ════════════════════════════════════════════════════
 --  FARM GRID PATTERN
 -- ════════════════════════════════════════════════════
-local GRID_OFFSETS = {}
-do
-    for x = -12, 12, 6 do
-        for z = -12, 12, 6 do
-            table.insert(GRID_OFFSETS, Vector3.new(x, 0, z))
-        end
-    end
-end
+-- Spiral pattern: an toàn hơn grid vuông, không đâm tường góc
+local GRID_OFFSETS = {
+    Vector3.new(0,  0,  0),
+    Vector3.new(7,  0,  0), Vector3.new(-7, 0,  0),
+    Vector3.new(0,  0,  7), Vector3.new(0,  0, -7),
+    Vector3.new(5,  0,  5), Vector3.new(-5, 0,  5),
+    Vector3.new(5,  0, -5), Vector3.new(-5, 0, -5),
+    Vector3.new(10, 0,  0), Vector3.new(-10,0,  0),
+    Vector3.new(0,  0, 10), Vector3.new(0,  0,-10),
+    Vector3.new(8,  0,  6), Vector3.new(-8, 0,  6),
+    Vector3.new(8,  0, -6), Vector3.new(-8, 0, -6),
+}
 
 local function FarmField(fieldName)
     local fd = FMAP[fieldName]
@@ -323,7 +365,7 @@ local function FarmField(fieldName)
     SafeTP(fd.p)
     for _, off in ipairs(GRID_OFFSETS) do
         if not State.running then break end
-        MoveTo(fd.p + off, 3)
+        MoveTo(Vector3.new(fd.p.X + off.X, fd.p.Y, fd.p.Z + off.Z), 4)
         task.wait(0.12)
         -- Collect items trong range
         for _, obj in ipairs(workspace:GetDescendants()) do
