@@ -113,7 +113,8 @@ local function AddPlanterEntry(infoText, isReady)
     local EntryFrame = Instance.new("Frame")
     EntryFrame.Parent = ScrollFrame
     EntryFrame.BackgroundColor3 = isReady and Color3.fromRGB(40, 70, 40) or Color3.fromRGB(45, 45, 50)
-    EntryFrame.Size = UDim2.new(1, 0, 0, 80)
+    -- Tăng Size lên để hiển thị đủ Text cho Rewards
+    EntryFrame.Size = UDim2.new(1, 0, 0, 100)
     
     local EntryCorner = Instance.new("UICorner")
     EntryCorner.CornerRadius = UDim.new(0, 4)
@@ -156,7 +157,8 @@ local function UpdatePredictor()
         for _, planter in pairs(PlanterTable) do
             local pTypeInfo = PlanterTypes.Get(planter.Type)
             if pTypeInfo then
-                local fieldName = planter.ZoneName or "Unknown Field"
+                -- Sửa lỗi Unknown Field: Planter object có thể lưu Field dưới tên Terrain, Field, Zone, ZoneName hoặc Model
+                local fieldName = planter.Territory or planter.ZoneName or planter.Field or planter.Zone or "Unknown Field"
                 local percent = math.floor((planter.GrowthPercent or 0) * 100)
                 
                 -- Thời gian
@@ -189,14 +191,28 @@ local function UpdatePredictor()
                     info = info .. string.format("  ├ Tỷ lệ ra Puffshroom: %.1f%%\n", puffChance)
                 end
                 
+                -- Hiển thị phần thưởng cố định (Guaranteed Rewards)
+                if pTypeInfo.EnsureGiveOnFull then
+                    local rewardsList = ""
+                    for item, amount in pairs(pTypeInfo.EnsureGiveOnFull) do
+                        rewardsList = rewardsList .. item .. "(x" .. amount .. ") "
+                    end
+                    if rewardsList ~= "" then
+                        info = info .. "  ├ Quà 100% nhận: " .. rewardsList .. "\n"
+                    end
+                end
+                
                 if pTypeInfo.NectarMultipliers then
                     local nectars = ""
                     for nectarName, multi in pairs(pTypeInfo.NectarMultipliers) do
                         nectars = nectars .. nectarName .. "(x" .. multi .. ") "
                     end
                     info = info .. "  └ Bonus Nectar: " .. nectars
+                else
+                    info = info .. "  └ Bonus Nectar: Không có"
                 end
                 
+                -- Nếu height khung không đủ dài cho thêm dòng, ta tăng height lên 100
                 AddPlanterEntry(info, isReady)
             end
         end
