@@ -76,13 +76,49 @@ ScrollFrame.Active = true
 ScrollFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
 ScrollFrame.BorderSizePixel = 0
 ScrollFrame.Position = UDim2.new(0, 10, 0, 40)
-ScrollFrame.Size = UDim2.new(1, -20, 1, -50)
+ScrollFrame.Size = UDim2.new(1, -20, 0, 150) -- Giới hạn chiều cao phần đang trồng
 ScrollFrame.ScrollBarThickness = 4
 
 local UIListLayout = Instance.new("UIListLayout")
 UIListLayout.Parent = ScrollFrame
 UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 UIListLayout.Padding = UDim.new(0, 5)
+
+-- === PHẦN FIELD ANALYZER (MỚI) ===
+local AnalyzerFrame = Instance.new("Frame")
+AnalyzerFrame.Name = "AnalyzerFrame"
+AnalyzerFrame.Parent = MainFrame
+AnalyzerFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+AnalyzerFrame.Position = UDim2.new(0, 10, 0, 200)
+AnalyzerFrame.Size = UDim2.new(1, -20, 1, -210)
+AnalyzerFrame.BorderSizePixel = 0
+
+local AnalyzerCorner = Instance.new("UICorner")
+AnalyzerCorner.CornerRadius = UDim.new(0, 4)
+AnalyzerCorner.Parent = AnalyzerFrame
+
+local AnalyzerTitle = Instance.new("TextLabel")
+AnalyzerTitle.Parent = AnalyzerFrame
+AnalyzerTitle.BackgroundTransparency = 1
+AnalyzerTitle.Size = UDim2.new(1, 0, 0, 20)
+AnalyzerTitle.Font = Enum.Font.GothamBold
+AnalyzerTitle.Text = "🔍 Field Scanner & Best Planters"
+AnalyzerTitle.TextColor3 = Color3.fromRGB(200, 200, 200)
+AnalyzerTitle.TextSize = 12
+
+local AnalyzerScroll = Instance.new("ScrollingFrame")
+AnalyzerScroll.Parent = AnalyzerFrame
+AnalyzerScroll.Active = true
+AnalyzerScroll.BackgroundTransparency = 1
+AnalyzerScroll.BorderSizePixel = 0
+AnalyzerScroll.Position = UDim2.new(0, 5, 0, 25)
+AnalyzerScroll.Size = UDim2.new(1, -10, 1, -30)
+AnalyzerScroll.ScrollBarThickness = 2
+
+local AnalyzerList = Instance.new("UIListLayout")
+AnalyzerList.Parent = AnalyzerScroll
+AnalyzerList.SortOrder = Enum.SortOrder.LayoutOrder
+AnalyzerList.Padding = UDim.new(0, 3)
 
 -- Tính năng Draggable cho UI
 local dragging, dragInput, dragStart, startPos
@@ -224,6 +260,85 @@ local function UpdatePredictor()
     
     -- Cập nhật kích thước ScrollFrame
     ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, UIListLayout.AbsoluteContentSize.Y + 10)
+    
+    -- === CẬP NHẬT FIELD ANALYZER ===
+    for _, child in pairs(AnalyzerScroll:GetChildren()) do
+        if child:IsA("TextLabel") then child:Destroy() end
+    end
+    
+    local success2, err2 = pcall(function()
+        local NectarTypes = require(game:GetService("ReplicatedStorage").NectarTypes)
+        local PlanterTypes = require(game:GetService("ReplicatedStorage").PlanterTypes)
+        local FlowerZones = game:GetService("Workspace").FlowerZones:GetChildren()
+        
+        -- Lấy field hiện tại player đang đứng
+        local char = Players.LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local currentField = "Chưa xác định"
+        
+        if root then
+            for _, zone in pairs(FlowerZones) do
+                local pos = zone.Position
+                local size = zone.Size
+                local p = root.Position
+                if p.X > pos.X - size.X/2 and p.X < pos.X + size.X/2 and p.Z > pos.Z - size.Z/2 and p.Z < pos.Z + size.Z/2 then
+                    currentField = zone.Name
+                    break
+                end
+            end
+        end
+        
+        local TitleLab = Instance.new("TextLabel")
+        TitleLab.Parent = AnalyzerScroll
+        TitleLab.Size = UDim2.new(1, 0, 0, 20)
+        TitleLab.BackgroundTransparency = 1
+        TitleLab.Font = Enum.Font.GothamBold
+        TitleLab.Text = "📍 Đồng hoa hiện tại: " .. currentField
+        TitleLab.TextColor3 = Color3.fromRGB(255, 255, 100)
+        TitleLab.TextSize = 11
+
+        if currentField ~= "Chưa xác định" then
+            -- Check Nectar
+            local nectarNames = NectarTypes.TypesForField(currentField)
+            local nText = nectarNames and table.concat(nectarNames, ", ") or "Không có"
+            
+            local NectarLab = Instance.new("TextLabel")
+            NectarLab.Parent = AnalyzerScroll
+            NectarLab.Size = UDim2.new(1, 0, 0, 15)
+            NectarLab.BackgroundTransparency = 1
+            NectarLab.Font = Enum.Font.GothamSemibold
+            NectarLab.Text = "💧 Loại Nectar cung cấp: " .. nText
+            NectarLab.TextColor3 = Color3.fromRGB(150, 200, 255)
+            NectarLab.TextSize = 10
+            
+            -- Check Tốc độ Planter tốt nhất cho field này
+            local bestPlanters = {}
+            for pName, pData in pairs(PlanterTypes.GetTypes()) do
+                local multiplier = 1
+                if pData.GrowthMultipliers and pData.GrowthMultipliers.Zones and pData.GrowthMultipliers.Zones[currentField] then
+                    multiplier = pData.GrowthMultipliers.Zones[currentField]
+                end
+                if multiplier > 1 then
+                    table.insert(bestPlanters, {Name = pName, Multi = multiplier})
+                end
+            end
+            
+            table.sort(bestPlanters, function(a, b) return a.Multi > b.Multi end)
+            
+            for _, bp in ipairs(bestPlanters) do
+                local BPLab = Instance.new("TextLabel")
+                BPLab.Parent = AnalyzerScroll
+                BPLab.Size = UDim2.new(1, 0, 0, 15)
+                BPLab.BackgroundTransparency = 1
+                BPLab.Font = Enum.Font.Gotham
+                BPLab.Text = string.format("🚀 %s: Tăng tốc x%.2f", bp.Name, bp.Multi)
+                BPLab.TextColor3 = Color3.fromRGB(150, 255, 150)
+                BPLab.TextSize = 10
+            end
+        end
+    end)
+    
+    AnalyzerScroll.CanvasSize = UDim2.new(0, 0, 0, AnalyzerList.AbsoluteContentSize.Y + 10)
 end
 
 -- Refresh thủ công
