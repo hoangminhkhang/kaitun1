@@ -202,49 +202,28 @@ end
 local EGG_SHOP_POS = CFrame.new(-139.14, 8, 243.48) -- Basic Egg Shop
 
 local function buyEggAtShop()
-    -- TP đến Basic Egg Shop
-    log("🏪 TP to Basic Egg Shop...")
+    log("🏪 Buying Basic Egg...")
     tp(EGG_SHOP_POS)
     task.wait(2)
 
-    -- Thử mua qua nhiều cách
-    local bought = false
-
-    -- Cách 1: ItemPackageEvent trực tiếp
-    pcall(function()
-        local r = ItemPkg:InvokeServer("Purchase", {Category="Egg", Type="BasicEgg"})
-        if r then bought = true end
-    end)
-    task.wait(0.5)
-
-    -- Cách 2: ClientCall (giống shop UI)
-    if not bought then
+    -- Đúng format: Category="Eggs", Type="Basic"
+    for i = 1, 3 do
         pcall(function()
-            local evts = require(RS.Events)
-            local r = evts.ClientCall("ItemPackageEvent", "Purchase", {Category="Egg", Type="BasicEgg"})
-            if r then bought = true end
+            ItemPkg:InvokeServer("Purchase", {
+                Type = "Basic",
+                Category = "Eggs",
+                Amount = 1
+            })
         end)
         task.wait(0.5)
     end
 
-    -- Cách 3: Mua nhiều lần cho chắc
-    if not bought then
-        for i = 1, 3 do
-            pcall(function()
-                ItemPkg:InvokeServer("Purchase", {Category="Egg", Type="BasicEgg", Amount=1})
-            end)
-            task.wait(0.3)
-        end
-    end
-
-    -- Check đã có egg chưa
     local eggs = getEggs("BasicEgg")
     if eggs > 0 then
-        log("✅ Got " .. eggs .. " BasicEgg(s)")
+        log("✅ Got " .. eggs .. " egg(s)")
         return true
     end
-
-    log("⚠️ Egg purchase may have failed, trying hatch anyway...")
+    log("⚠️ Egg purchase unclear, trying hatch...")
     return false
 end
 
