@@ -1,51 +1,90 @@
 --[[
     =============================================
-    Auto Kaitun Starter - Bee Swarm Simulator
+    Auto Kaitun Starter v2.0 - Bee Swarm Simulator
     =============================================
-    Chức năng:
-      1. Auto mua tất cả Accessories có thể mua (theo thứ tự giá từ thấp -> cao)
-      2. Auto mua Hive Slot + đặt Basic Egg cho đến khi đủ 20 con ong
-    
-    Cách dùng: Chạy script này trong executor (sau khi đã vào game BSS)
+    Features:
+      0. Auto Claim Hive
+      1. Auto Buy Accessories
+      2. Auto Buy Hive Slot + Place Bees (target: 20)
+      3. Auto Farm (field farming + sell honey)
+      4. Auto Quest (talk to NPCs, accept & complete)
+      5. Full UI Control Panel
     =============================================
 ]]
 
 -- ============================================
--- SERVICES & VARIABLES
+-- SERVICES
 -- ============================================
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-local HttpService = game:GetService("HttpService")
+local RS = game:GetService("ReplicatedStorage")
+local WS = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local UIS = game:GetService("UserInputService")
 
 local plr = Players.LocalPlayer
-local Events = ReplicatedStorage:WaitForChild("Events")
+local Events = RS:WaitForChild("Events")
 local ItemPackageEvent = Events:WaitForChild("ItemPackageEvent")
 local ConstructHiveCellFromEgg = Events:WaitForChild("ConstructHiveCellFromEgg")
 local RetrievePlayerStats = Events:WaitForChild("RetrievePlayerStats")
 local ClaimHive = Events:WaitForChild("ClaimHive")
+local ToolCollect = Events:WaitForChild("ToolCollect")
+local PlayerHiveCommand = Events:WaitForChild("PlayerHiveCommand")
 
 -- ============================================
--- CONFIG
+-- CONFIG & STATE
 -- ============================================
-local TARGET_BEE_COUNT = 20
-local BUY_DELAY = 0.5          -- Delay giữa mỗi lần mua (tránh rate limit)
-local STAT_REFRESH_DELAY = 1   -- Delay refresh stats
+local Config = {
+    TargetBees = 20,
+    FarmField = "Sunflower Field",
+    ConvertAt = 95, -- % backpack full to sell
+    AutoFarm = false,
+    AutoQuest = false,
+    AutoBuyAcc = false,
+    AutoBees = false,
+    Running = true,
+    FarmDelay = 0.3,
+}
+
+local FieldList = {
+    "Sunflower Field", "Dandelion Field", "Mushroom Field", "Blue Flower Field",
+    "Clover Field", "Spider Field", "Strawberry Field", "Bamboo Field",
+    "Pineapple Patch", "Stump Field", "Cactus Field", "Pumpkin Patch",
+    "Pine Tree Forest", "Rose Field", "Mountain Top Field", "Coconut Field",
+    "Pepper Patch", "Hub Field"
+}
+
+local NPCList = {
+    {Name = "Black Bear", Pos = CFrame.new(-250, 4, 336)},
+    {Name = "Brown Bear", Pos = CFrame.new(-4, 58, 332)},
+    {Name = "Mother Bear", Pos = CFrame.new(-266, 28, 452)},
+    {Name = "Polar Bear", Pos = CFrame.new(265, 68, 449)},
+    {Name = "Science Bear", Pos = CFrame.new(265, 68, 525)},
+}
+
+local AccessoryBuyOrder = {
+    {Type = "Helmet", Cost = 30000},
+    {Type = "Brave Guard", Cost = 300000},
+    {Type = "Hasty Guard", Cost = 300000},
+    {Type = "Bomber Guard", Cost = 300000},
+    {Type = "Looker Guard", Cost = 300000},
+    {Type = "Blue Guard", Cost = 1000000},
+    {Type = "Red Guard", Cost = 1000000},
+    {Type = "Basic Boots", Cost = 50000},
+    {Type = "Belt Pocket", Cost = 50000},
+    {Type = "Propeller Hat", Cost = 2500000},
+    {Type = "Elite Blue Guard", Cost = 3000000},
+    {Type = "Elite Red Guard", Cost = 3000000},
+    {Type = "Hiking Boots", Cost = 2500000},
+    {Type = "Mondo Belt Bag", Cost = 1500000},
+    {Type = "Parachute", Cost = 500000},
+    {Type = "Glider", Cost = 5000000},
+    {Type = "Beekeeper's Boots", Cost = 15000000},
+    {Type = "Beekeeper's Mask", Cost = 20000000},
+}
 
 -- ============================================
 -- HELPER FUNCTIONS
 -- ============================================
-
--- Lấy stat cache từ server
-local function GetStatCache()
-    local success, result = pcall(function()
-        return RetrievePlayerStats:InvokeServer()
-    end)
-    if success then return result end
-    return nil
-end
-
--- Lấy honey hiện tại
 local function GetHoney()
     if plr:FindFirstChild("CoreStats") and plr.CoreStats:FindFirstChild("Honey") then
         return plr.CoreStats.Honey.Value
@@ -53,433 +92,584 @@ local function GetHoney()
     return 0
 end
 
--- Đếm số ong hiện tại trong hive
-local function GetCurrentBeeCount()
-    local beeCount = 0
-    for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-        if hive:FindFirstChild("Owner") and tostring(hive.Owner.Value) == plr.Name then
-            if hive:FindFirstChild("Cells") then
-                for _, cell in pairs(hive.Cells:GetChildren()) do
-                    if cell:FindFirstChild("CellType") then
-                        local cellType = tostring(cell.CellType.Value)
-                        if cellType ~= "Empty" and cellType ~= "nil" and cellType ~= "" then
-                            beeCount = beeCount + 1
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return beeCount
-end
-
--- Lấy số slot đã unlock
-local function GetUnlockedSlots()
-    local statCache = GetStatCache()
-    if statCache then
-        return statCache.UnlockedCells or 0
+local function GetPollen()
+    if plr:FindFirstChild("CoreStats") and plr.CoreStats:FindFirstChild("Pollen") then
+        return plr.CoreStats.Pollen.Value
     end
     return 0
 end
 
--- Lấy danh sách hive slot trống (chưa có ong)
-local function GetEmptyHiveSlots()
-    local emptySlots = {}
-    for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-        if hive:FindFirstChild("Owner") and tostring(hive.Owner.Value) == plr.Name then
-            if hive:FindFirstChild("Cells") then
-                for _, cell in pairs(hive.Cells:GetChildren()) do
-                    if cell:FindFirstChild("CellType") then
-                        local cellType = tostring(cell.CellType.Value)
-                        if cellType == "Empty" or cellType == "nil" or cellType == "" then
-                            -- Parse cell name để lấy X, Y (format: "C{x},{y}")
-                            local cellName = cell.Name
-                            local x, y = cellName:match("C(%d+),(%d+)")
-                            if x and y then
-                                table.insert(emptySlots, {X = tonumber(x), Y = tonumber(y), Cell = cell})
-                            end
-                        end
-                    end
-                end
-            end
-        end
+local function GetCapacity()
+    if plr:FindFirstChild("CoreStats") and plr.CoreStats:FindFirstChild("Capacity") then
+        return plr.CoreStats.Capacity.Value
     end
-    return emptySlots
+    return 100
 end
 
--- Mua item qua ItemPackageEvent
-local function PurchaseItem(category, itemType, amount)
-    local purchaseData = {
-        ["Category"] = category,
-        ["Type"] = itemType,
-    }
-    if amount then
-        purchaseData["Amount"] = amount
-    end
-    
-    local success, result = pcall(function()
-        return ItemPackageEvent:InvokeServer("Purchase", purchaseData)
-    end)
-    return success and result
+local function IsBackpackFull()
+    return GetPollen() >= (GetCapacity() * Config.ConvertAt) / 100
 end
 
--- Equip accessory
-local function EquipAccessory(accessoryType)
-    local success, result = pcall(function()
-        return ItemPackageEvent:InvokeServer("Equip", {
-            ["Mute"] = true,
-            ["Type"] = accessoryType,
-            ["Category"] = "Accessory"
-        })
-    end)
-    return success and result
+local function FormatNum(n)
+    if n >= 1e9 then return string.format("%.1fB", n/1e9)
+    elseif n >= 1e6 then return string.format("%.1fM", n/1e6)
+    elseif n >= 1e3 then return string.format("%.1fK", n/1e3)
+    else return tostring(math.floor(n)) end
 end
 
--- Đặt egg vào slot
-local function PlaceEgg(x, y, eggType)
-    local success, result = pcall(function()
-        return ConstructHiveCellFromEgg:InvokeServer(x, y, eggType or "BasicEgg", 1, false)
-    end)
-    return success and result
-end
-
--- Format số cho dễ đọc
-local function FormatNumber(n)
-    if n >= 1e12 then return string.format("%.2fT", n / 1e12)
-    elseif n >= 1e9 then return string.format("%.2fB", n / 1e9)
-    elseif n >= 1e6 then return string.format("%.2fM", n / 1e6)
-    elseif n >= 1e3 then return string.format("%.2fK", n / 1e3)
-    else return tostring(n) end
-end
-
--- Thông báo
 local function Notify(msg)
-    print("[Auto Kaitun] " .. msg)
+    print("[Kaitun] " .. msg)
     pcall(function()
-        game.StarterGui:SetCore("SendNotification", {
-            Title = "Auto Kaitun",
-            Text = msg,
-            Duration = 3
-        })
+        game.StarterGui:SetCore("SendNotification", {Title="Kaitun",Text=msg,Duration=3})
     end)
 end
 
--- ============================================
--- ACCESSORIES DATA (theo thứ tự giá từ thấp -> cao)
--- ============================================
-local AccessoryBuyOrder = {
-    -- Giá rẻ (starter)
-    {Type = "Helmet",           Category = "Accessory", Cost = 30000},
-    {Type = "Brave Guard",      Category = "Accessory", Cost = 300000},
-    {Type = "Hasty Guard",      Category = "Accessory", Cost = 300000},
-    {Type = "Bomber Guard",     Category = "Accessory", Cost = 300000},
-    {Type = "Looker Guard",     Category = "Accessory", Cost = 300000},
-    
-    -- Giá trung bình
-    {Type = "Blue Guard",       Category = "Accessory", Cost = 1000000},
-    {Type = "Red Guard",        Category = "Accessory", Cost = 1000000},
-    {Type = "Elite Blue Guard", Category = "Accessory", Cost = 3000000},
-    {Type = "Elite Red Guard",  Category = "Accessory", Cost = 3000000},
-    {Type = "Propeller Hat",    Category = "Accessory", Cost = 2500000},
-    
-    -- Boots
-    {Type = "Basic Boots",      Category = "Accessory", Cost = 50000},
-    {Type = "Hiking Boots",     Category = "Accessory", Cost = 2500000},
-    {Type = "Beekeeper's Boots",Category = "Accessory", Cost = 15000000},
-    
-    -- Belt
-    {Type = "Belt Pocket",      Category = "Accessory", Cost = 50000},
-    {Type = "Mondo Belt Bag",   Category = "Accessory", Cost = 1500000},
-    
-    -- Wings
-    {Type = "Parachute",        Category = "Accessory", Cost = 500000},
-    {Type = "Glider",           Category = "Accessory", Cost = 5000000},
+local function TpTo(cf)
+    pcall(function()
+        if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+            plr.Character.HumanoidRootPart.CFrame = cf
+        end
+    end)
+end
 
-    -- High tier
-    {Type = "Beekeeper's Mask", Category = "Accessory", Cost = 20000000},
-    {Type = "Honey Mask",       Category = "Accessory", Cost = 100000000},
-    {Type = "Fire Mask",        Category = "Accessory", Cost = 100000000},
-    {Type = "Bubble Mask",      Category = "Accessory", Cost = 100000000},
-}
-
--- ============================================
--- AUTO BUY ACCESSORIES
--- ============================================
-local function AutoBuyAccessories()
-    Notify("Bắt đầu Auto Mua Accessories...")
-    
-    local statCache = GetStatCache()
-    if not statCache then
-        Notify("Không thể lấy stat cache!")
-        return
+local function GetFieldPart(fieldName)
+    for _,v in pairs(WS.FlowerZones:GetChildren()) do
+        if v.Name == fieldName then return v end
     end
-    
-    local boughtCount = 0
-    
-    for _, accessory in ipairs(AccessoryBuyOrder) do
-        local itemType = accessory.Type
-        
-        -- Kiểm tra xem đã mua chưa
-        local alreadyOwned = false
-        pcall(function()
-            local ItemPackages = require(ReplicatedStorage.ItemPackages)
-            local ClientStatCache = require(ReplicatedStorage.ClientStatCache)
-            local stats = ClientStatCache:Get()
-            local itemData = {
-                Category = "Accessory",
-                Type = itemType
-            }
-            -- Nếu CanGive trả về false => đã sở hữu
-            alreadyOwned = not ItemPackages.CanGive(itemData, stats)
+end
+
+local function GetPlayerHive()
+    for _, hive in pairs(WS.Honeycombs:GetChildren()) do
+        if hive:FindFirstChild("Owner") and tostring(hive.Owner.Value) == plr.Name then
+            return hive
+        end
+    end
+end
+
+local function GetBeeCount()
+    local count = 0
+    local hive = GetPlayerHive()
+    if hive and hive:FindFirstChild("Cells") then
+        for _, cell in pairs(hive.Cells:GetChildren()) do
+            if cell:FindFirstChild("CellType") then
+                local ct = tostring(cell.CellType.Value)
+                if ct ~= "Empty" and ct ~= "nil" and ct ~= "" then
+                    count = count + 1
+                end
+            end
+        end
+    end
+    return count
+end
+
+local function GetEmptySlot()
+    local hive = GetPlayerHive()
+    if hive and hive:FindFirstChild("Cells") then
+        for _, cell in pairs(hive.Cells:GetChildren()) do
+            if cell:FindFirstChild("CellType") then
+                local ct = tostring(cell.CellType.Value)
+                if ct == "Empty" or ct == "nil" or ct == "" then
+                    local x, y = cell.Name:match("C(%d+),(%d+)")
+                    if x and y then return tonumber(x), tonumber(y) end
+                end
+            end
+        end
+    end
+end
+
+local function PurchaseItem(cat, itemType, amt)
+    local data = {Category=cat, Type=itemType}
+    if amt then data.Amount = amt end
+    local s, r = pcall(function() return ItemPackageEvent:InvokeServer("Purchase", data) end)
+    return s and r
+end
+
+-- ============================================
+-- UI SYSTEM
+-- ============================================
+local function CreateUI()
+    -- Destroy old UI if exists
+    if plr.PlayerGui:FindFirstChild("KaitunUI") then
+        plr.PlayerGui.KaitunUI:Destroy()
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "KaitunUI"
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = plr.PlayerGui
+
+    -- Main Frame
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.Size = UDim2.new(0, 320, 0, 440)
+    main.Position = UDim2.new(0, 20, 0.5, -220)
+    main.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    main.BorderSizePixel = 0
+    main.Parent = gui
+    main.Active = true
+    main.Draggable = true
+
+    local corner = Instance.new("UICorner", main)
+    corner.CornerRadius = UDim.new(0, 10)
+
+    local stroke = Instance.new("UIStroke", main)
+    stroke.Color = Color3.fromRGB(255, 180, 50)
+    stroke.Thickness = 2
+
+    -- Title
+    local title = Instance.new("TextLabel", main)
+    title.Size = UDim2.new(1, 0, 0, 36)
+    title.BackgroundColor3 = Color3.fromRGB(255, 180, 50)
+    title.Text = "🐝 Kaitun Starter v2.0"
+    title.TextColor3 = Color3.fromRGB(20, 20, 30)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 16
+    title.BorderSizePixel = 0
+    local tc = Instance.new("UICorner", title)
+    tc.CornerRadius = UDim.new(0, 10)
+
+    -- Scroll container
+    local scroll = Instance.new("ScrollingFrame", main)
+    scroll.Size = UDim2.new(1, -16, 1, -44)
+    scroll.Position = UDim2.new(0, 8, 0, 40)
+    scroll.BackgroundTransparency = 1
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 180, 50)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 720)
+    scroll.BorderSizePixel = 0
+
+    local layout = Instance.new("UIListLayout", scroll)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 6)
+
+    -- Status Label
+    local status = Instance.new("TextLabel", scroll)
+    status.Name = "Status"
+    status.Size = UDim2.new(1, -8, 0, 50)
+    status.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    status.TextColor3 = Color3.fromRGB(200, 255, 200)
+    status.Font = Enum.Font.GothamMedium
+    status.TextSize = 12
+    status.TextWrapped = true
+    status.Text = "🍯 Honey: 0 | 🐝 Bees: 0\n📦 Pollen: 0/0 | 🌻 Field: None"
+    status.LayoutOrder = 0
+    Instance.new("UICorner", status).CornerRadius = UDim.new(0, 6)
+
+    -- Helper: Create Section Header
+    local function MakeHeader(text, order)
+        local h = Instance.new("TextLabel", scroll)
+        h.Size = UDim2.new(1, -8, 0, 24)
+        h.BackgroundColor3 = Color3.fromRGB(255, 180, 50)
+        h.TextColor3 = Color3.fromRGB(20, 20, 30)
+        h.Font = Enum.Font.GothamBold
+        h.TextSize = 13
+        h.Text = "  " .. text
+        h.TextXAlignment = Enum.TextXAlignment.Left
+        h.LayoutOrder = order
+        Instance.new("UICorner", h).CornerRadius = UDim.new(0, 5)
+    end
+
+    -- Helper: Create Toggle Button
+    local function MakeToggle(text, default, order, callback)
+        local btn = Instance.new("TextButton", scroll)
+        btn.Size = UDim2.new(1, -8, 0, 32)
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 13
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.BorderSizePixel = 0
+        btn.LayoutOrder = order
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+        local state = default
+        local function update()
+            btn.BackgroundColor3 = state and Color3.fromRGB(50, 160, 50) or Color3.fromRGB(60, 60, 80)
+            btn.Text = text .. (state and "  ✅" or "  ❌")
+        end
+        update()
+
+        btn.MouseButton1Click:Connect(function()
+            state = not state
+            update()
+            if callback then callback(state) end
         end)
-        
-        if alreadyOwned then
-            -- Đã sở hữu, bỏ qua
-        else
-            -- Thử mua
-            local honey = GetHoney()
-            if honey >= accessory.Cost then
-                Notify("Đang mua: " .. itemType .. " (" .. FormatNumber(accessory.Cost) .. " Honey)")
-                
-                local bought = PurchaseItem("Accessory", itemType)
-                if bought then
-                    boughtCount = boughtCount + 1
-                    Notify("✅ Đã mua: " .. itemType)
-                    task.wait(BUY_DELAY)
-                else
-                    Notify("❌ Không thể mua: " .. itemType .. " (thiếu nguyên liệu hoặc chưa đủ điều kiện)")
-                end
-            else
-                Notify("⏭️ Bỏ qua " .. itemType .. " (thiếu " .. FormatNumber(accessory.Cost - honey) .. " Honey)")
-            end
-        end
-        
-        task.wait(0.2)
+        return btn
     end
-    
-    Notify("Hoàn tất Auto Mua Accessories! Đã mua " .. boughtCount .. " items.")
-end
 
--- ============================================
--- AUTO BUY HIVE SLOTS + PLACE BEES
--- ============================================
-local function AutoBuyHiveSlotsAndPlaceBees()
-    Notify("Bắt đầu Auto Đặt Ong (mục tiêu: " .. TARGET_BEE_COUNT .. " con)...")
-    
-    while true do
-        local currentBees = GetCurrentBeeCount()
-        
-        if currentBees >= TARGET_BEE_COUNT then
-            Notify("🎉 Đã đạt " .. currentBees .. "/" .. TARGET_BEE_COUNT .. " con ong! Hoàn tất!")
-            break
-        end
-        
-        Notify("Hiện tại: " .. currentBees .. "/" .. TARGET_BEE_COUNT .. " con ong")
-        
-        -- Kiểm tra slot trống
-        local emptySlots = GetEmptyHiveSlots()
-        
-        if #emptySlots > 0 then
-            -- Có slot trống -> đặt Basic Egg
-            local slot = emptySlots[1]
-            Notify("Đặt Basic Egg vào slot (" .. slot.X .. ", " .. slot.Y .. ")...")
-            
-            local placed = PlaceEgg(slot.X, slot.Y, "BasicEgg")
-            if placed then
-                Notify("✅ Đã đặt ong vào slot (" .. slot.X .. ", " .. slot.Y .. ")")
-            else
-                -- Thử mua BasicEgg trước rồi đặt
-                Notify("Thử mua Basic Egg...")
-                PurchaseItem("Egg", "BasicEgg")
-                task.wait(BUY_DELAY)
-                placed = PlaceEgg(slot.X, slot.Y, "BasicEgg")
-                if placed then
-                    Notify("✅ Đã mua và đặt ong!")
-                else
-                    Notify("❌ Không thể đặt ong (có thể thiếu egg hoặc lỗi)")
-                end
-            end
-        else
-            -- Không có slot trống -> mua thêm Hive Slot
-            local honey = GetHoney()
-            Notify("Không có slot trống. Đang mua Hive Slot... (Honey: " .. FormatNumber(honey) .. ")")
-            
-            local bought = PurchaseItem("HiveSlot", "HiveSlot", 1)
-            if bought then
-                Notify("✅ Đã mua thêm 1 Hive Slot!")
-            else
-                Notify("❌ Không đủ Honey để mua Hive Slot! Chờ 10 giây...")
-                task.wait(10)
-            end
-        end
-        
-        task.wait(STAT_REFRESH_DELAY)
+    -- Helper: Create Dropdown
+    local function MakeDropdown(text, list, default, order, callback)
+        local frame = Instance.new("Frame", scroll)
+        frame.Size = UDim2.new(1, -8, 0, 52)
+        frame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+        frame.LayoutOrder = order
+        frame.BorderSizePixel = 0
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+        local lbl = Instance.new("TextLabel", frame)
+        lbl.Size = UDim2.new(1, 0, 0, 20)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = "  " .. text
+        lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+        local idx = table.find(list, default) or 1
+        local val = Instance.new("TextButton", frame)
+        val.Size = UDim2.new(1, -16, 0, 24)
+        val.Position = UDim2.new(0, 8, 0, 22)
+        val.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        val.TextColor3 = Color3.fromRGB(255, 220, 100)
+        val.Font = Enum.Font.GothamMedium
+        val.TextSize = 12
+        val.Text = "◀ " .. (list[idx] or "?") .. " ▶"
+        val.BorderSizePixel = 0
+        Instance.new("UICorner", val).CornerRadius = UDim.new(0, 4)
+
+        val.MouseButton1Click:Connect(function()
+            idx = idx % #list + 1
+            val.Text = "◀ " .. list[idx] .. " ▶"
+            if callback then callback(list[idx]) end
+        end)
+        if callback then callback(list[idx]) end
     end
-end
 
--- ============================================
--- TELEPORT FUNCTIONS (từ main_kaitun.lua)
--- ============================================
-local function TpToHive()
-    pcall(function()
-        for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-            if hive:FindFirstChild("Owner") and tostring(hive.Owner.Value) == plr.Name then
-                if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-                    plr.Character.HumanoidRootPart.CFrame = hive.SpawnPos.Value + Vector3.new(0, 5, 0)
-                end
-                break
+    -- Build UI sections
+    MakeHeader("📊 Status", 0)
+    -- status is already order 0, header above it
+
+    MakeHeader("🏠 Setup", 10)
+    MakeToggle("Auto Claim Hive", false, 11, function(v)
+        if v then task.spawn(function() AutoClaimHive() end) end
+    end)
+    MakeToggle("Auto Buy Accessories", false, 12, function(v)
+        Config.AutoBuyAcc = v
+        if v then task.spawn(function() AutoBuyAccessories() end) end
+    end)
+    MakeToggle("Auto Place Bees → "..Config.TargetBees, false, 13, function(v)
+        Config.AutoBees = v
+        if v then task.spawn(function() AutoPlaceBees() end) end
+    end)
+
+    MakeHeader("🌻 Farming", 20)
+    MakeDropdown("Select Field", FieldList, Config.FarmField, 21, function(v)
+        Config.FarmField = v
+    end)
+    MakeToggle("Auto Farm", false, 22, function(v)
+        Config.AutoFarm = v
+        if v then task.spawn(function() AutoFarm() end) end
+    end)
+
+    MakeHeader("📜 Quests", 30)
+    MakeToggle("Auto Quest (Black Bear)", false, 31, function(v)
+        Config.AutoQuest = v
+        if v then task.spawn(function() AutoQuest() end) end
+    end)
+
+    MakeHeader("⚙️ Misc", 40)
+    local function MakeButton(text, order, callback)
+        local btn = Instance.new("TextButton", scroll)
+        btn.Size = UDim2.new(1, -8, 0, 30)
+        btn.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 13
+        btn.Text = text
+        btn.LayoutOrder = order
+        btn.BorderSizePixel = 0
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        btn.MouseButton1Click:Connect(callback)
+    end
+
+    MakeButton("🧱 Remove Gates/Walls", 41, function()
+        pcall(function()
+            for _,g in pairs(WS.Gates:GetChildren()) do
+                for _,p in pairs(g:GetChildren()) do pcall(function() p.CanCollide=false end) end
             end
+        end)
+        pcall(function() for _,v in pairs(WS["Invisible Walls"]:GetChildren()) do v:Destroy() end end)
+        pcall(function() for _,v in pairs(WS.Territories:GetChildren()) do v:Destroy() end end)
+        Notify("Gates/Walls removed!")
+    end)
+
+    MakeButton("🏠 TP to Hive", 42, function()
+        local hive = GetPlayerHive()
+        if hive and hive:FindFirstChild("SpawnPos") then
+            TpTo(hive.SpawnPos.Value + Vector3.new(0,5,0))
+            Notify("TP'd to hive!")
         end
     end)
+
+    MakeButton("🌻 TP to Field", 43, function()
+        local fp = GetFieldPart(Config.FarmField)
+        if fp then
+            TpTo(fp.CFrame * CFrame.new(0, 8, 0))
+            Notify("TP'd to " .. Config.FarmField)
+        end
+    end)
+
+    -- Minimize toggle
+    local minBtn = Instance.new("TextButton", main)
+    minBtn.Size = UDim2.new(0, 28, 0, 28)
+    minBtn.Position = UDim2.new(1, -32, 0, 4)
+    minBtn.BackgroundTransparency = 1
+    minBtn.Text = "—"
+    minBtn.TextColor3 = Color3.fromRGB(20, 20, 30)
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.TextSize = 18
+    minBtn.ZIndex = 10
+
+    local minimized = false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        scroll.Visible = not minimized
+        if minimized then
+            main.Size = UDim2.new(0, 320, 0, 36)
+            minBtn.Text = "+"
+        else
+            main.Size = UDim2.new(0, 320, 0, 440)
+            minBtn.Text = "—"
+        end
+    end)
+
+    -- Update status loop
+    task.spawn(function()
+        while Config.Running and task.wait(1) do
+            pcall(function()
+                status.Text = string.format(
+                    "🍯 %s | 🐝 %d bees\n📦 %s/%s (%d%%) | 🌻 %s",
+                    FormatNum(GetHoney()), GetBeeCount(),
+                    FormatNum(GetPollen()), FormatNum(GetCapacity()),
+                    math.floor(GetPollen()/math.max(GetCapacity(),1)*100),
+                    Config.FarmField
+                )
+            end)
+        end
+    end)
+
+    return gui
 end
 
 -- ============================================
 -- AUTO CLAIM HIVE
 -- ============================================
-local function GetPlayerHive()
-    for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-        if hive:FindFirstChild("Owner") and tostring(hive.Owner.Value) == plr.Name then
-            return hive
-        end
-    end
-    return nil
-end
-
-local function AutoClaimHive()
+function AutoClaimHive()
     if GetPlayerHive() then
-        Notify("✅ Đã có hive rồi, bỏ qua claim.")
+        Notify("✅ Already have a hive!")
         return true
     end
-    
-    Notify("🏠 Chưa có hive! Đang tìm hive trống để claim...")
-    
-    -- Lấy danh sách hive từ cuối (thường hive cuối trống)
-    local honeycombs = Workspace.Honeycombs:GetChildren()
-    
-    -- Đảo ngược danh sách (ưu tiên hive phía sau)
-    local reversed = {}
-    for i = #honeycombs, 1, -1 do
-        table.insert(reversed, honeycombs[i])
-    end
-    
-    local maxAttempts = 30
-    local attempt = 0
-    
-    while not GetPlayerHive() and attempt < maxAttempts do
-        attempt = attempt + 1
-        Notify("Lần thử claim #" .. attempt .. "...")
-        
-        for _, hive in pairs(reversed) do
+    Notify("🏠 Finding empty hive to claim...")
+    local combs = WS.Honeycombs:GetChildren()
+    for attempt = 1, 20 do
+        for i = #combs, 1, -1 do
+            local hive = combs[i]
             if hive:FindFirstChild("Owner") and tostring(hive.Owner.Value) == "nil" then
-                -- Tìm thấy hive trống!
-                Notify("Tìm thấy hive trống: " .. hive.Name .. " (ID: " .. tostring(hive:FindFirstChild("HiveID") and hive.HiveID.Value or "?") .. ")")
-                
-                -- TP đến hive
                 pcall(function()
-                    if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-                        if hive:FindFirstChild("LightHolder") then
-                            plr.Character.HumanoidRootPart.CFrame = hive.LightHolder.CFrame
-                        elseif hive:FindFirstChild("SpawnPos") then
-                            plr.Character.HumanoidRootPart.CFrame = hive.SpawnPos.Value + Vector3.new(0, 5, 0)
-                        end
+                    if hive:FindFirstChild("LightHolder") then
+                        TpTo(hive.LightHolder.CFrame)
                     end
                 end)
-                
                 task.wait(1)
-                
-                -- Gửi claim request
                 pcall(function()
                     if hive:FindFirstChild("HiveID") then
                         ClaimHive:FireServer(hive.HiveID.Value)
-                        Notify("📨 Đã gửi claim hive ID: " .. tostring(hive.HiveID.Value))
                     end
                 end)
-                
                 task.wait(2)
-                
-                -- Kiểm tra đã claim thành công chưa
                 if GetPlayerHive() then
-                    Notify("🎉 Claim hive thành công!")
+                    Notify("🎉 Hive claimed!")
                     return true
                 end
-                
-                break -- Thử lại từ đầu nếu chưa thành công
+                break
             end
         end
-        
         task.wait(2)
     end
-    
-    if GetPlayerHive() then
-        Notify("🎉 Claim hive thành công!")
-        return true
-    else
-        Notify("❌ Không thể claim hive sau " .. maxAttempts .. " lần thử!")
-        return false
+    Notify("❌ Could not claim hive")
+    return false
+end
+
+-- ============================================
+-- AUTO BUY ACCESSORIES
+-- ============================================
+function AutoBuyAccessories()
+    Notify("🛒 Auto buying accessories...")
+    for _, acc in ipairs(AccessoryBuyOrder) do
+        if not Config.AutoBuyAcc then break end
+        local honey = GetHoney()
+        if honey >= acc.Cost then
+            local ok = PurchaseItem("Accessory", acc.Type)
+            if ok then
+                Notify("✅ Bought: " .. acc.Type)
+            end
+        end
+        task.wait(0.5)
     end
+    Notify("🛒 Accessories done!")
+end
+
+-- ============================================
+-- AUTO PLACE BEES
+-- ============================================
+function AutoPlaceBees()
+    Notify("🐝 Auto placing bees to " .. Config.TargetBees .. "...")
+    while Config.AutoBees and Config.Running do
+        local bees = GetBeeCount()
+        if bees >= Config.TargetBees then
+            Notify("🎉 Reached " .. bees .. " bees!")
+            break
+        end
+        local x, y = GetEmptySlot()
+        if x and y then
+            pcall(function()
+                ConstructHiveCellFromEgg:InvokeServer(x, y, "BasicEgg", 1, false)
+            end)
+            Notify("🥚 Placed egg at (" .. x .. "," .. y .. ") [" .. bees+1 .. "/" .. Config.TargetBees .. "]")
+        else
+            -- Buy hive slot
+            local ok = PurchaseItem("HiveSlot", "HiveSlot", 1)
+            if ok then
+                Notify("✅ Bought hive slot!")
+            else
+                Notify("⏳ Need more honey for slot...")
+                task.wait(5)
+            end
+        end
+        task.wait(1)
+    end
+end
+
+-- ============================================
+-- AUTO FARM
+-- ============================================
+function AutoFarm()
+    Notify("🌻 Auto farming: " .. Config.FarmField)
+    while Config.AutoFarm and Config.Running do
+        pcall(function()
+            if not plr.Character or not plr.Character:FindFirstChild("HumanoidRootPart") then
+                task.wait(3)
+                return
+            end
+
+            -- Check if backpack is full -> sell
+            if IsBackpackFull() then
+                Notify("📦 Backpack full! Selling...")
+                -- TP to hive to sell
+                local hive = GetPlayerHive()
+                if hive and hive:FindFirstChild("SpawnPos") then
+                    TpTo(hive.SpawnPos.Value + Vector3.new(0, 5, 0))
+                    task.wait(1)
+                    PlayerHiveCommand:FireServer("ToggleHoneyMaking")
+                    -- Wait until pollen is empty
+                    local sellStart = tick()
+                    repeat task.wait(0.5)
+                    until GetPollen() <= 0 or tick() - sellStart > 30 or not Config.AutoFarm
+                    task.wait(1)
+                end
+            end
+
+            -- TP to field if not there
+            local fp = GetFieldPart(Config.FarmField)
+            if fp then
+                local hrp = plr.Character.HumanoidRootPart
+                if (hrp.Position - fp.Position).Magnitude > 40 then
+                    TpTo(fp.CFrame * CFrame.new(0, 8, 0))
+                    task.wait(1)
+                end
+
+                -- Dig (collect pollen)
+                pcall(function()
+                    ToolCollect:FireServer()
+                end)
+
+                -- Random walk on field
+                local rx = math.random(-15, 15)
+                local rz = math.random(-15, 15)
+                local walkPos = fp.Position + Vector3.new(rx, 3, rz)
+                if plr.Character:FindFirstChild("Humanoid") then
+                    plr.Character.Humanoid:MoveTo(walkPos)
+                end
+            end
+        end)
+        task.wait(Config.FarmDelay)
+    end
+    Notify("🌻 Farm stopped.")
+end
+
+-- ============================================
+-- AUTO QUEST
+-- ============================================
+function AutoQuest()
+    Notify("📜 Auto Quest started (Black Bear)...")
+    while Config.AutoQuest and Config.Running do
+        pcall(function()
+            -- Find Black Bear NPC
+            local npc = WS.NPCs:FindFirstChild("Black Bear")
+            if npc then
+                local npcPart = npc:FindFirstChild("Head") or npc:FindFirstChild("HumanoidRootPart")
+                    or npc:FindFirstChild("Torso")
+                if npcPart then
+                    -- TP to NPC
+                    TpTo(CFrame.new(npcPart.Position + Vector3.new(0, 3, -5)))
+                    task.wait(1)
+
+                    -- Trigger NPC dialog via Activatables
+                    pcall(function()
+                        local Activatables = require(RS.Activatables)
+                        -- Try to talk
+                        local target = Activatables.GetTarget()
+                        if target then
+                            -- Auto advance dialog
+                            for i = 1, 20 do
+                                pcall(function()
+                                    local ab = plr.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+                                    if ab and ab.Visible then
+                                        for _, conn in pairs(getconnections(ab.MouseButton1Click)) do
+                                            conn:Fire()
+                                        end
+                                    end
+                                end)
+                                task.wait(0.3)
+                            end
+                        end
+                    end)
+
+                    -- Fallback: fire dialog event directly
+                    pcall(function()
+                        Events.SelectNPCOption:FireServer("AdvanceDialog")
+                    end)
+                end
+            end
+        end)
+        task.wait(5)
+    end
+    Notify("📜 Auto Quest stopped.")
 end
 
 -- ============================================
 -- MAIN EXECUTION
 -- ============================================
-Notify("=== Auto Kaitun Starter v1.1 ===")
-Notify("Đang chờ game load đầy đủ...")
+Notify("=== Kaitun Starter v2.0 ===")
 
--- Chờ character load
+-- Wait for game to load
 repeat task.wait(1) until plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+repeat task.wait(1) until WS:FindFirstChild("Honeycombs") and #WS.Honeycombs:GetChildren() > 0
+task.wait(2)
 
--- Chờ Honeycombs load
-repeat task.wait(1) until Workspace:FindFirstChild("Honeycombs") and #Workspace.Honeycombs:GetChildren() > 0
-
-task.wait(3)
-Notify("Game đã load xong! Bắt đầu auto...")
-
--- Xóa tường chắn gate
+-- Remove gates
 pcall(function()
-    for _, gate in pairs(Workspace.Gates:GetChildren()) do
-        for _, part in pairs(gate:GetChildren()) do
-            pcall(function() part.CanCollide = false end)
-        end
+    for _,g in pairs(WS.Gates:GetChildren()) do
+        for _,p in pairs(g:GetChildren()) do pcall(function() p.CanCollide=false end) end
     end
 end)
+pcall(function() for _,v in pairs(WS["Invisible Walls"]:GetChildren()) do v:Destroy() end end)
+pcall(function() for _,v in pairs(WS.Territories:GetChildren()) do v:Destroy() end end)
 
--- Xóa invisible walls
-pcall(function()
-    for _, v in pairs(Workspace["Invisible Walls"]:GetChildren()) do v:Destroy() end
-end)
-
--- Xóa territories
-pcall(function()
-    for _, v in pairs(Workspace.Territories:GetChildren()) do v:Destroy() end
-end)
-
--- ========== Bước 0: Auto Claim Hive ==========
-Notify("📋 Bước 0: Kiểm tra & Claim Hive...")
-local hiveOk = AutoClaimHive()
-
-if not hiveOk then
-    Notify("⚠️ Không claim được hive! Script sẽ vẫn thử tiếp...")
-    task.wait(3)
+-- Auto claim hive if needed
+if not GetPlayerHive() then
+    AutoClaimHive()
 end
 
--- TP về hive sau khi claim
-if GetPlayerHive() then
-    TpToHive()
-    task.wait(1)
-end
-
--- ========== Bước 1: Auto mua Accessories ==========
-Notify("📋 Bước 1: Auto Mua Accessories...")
-task.spawn(function()
-    pcall(AutoBuyAccessories)
-end)
-
-task.wait(3)
-
--- ========== Bước 2: Auto mua Hive Slot + đặt ong ==========
-Notify("📋 Bước 2: Auto Đặt Ong đến " .. TARGET_BEE_COUNT .. " con...")
-task.spawn(function()
-    pcall(AutoBuyHiveSlotsAndPlaceBees)
-end)
-
-Notify("✅ Script đang chạy... Kiểm tra console để xem tiến trình.")
+-- Create UI
+CreateUI()
+Notify("✅ UI loaded! Use the panel to control features.")
