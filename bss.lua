@@ -509,8 +509,38 @@ function AutoBuyAccessories()
 end
 
 -- ============================================
--- AUTO PLACE BEES
+-- AUTO PLACE BEES (with egg check & buy)
 -- ============================================
+local function GetEggCount(eggName)
+    local count = 0
+    pcall(function()
+        local stats = RetrievePlayerStats:InvokeServer()
+        if stats and stats.Eggs and stats.Eggs[eggName] then
+            count = stats.Eggs[eggName]
+        end
+    end)
+    return count
+end
+
+local function BuyBasicEgg()
+    -- Mua BasicEgg từ shop (Category = Egg)
+    local ok = PurchaseItem("Egg", "BasicEgg")
+    if ok then
+        Notify("🛒 Bought a Basic Egg!")
+        return true
+    end
+    -- Thử cách khác: mua trực tiếp từ Basic Egg Shop
+    pcall(function()
+        ItemPackageEvent:InvokeServer("Purchase", {
+            Category = "Egg",
+            Type = "BasicEgg",
+            Amount = 1
+        })
+    end)
+    task.wait(0.5)
+    return GetEggCount("BasicEgg") > 0
+end
+
 function AutoPlaceBees()
     Notify("🐝 Auto placing bees to " .. Config.TargetBees .. "...")
     while Config.AutoBees and Config.Running do
@@ -519,14 +549,40 @@ function AutoPlaceBees()
             Notify("🎉 Reached " .. bees .. " bees!")
             break
         end
+        
         local x, y = GetEmptySlot()
         if x and y then
-            pcall(function()
-                ConstructHiveCellFromEgg:InvokeServer(x, y, "BasicEgg", 1, false)
-            end)
-            Notify("🥚 Placed egg at (" .. x .. "," .. y .. ") [" .. bees+1 .. "/" .. Config.TargetBees .. "]")
+            -- Check nếu có BasicEgg trong inventory
+            local eggCount = GetEggCount("BasicEgg")
+            if eggCount <= 0 then
+                Notify("🛒 No Basic Egg! Buying...")
+                BuyBasicEgg()
+                task.wait(1)
+                eggCount = GetEggCount("BasicEgg")
+            end
+            
+            if eggCount > 0 then
+                -- Hatch egg vào slot
+                local success = false
+                pcall(function()
+                    local result = ConstructHiveCellFromEgg:InvokeServer(x, y, "BasicEgg", 1, false)
+                    if result then success = true end
+                end)
+                
+                task.wait(1)
+                local newBees = GetBeeCount()
+                if newBees > bees then
+                    Notify("🐝 Hatched bee at (" .. x .. "," .. y .. ") [" .. newBees .. "/" .. Config.TargetBees .. "]")
+                else
+                    Notify("⚠️ Egg didn't hatch, retrying...")
+                end
+            else
+                Notify("❌ Can't buy Basic Egg (need more honey?)")
+                task.wait(5)
+            end
         else
-            -- Buy hive slot
+            -- Không có slot trống -> mua Hive Slot
+            Notify("🔓 No empty slot, buying Hive Slot...")
             local ok = PurchaseItem("HiveSlot", "HiveSlot", 1)
             if ok then
                 Notify("✅ Bought hive slot!")
@@ -535,7 +591,7 @@ function AutoPlaceBees()
                 task.wait(5)
             end
         end
-        task.wait(1)
+        task.wait(1.5)
     end
 end
 
