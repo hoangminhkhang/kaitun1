@@ -331,13 +331,93 @@ log("🧱 Gates removed")
 claimHive()
 task.spawn(function() pcall(redeemCodes) end)
 task.wait(2)
-pcall(buyAccessories)
-
--- Hatch: nếu thiếu honey → nhảy thẳng vào farm
-if not hatchAllEggs() then
-    log("💰 Thiếu honey, farm trước...")
-end
-
 pcall(questAllNPCs)
 task.spawn(function() while CFG.RUNNING do task.wait(120); pcall(questAllNPCs) end end)
-farmLoop()
+
+-- ═══ MAIN LOOP: đan xen mua acc + hatch + farm ═══
+log("🔄 Bắt đầu loop chính...")
+while CFG.RUNNING do
+    local bees = getBees()
+    local beesOk = bees >= CFG.TARGET_BEES
+
+    -- 1. Thử mua 1 accessory (cái rẻ nhất chưa có)
+    for _,a in ipairs(ACCESSORIES) do
+        if getHoney() >= a.c then
+            if purchase("Accessory", a.n) then
+                log("✅ Acc: " .. a.n)
+            end
+            task.wait(0.3)
+            break -- mua 1 cái rồi chuyển sang hatch
+        end
+    end
+
+    -- 2. Thử hatch 1 egg (nếu chưa đủ bees)
+    if not beesOk then
+        local slots = getAllEmptySlots()
+        if #slots == 0 then
+            purchase("HiveSlot", "HiveSlot", 1)
+            task.wait(1)
+            slots = getAllEmptySlots()
+        end
+        if #slots > 0 then
+            local s = slots[1]
+            -- Mua 1 egg
+            local honeyBefore = getHoney()
+            tp(EGG_SHOP_POS)
+            task.wait(1.5)
+            pcall(function()
+                ItemPkg:InvokeServer("Purchase", {Type="Basic", Category="Eggs", Amount=1})
+            end)
+            task.wait(0.3)
+
+            if getHoney() < honeyBefore then
+                -- Mua OK → hatch
+                tpToHive()
+                task.wait(1)
+                log("🥚 Hatch (" .. s.x .. "," .. s.y .. ")")
+                pcall(function() HiveCellEgg:InvokeServer(s.x, s.y, "Basic", 1, false) end)
+                task.wait(1.5)
+                log("🐝 Bees: " .. getBees() .. "/" .. CFG.TARGET_BEES)
+            else
+                log("💰 Thiếu honey, farm thêm...")
+            end
+        end
+    end
+
+    -- 3. Farm để kiếm honey
+    local fp = getField(CFG.FIELD)
+    if fp and alive() then
+        local hrp = plr.Character.HumanoidRootPart
+        if (hrp.Position - fp.Position).Magnitude > 40 then
+            tp(fp.CFrame * CFrame.new(0, 8, 0))
+            task.wait(1)
+        end
+        -- Farm 1 vòng ngắn
+        for i = 1, 30 do
+            if not CFG.RUNNING then break end
+            pcall(function() ToolCollect:FireServer() end)
+            pcall(function()
+                plr.Character.Humanoid:MoveTo(fp.Position + Vector3.new(math.random(-15,15), 3, math.random(-15,15)))
+            end)
+            task.wait(0.3)
+        end
+    end
+
+    -- 4. Sell nếu đầy
+    if getPollen() >= (getCap() * CFG.CONVERT_AT) / 100 then
+        log("📦 Bán honey...")
+        tpToHive()
+        HiveCmd:FireServer("ToggleHoneyMaking")
+        local t = tick()
+        repeat task.wait(0.5) until getPollen() <= 0 or tick()-t > 30
+        task.wait(1)
+        log("🍯 Honey: " .. getHoney())
+    end
+
+    -- 5. Check xong chưa
+    if getBees() >= CFG.TARGET_BEES then
+        log("🎉 Đủ " .. CFG.TARGET_BEES .. " bees!")
+        -- Tiếp tục farm vô hạn
+    end
+end
+
