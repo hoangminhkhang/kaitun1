@@ -1,4 +1,4 @@
-local Library = loadstring([
+local Library = loadstring([[
 	if getgenv().Tvk then 
 		if game.CoreGui:FindFirstChild("Sea Hub GUI") then for i, v in ipairs(game.CoreGui:GetChildren()) do if v.Name == "Sea Hub GUI" then v:Destroy() end end end
 	end
