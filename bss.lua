@@ -104,19 +104,23 @@ local function getBees()
     end; return c
 end
 
-local function getEmptySlot()
-    local h=getHive()
+local function getAllEmptySlots()
+    local slots = {}
+    local h = getHive()
     if h and h:FindFirstChild("Cells") then
-        for _,cell in pairs(h.Cells:GetChildren()) do
+        for _, cell in pairs(h.Cells:GetChildren()) do
             if cell:FindFirstChild("CellType") then
-                local t=tostring(cell.CellType.Value)
-                if t=="Empty" or t=="nil" or t=="" then
-                    local x,y=cell.Name:match("C(%d+),(%d+)")
-                    if x and y then return tonumber(x),tonumber(y) end
+                local t = tostring(cell.CellType.Value)
+                if t == "Empty" or t == "nil" or t == "" then
+                    local x, y = cell.Name:match("C(%d+),(%d+)")
+                    if x and y then
+                        table.insert(slots, {x = tonumber(x), y = tonumber(y)})
+                    end
                 end
             end
         end
     end
+    return slots
 end
 
 local function getEggs(name)
@@ -199,15 +203,14 @@ local function buyAccessories()
 end
 
 -- ═══════════════ STEP 3: HATCH EGGS ═══════════════
-local EGG_SHOP_POS = CFrame.new(-139.14, 8, 243.48) -- Basic Egg Shop
+local EGG_SHOP_POS = CFrame.new(-139.14, 8, 243.48)
 
-local function buyEggAtShop()
-    log("🏪 Buying Basic Egg...")
+local function buyEggAtShop(amount)
+    amount = amount or 1
+    log("🏪 TP to Egg Shop, buying " .. amount .. " egg(s)...")
     tp(EGG_SHOP_POS)
     task.wait(2)
-
-    -- Đúng format: Category="Eggs", Type="Basic"
-    for i = 1, 3 do
+    for i = 1, amount do
         pcall(function()
             ItemPkg:InvokeServer("Purchase", {
                 Type = "Basic",
@@ -215,16 +218,9 @@ local function buyEggAtShop()
                 Amount = 1
             })
         end)
-        task.wait(0.5)
+        task.wait(0.3)
     end
-
-    local eggs = getEggs("BasicEgg")
-    if eggs > 0 then
-        log("✅ Got " .. eggs .. " egg(s)")
-        return true
-    end
-    log("⚠️ Egg purchase unclear, trying hatch...")
-    return false
+    log("✅ Bought eggs")
 end
 
 local function tpToHive()
@@ -237,7 +233,6 @@ end
 
 local function hatchAllEggs()
     log("🥚 Hatching to " .. CFG.TARGET_BEES .. " bees...")
-    local failCount = 0
 
     while CFG.RUNNING do
         local bees = getBees()
@@ -246,70 +241,54 @@ local function hatchAllEggs()
             break
         end
 
-        -- Ensure at hive
-        tpToHive()
+        -- Scan tất cả slot trống
+        local emptySlots = getAllEmptySlots()
+        local need = CFG.TARGET_BEES - bees
 
-        local x, y = getEmptySlot()
-        if not x then
-            -- Mua Hive Slot
-            log("🔓 Buying hive slot...")
+        -- Nếu không có slot trống → mua thêm
+        if #emptySlots == 0 then
+            log("🔓 No empty slots, buying hive slot...")
             purchase("HiveSlot", "HiveSlot", 1)
             task.wait(1.5)
-            x, y = getEmptySlot()
-            if not x then
-                log("⏳ Need more honey for slot... waiting")
+            emptySlots = getAllEmptySlots()
+            if #emptySlots == 0 then
+                log("⏳ Need honey for slots, waiting...")
                 task.wait(8)
-                failCount = failCount + 1
-                if failCount > 10 then
-                    log("❌ Can't get slots, moving on...")
-                    break
-                end
                 continue
             end
         end
 
-        -- Check egg inventory
-        local eggs = getEggs("BasicEgg")
-        if eggs <= 0 then
-            -- TP đến shop mua egg
-            buyEggAtShop()
-            -- TP về hive
-            tpToHive()
-            task.wait(1)
+        -- Tính số egg cần mua
+        local slotsToFill = math.min(#emptySlots, need)
+        log("📊 " .. slotsToFill .. " empty slot(s), buying eggs...")
+
+        -- TP đến shop mua đủ egg
+        buyEggAtShop(slotsToFill)
+
+        -- TP về hive
+        tpToHive()
+        task.wait(1)
+
+        -- Hatch từng slot
+        for i = 1, slotsToFill do
+            if not CFG.RUNNING then break end
+            local slot = emptySlots[i]
+            if slot then
+                log("🥚 Hatching at (" .. slot.x .. "," .. slot.y .. ")...")
+                pcall(function()
+                    HiveCellEgg:InvokeServer(slot.x, slot.y, "Basic", 1, false)
+                end)
+                task.wait(1.5)
+            end
         end
 
-        -- Hatch egg
-        local oldBees = getBees()
-        log("🥚 Hatching at (" .. x .. "," .. y .. ")...")
-        pcall(function()
-            HiveCellEgg:InvokeServer(x, y, "Basic", 1, false)
-        end)
-        task.wait(2)
-
+        -- Verify
         local newBees = getBees()
-        if newBees > oldBees then
-            log("🐝 Bee #" .. newBees .. " hatched! [" .. newBees .. "/" .. CFG.TARGET_BEES .. "]")
-            failCount = 0
-        else
-            failCount = failCount + 1
-            log("⚠️ Hatch failed (" .. failCount .. "), buying egg & retrying...")
-            -- Mua lại egg
-            buyEggAtShop()
-            tpToHive()
-            task.wait(1)
+        log("🐝 Bees: " .. newBees .. "/" .. CFG.TARGET_BEES)
 
-            if failCount > 5 then
-                log("🔄 Too many fails, trying different approach...")
-                -- Thử mua egg rồi hatch lại
-                pcall(function()
-                    HiveCellEgg:InvokeServer(x, y, "Basic", 1, false)
-                end)
-                task.wait(2)
-                if getBees() > oldBees then
-                    log("🐝 Finally hatched!")
-                    failCount = 0
-                end
-            end
+        if newBees == bees then
+            log("⚠️ No new bees hatched, retrying...")
+            task.wait(3)
         end
         task.wait(1)
     end
@@ -401,123 +380,6 @@ local function questLoop()
     end
 end
 
--- ═══════════════ UI ═══════════════
-local function buildUI()
-    if plr.PlayerGui:FindFirstChild("KaitunUI") then plr.PlayerGui.KaitunUI:Destroy() end
-    local gui=Instance.new("ScreenGui"); gui.Name="KaitunUI"; gui.ResetOnSpawn=false; gui.Parent=plr.PlayerGui
-
-    local main=Instance.new("Frame",gui)
-    main.Size=UDim2.new(0,280,0,360) main.Position=UDim2.new(0,16,0.5,-180)
-    main.BackgroundColor3=Color3.fromRGB(16,16,26) main.BorderSizePixel=0
-    main.Active=true main.Draggable=true
-    Instance.new("UICorner",main).CornerRadius=UDim.new(0,10)
-    Instance.new("UIStroke",main).Color=Color3.fromRGB(255,180,50)
-
-    local t=Instance.new("TextLabel",main)
-    t.Size=UDim2.new(1,0,0,32) t.BackgroundColor3=Color3.fromRGB(255,180,50)
-    t.Text="🐝 Kaitun v4.0 [AUTO]" t.TextColor3=Color3.fromRGB(16,16,26)
-    t.Font=Enum.Font.GothamBold t.TextSize=14 t.BorderSizePixel=0
-    Instance.new("UICorner",t).CornerRadius=UDim.new(0,10)
-
-    local scroll=Instance.new("ScrollingFrame",main)
-    scroll.Size=UDim2.new(1,-10,1,-38) scroll.Position=UDim2.new(0,5,0,36)
-    scroll.BackgroundTransparency=1 scroll.ScrollBarThickness=3
-    scroll.ScrollBarImageColor3=Color3.fromRGB(255,180,50)
-    scroll.CanvasSize=UDim2.new(0,0,0,500) scroll.BorderSizePixel=0
-    Instance.new("UIListLayout",scroll).Padding=UDim.new(0,4)
-
-    -- Minimize
-    local mb=Instance.new("TextButton",main)
-    mb.Size=UDim2.new(0,24,0,24) mb.Position=UDim2.new(1,-28,0,4)
-    mb.BackgroundTransparency=1 mb.Text="—" mb.TextColor3=Color3.fromRGB(16,16,26)
-    mb.Font=Enum.Font.GothamBold mb.TextSize=15 mb.ZIndex=10
-    local mini=false
-    mb.MouseButton1Click:Connect(function()
-        mini=not mini; scroll.Visible=not mini
-        main.Size=mini and UDim2.new(0,280,0,32) or UDim2.new(0,280,0,360)
-        mb.Text=mini and "+" or "—"
-    end)
-
-    -- Status
-    local stat=Instance.new("TextLabel",scroll)
-    stat.Size=UDim2.new(1,-4,0,56) stat.BackgroundColor3=Color3.fromRGB(26,26,40)
-    stat.TextColor3=Color3.fromRGB(160,255,160) stat.Font=Enum.Font.GothamMedium
-    stat.TextSize=11 stat.TextWrapped=true stat.Text="Loading..."
-    Instance.new("UICorner",stat).CornerRadius=UDim.new(0,6)
-
-    -- Log box
-    local logBox=Instance.new("TextLabel",scroll)
-    logBox.Name="LogBox" logBox.Size=UDim2.new(1,-4,0,120)
-    logBox.BackgroundColor3=Color3.fromRGB(22,22,34) logBox.TextColor3=Color3.fromRGB(200,200,200)
-    logBox.Font=Enum.Font.Code logBox.TextSize=10 logBox.TextWrapped=true
-    logBox.TextYAlignment=Enum.TextYAlignment.Top logBox.Text="[Log]"
-    Instance.new("UICorner",logBox).CornerRadius=UDim.new(0,6)
-    Instance.new("UIPadding",logBox).PaddingLeft=UDim.new(0,4)
-
-    -- Field selector
-    local ff=Instance.new("Frame",scroll)
-    ff.Size=UDim2.new(1,-4,0,44) ff.BackgroundColor3=Color3.fromRGB(30,30,46) ff.BorderSizePixel=0
-    Instance.new("UICorner",ff).CornerRadius=UDim.new(0,6)
-    local fl=Instance.new("TextLabel",ff)
-    fl.Size=UDim2.new(1,0,0,16) fl.BackgroundTransparency=1 fl.Text="  🌻 Farm Field"
-    fl.TextColor3=Color3.fromRGB(180,180,180) fl.Font=Enum.Font.GothamMedium fl.TextSize=10
-    fl.TextXAlignment=Enum.TextXAlignment.Left
-    local fidx=1
-    local fv=Instance.new("TextButton",ff)
-    fv.Size=UDim2.new(1,-10,0,22) fv.Position=UDim2.new(0,5,0,18)
-    fv.BackgroundColor3=Color3.fromRGB(45,45,65) fv.TextColor3=Color3.fromRGB(255,220,100)
-    fv.Font=Enum.Font.GothamMedium fv.TextSize=11 fv.Text="◀ "..FIELDS[1].." ▶"
-    fv.BorderSizePixel=0
-    Instance.new("UICorner",fv).CornerRadius=UDim.new(0,4)
-    fv.MouseButton1Click:Connect(function()
-        fidx=fidx%#FIELDS+1; fv.Text="◀ "..FIELDS[fidx].." ▶"; CFG.FIELD=FIELDS[fidx]
-    end)
-
-    -- Buttons
-    local function btn(txt,cb)
-        local b=Instance.new("TextButton",scroll)
-        b.Size=UDim2.new(1,-4,0,28) b.BackgroundColor3=Color3.fromRGB(50,50,70)
-        b.TextColor3=Color3.new(1,1,1) b.Font=Enum.Font.GothamMedium b.TextSize=12
-        b.Text=txt b.BorderSizePixel=0
-        Instance.new("UICorner",b).CornerRadius=UDim.new(0,6)
-        b.MouseButton1Click:Connect(cb)
-    end
-
-    btn("🏠 TP to Hive",function()
-        local h=getHive()
-        if h and h:FindFirstChild("SpawnPos") then tp(h.SpawnPos.Value+Vector3.new(0,5,0)) end
-    end)
-    btn("🌻 TP to Field",function()
-        local fp=getField(CFG.FIELD)
-        if fp then tp(fp.CFrame*CFrame.new(0,8,0)) end
-    end)
-    btn("📜 Quest All NPCs Now",function() task.spawn(questAllNPCs) end)
-    btn("🎟️ Redeem Codes",function() task.spawn(redeemCodes) end)
-    btn("🛑 Stop All",function() CFG.RUNNING=false; log("⛔ Stopped!") end)
-
-    -- Update loops
-    local logLines = {}
-    local origLog = log
-    log = function(msg) -- Override log to also write to UI
-        origLog(msg)
-        table.insert(logLines, os.date("%H:%M:%S") .. " " .. msg)
-        if #logLines > 12 then table.remove(logLines, 1) end
-        pcall(function() logBox.Text = table.concat(logLines, "\n") end)
-    end
-
-    task.spawn(function()
-        while CFG.RUNNING and task.wait(1) do
-            pcall(function()
-                stat.Text = ("🍯 %s | 🐝 %d/%d\n📦 %s/%s (%d%%)\n🌻 %s | ⏱️ Running"):format(
-                    fmt(getHoney()), getBees(), CFG.TARGET_BEES,
-                    fmt(getPollen()), fmt(getCap()),
-                    math.floor(getPollen()/math.max(getCap(),1)*100),
-                    CFG.FIELD)
-            end)
-        end
-    end)
-end
-
 -- ═══════════════ MAIN - ALL AUTO ═══════════════
 log("═══ Kaitun BSS v4.0 ═══")
 log("⏳ Waiting for game...")
@@ -534,27 +396,17 @@ pcall(function() for _,v in pairs(WS["Invisible Walls"]:GetChildren()) do v:Dest
 pcall(function() for _,v in pairs(WS.Territories:GetChildren()) do v:Destroy() end end)
 log("🧱 Gates removed")
 
--- Build UI first
-buildUI()
-
--- ═══ AUTO SEQUENCE (all enabled) ═══
--- Step 0: Claim hive
+-- ═══ AUTO SEQUENCE ═══
 claimHive()
 
--- Step 1: Redeem all codes
 task.spawn(function() pcall(redeemCodes) end)
 task.wait(2)
 
--- Step 2: Buy accessories
 pcall(buyAccessories)
-
--- Step 3: Hatch eggs to target
 pcall(hatchAllEggs)
-
--- Step 4: Quest all NPCs
 pcall(questAllNPCs)
 
--- Step 5: Start continuous farm loop + periodic quest loop
 log("🌻 Starting farm loop...")
 task.spawn(function() pcall(questLoop) end)
-farmLoop() -- Main thread = farm
+farmLoop()
+
