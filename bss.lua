@@ -199,8 +199,67 @@ local function buyAccessories()
 end
 
 -- ═══════════════ STEP 3: HATCH EGGS ═══════════════
+local EGG_SHOP_POS = CFrame.new(-139.14, 8, 243.48) -- Basic Egg Shop
+
+local function buyEggAtShop()
+    -- TP đến Basic Egg Shop
+    log("🏪 TP to Basic Egg Shop...")
+    tp(EGG_SHOP_POS)
+    task.wait(2)
+
+    -- Thử mua qua nhiều cách
+    local bought = false
+
+    -- Cách 1: ItemPackageEvent trực tiếp
+    pcall(function()
+        local r = ItemPkg:InvokeServer("Purchase", {Category="Egg", Type="BasicEgg"})
+        if r then bought = true end
+    end)
+    task.wait(0.5)
+
+    -- Cách 2: ClientCall (giống shop UI)
+    if not bought then
+        pcall(function()
+            local evts = require(RS.Events)
+            local r = evts.ClientCall("ItemPackageEvent", "Purchase", {Category="Egg", Type="BasicEgg"})
+            if r then bought = true end
+        end)
+        task.wait(0.5)
+    end
+
+    -- Cách 3: Mua nhiều lần cho chắc
+    if not bought then
+        for i = 1, 3 do
+            pcall(function()
+                ItemPkg:InvokeServer("Purchase", {Category="Egg", Type="BasicEgg", Amount=1})
+            end)
+            task.wait(0.3)
+        end
+    end
+
+    -- Check đã có egg chưa
+    local eggs = getEggs("BasicEgg")
+    if eggs > 0 then
+        log("✅ Got " .. eggs .. " BasicEgg(s)")
+        return true
+    end
+
+    log("⚠️ Egg purchase may have failed, trying hatch anyway...")
+    return false
+end
+
+local function tpToHive()
+    local h = getHive()
+    if h and h:FindFirstChild("SpawnPos") then
+        tp(h.SpawnPos.Value + Vector3.new(0, 5, 0))
+        task.wait(1.5)
+    end
+end
+
 local function hatchAllEggs()
     log("🥚 Hatching to " .. CFG.TARGET_BEES .. " bees...")
+    local failCount = 0
+
     while CFG.RUNNING do
         local bees = getBees()
         if bees >= CFG.TARGET_BEES then
@@ -208,38 +267,72 @@ local function hatchAllEggs()
             break
         end
 
-        local x,y = getEmptySlot()
+        -- Ensure at hive
+        tpToHive()
+
+        local x, y = getEmptySlot()
         if not x then
-            -- Buy slot
-            purchase("HiveSlot","HiveSlot",1)
+            -- Mua Hive Slot
             log("🔓 Buying hive slot...")
-            task.wait(1)
-            x,y = getEmptySlot()
+            purchase("HiveSlot", "HiveSlot", 1)
+            task.wait(1.5)
+            x, y = getEmptySlot()
             if not x then
-                log("⏳ Need honey for slot...")
-                task.wait(5)
+                log("⏳ Need more honey for slot... waiting")
+                task.wait(8)
+                failCount = failCount + 1
+                if failCount > 10 then
+                    log("❌ Can't get slots, moving on...")
+                    break
+                end
+                continue
             end
         end
 
-        if x and y then
-            -- Check & buy egg
-            if getEggs("BasicEgg") <= 0 then
-                purchase("Egg","BasicEgg",1)
-                task.wait(0.5)
-            end
-            -- Hatch
-            local old = getBees()
-            pcall(function() HiveCellEgg:InvokeServer(x, y, "Basic", 1, false) end)
-            task.wait(1.5)
-            local new = getBees()
-            if new > old then
-                log("🐝 Hatched! (" .. x .. "," .. y .. ") [" .. new .. "/" .. CFG.TARGET_BEES .. "]")
-            else
-                log("⚠️ Retry hatch...")
-                task.wait(1)
+        -- Check egg inventory
+        local eggs = getEggs("BasicEgg")
+        if eggs <= 0 then
+            -- TP đến shop mua egg
+            buyEggAtShop()
+            -- TP về hive
+            tpToHive()
+            task.wait(1)
+        end
+
+        -- Hatch egg
+        local oldBees = getBees()
+        log("🥚 Hatching at (" .. x .. "," .. y .. ")...")
+        pcall(function()
+            HiveCellEgg:InvokeServer(x, y, "Basic", 1, false)
+        end)
+        task.wait(2)
+
+        local newBees = getBees()
+        if newBees > oldBees then
+            log("🐝 Bee #" .. newBees .. " hatched! [" .. newBees .. "/" .. CFG.TARGET_BEES .. "]")
+            failCount = 0
+        else
+            failCount = failCount + 1
+            log("⚠️ Hatch failed (" .. failCount .. "), buying egg & retrying...")
+            -- Mua lại egg
+            buyEggAtShop()
+            tpToHive()
+            task.wait(1)
+
+            if failCount > 5 then
+                log("🔄 Too many fails, trying different approach...")
+                -- Thử mua egg rồi hatch lại
+                pcall(function()
+                    HiveCellEgg:InvokeServer(x, y, "Basic", 1, false)
+                end)
+                task.wait(2)
+                if getBees() > oldBees then
+                    log("🐝 Finally hatched!")
+                    failCount = 0
+                end
             end
         end
-        task.wait(0.5)
+        task.wait(1)
     end
 end
 
