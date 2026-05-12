@@ -1,679 +1,347 @@
---[[
-    ╔══════════════════════════════════════════════════════════╗
-    ║              BSS KAITUN - Full Auto Script               ║
-    ║  Claim Hive | Hatch Egg | Buy Egg | Buy Accessories     ║
-    ║  Auto Redeem Codes | Quest Black Bear & Mother Bear     ║
-    ║  Farm to 25 Bees | Tween Movement | Smart Logic         ║
-    ╚══════════════════════════════════════════════════════════╝
-]]
+-- BSS Kaitun v3 | Remote Spy Verified
+-- Executor: Synapse/Fluxus/Delta/Arceus/Wave
 
--- ═══════════════════════════════════════════════════════════
--- SERVICES
--- ═══════════════════════════════════════════════════════════
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
+local RS = game:GetService("ReplicatedStorage")
+local TS = game:GetService("TweenService")
+local plr = game:GetService("Players").LocalPlayer
 
--- ═══════════════════════════════════════════════════════════
--- PLAYER REFERENCES
--- ═══════════════════════════════════════════════════════════
-local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoid = character:WaitForChild("Humanoid")
-local rootPart = character:WaitForChild("HumanoidRootPart")
+local TARGET_BEES = 25
+local TWEEN_SPEED = 130
+local FARM_TIME = 30
+local running = true
 
--- Auto-update on respawn
-player.CharacterAdded:Connect(function(char)
-    character = char
-    humanoid = char:WaitForChild("Humanoid")
-    rootPart = char:WaitForChild("HumanoidRootPart")
-    task.wait(1)
-end)
+local E = RS:WaitForChild("Events", 10)
+local char, hrp
 
--- ═══════════════════════════════════════════════════════════
--- REMOTE EVENTS & FUNCTIONS
--- ═══════════════════════════════════════════════════════════
-local Events = ReplicatedStorage:WaitForChild("Events")
+local function refresh()
+    char = plr.Character or plr.CharacterAdded:Wait()
+    hrp = char:WaitForChild("HumanoidRootPart")
+end
+refresh()
+plr.CharacterAdded:Connect(refresh)
 
-local Remotes = {
-    ClaimHive = Events:WaitForChild("ClaimHive"),
-    PlayerHiveCommand = Events:WaitForChild("PlayerHiveCommand"),
-    PlayerPurchase = Events:WaitForChild("PlayerPurchase"),
-    GiveQuest = Events:WaitForChild("GiveQuest"),
-    CompleteQuest = Events:WaitForChild("CompleteQuest"),
-    PromoCodeEvent = Events:WaitForChild("PromoCodeEvent"),
-    SelectNPCOption = Events:WaitForChild("SelectNPCOption"),
-    PlayerActivesCommand = Events:WaitForChild("PlayerActivesCommand"),
-    ToolCollect = Events:WaitForChild("ToolCollect"),
-    ConstructHiveCellFromEgg = Events:WaitForChild("ConstructHiveCellFromEgg"),
-    RetrievePlayerStats = Events:WaitForChild("RetrievePlayerStats"),
-}
+local function log(m) print("[Kaitun] " .. m) end
 
--- ═══════════════════════════════════════════════════════════
--- CONFIGURATION
--- ═══════════════════════════════════════════════════════════
-local Config = {
-    TargetBees = 25,
-    TweenSpeed = 150,          -- studs per second
-    ActionDelay = 1.5,         -- delay giữa các action
-    FarmFieldTime = 30,        -- thời gian farm mỗi field (giây)
-    ConvertDelay = 5,          -- thời gian chờ convert honey
-    MaxRetries = 3,            -- số lần thử lại tối đa
-    AntiAFK = true,            -- bật anti-afk
-}
-
--- ═══════════════════════════════════════════════════════════
--- VỊ TRÍ CHÍNH XÁC (từ game data)
--- ═══════════════════════════════════════════════════════════
-local Locations = {
-    -- NPCs
-    BlackBear = CFrame.new(-256.08, 3.81, 296.93),
-    MotherBear = CFrame.new(-179.15, 3.95, 87.46),
-
-    -- Shops
-    BasicEggShop = CFrame.new(-145.86, 12, 230.83),
-    BasicShop = CFrame.new(95.67, 11, 318.15),
-
-    -- Hive
-    HiveArea = CFrame.new(4.02, 6, 345.29),
-
-    -- Fields (center positions, Y+3 để đứng trên)
-    SunflowerField = CFrame.new(-208.95, 4.5, 176.58),
-    MushroomField = CFrame.new(-89.70, 4.95, 111.73),
-    DandelionField = CFrame.new(-30.72, 4.5, 220.62),
-    BlueFlowerField = CFrame.new(146.87, 5.13, 99.31),
-    CloverField = CFrame.new(157.55, 34.6, 196.35),
-    StrawberryField = CFrame.new(-178.17, 21.13, -9.85),
-}
-
--- ═══════════════════════════════════════════════════════════
--- PROMO CODES
--- ═══════════════════════════════════════════════════════════
-local PromoCodes = {
-    -- Verified working codes (BSS)
-    "Wax", "Teespring", "Bopmaster", "Cog", "Connoisseur",
-    "Roof", "Nectar", "Troggles", "1MLikes", "PlushFriday",
-    "Millie", "Jumpstart", "WordFactory", "Cubly", "Mocito",
-    "2MFavorites", "Gumaden", "Discord100k", "Sure",
-    "SecretProfileCode", "ClubConverters", "RebootFriday",
-    "FuzzyFriday", "Tornado", "Leftovers", "Luther",
-    "Dysentery", "Crawlers", "Boosted", "Wink",
-    "FourYearFiesta", "ClubBean", "Gummy", "Marshmallow",
-    "500mil", "1BVisits", "2Billion", "3Billion",
-    "ThnxCyasToyBox", "Afternoon", "Banned",
-}
-
--- ═══════════════════════════════════════════════════════════
--- STATE MACHINE
--- ═══════════════════════════════════════════════════════════
-local State = {
-    Running = false,
-    CurrentTask = "Idle",
-    BeeCount = 0,
-    HiveClaimed = false,
-    CodesRedeemed = false,
-    AccessoriesBought = false,
-    QuestsAccepted = false,
-}
-
--- ═══════════════════════════════════════════════════════════
--- UTILITY FUNCTIONS
--- ═══════════════════════════════════════════════════════════
-
--- Notification
-local function notify(text, duration)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "🐝 Kaitun",
-            Text = text,
-            Duration = duration or 3,
-        })
-    end)
-    print("[Kaitun] " .. text)
+-- ═══ TWEEN ═══
+local function tween(cf)
+    if not hrp or not hrp.Parent then refresh() end
+    local d = (hrp.Position - cf.Position).Magnitude
+    if d < 4 then hrp.CFrame = cf return end
+    local tw = TS:Create(hrp, TweenInfo.new(d / TWEEN_SPEED, Enum.EasingStyle.Linear), {CFrame = cf})
+    tw:Play()
+    tw.Completed:Wait()
+    task.wait(0.2)
 end
 
--- Safe character check
-local function ensureCharacter()
-    if not character or not character.Parent then
-        character = player.Character or player.CharacterAdded:Wait()
-    end
-    if not humanoid or not humanoid.Parent then
-        humanoid = character:WaitForChild("Humanoid")
-    end
-    if not rootPart or not rootPart.Parent then
-        rootPart = character:WaitForChild("HumanoidRootPart")
-    end
-    return rootPart ~= nil and rootPart.Parent ~= nil
+-- ═══ REMOTES (verified spy) ═══
+-- ItemPackageEvent: InvokeServer("Purchase", {Category=..., Type=..., Amount=...})
+-- ClaimHive: FireServer(hiveID)
+-- PromoCodeEvent: FireServer(code)
+-- GiveQuest: FireServer(questName)
+-- SelectNPCOption: FireServer(optionString)
+-- ConstructHiveCellFromEgg: InvokeServer(hiveID, cellSlot, eggType, qty, useRJ)
+-- PlayerActivesCommand: FireServer(...)
+-- CompleteQuest: FireServer(...)
+
+local function fire(name, ...)
+    local r = E:FindFirstChild(name)
+    if not r then log("MISS: " .. name) return false end
+    local ok, err = pcall(r.FireServer, r, ...)
+    if not ok then log("ERR " .. name .. ": " .. tostring(err)) end
+    return ok
 end
 
--- Tween di chuyển mượt
-local function tweenTo(targetCFrame, callback)
-    if not ensureCharacter() then
-        task.wait(2)
-        if not ensureCharacter() then return false end
-    end
-
-    local startPos = rootPart.Position
-    local endPos = targetCFrame.Position
-    local distance = (endPos - startPos).Magnitude
-
-    -- Nếu quá gần thì không cần tween
-    if distance < 5 then
-        rootPart.CFrame = targetCFrame
-        if callback then callback() end
-        return true
-    end
-
-    -- Tính thời gian dựa trên tốc độ
-    local tweenTime = math.clamp(distance / Config.TweenSpeed, 0.5, 15)
-
-    -- Tạo tween info
-    local tweenInfo = TweenInfo.new(
-        tweenTime,
-        Enum.EasingStyle.Linear,
-        Enum.EasingDirection.InOut,
-        0, false, 0
-    )
-
-    -- Tween CFrame
-    local tween = TweenService:Create(rootPart, tweenInfo, {
-        CFrame = targetCFrame
-    })
-
-    tween:Play()
-    tween.Completed:Wait()
-
-    task.wait(0.3)
-    if callback then callback() end
-    return true
+local function invoke(name, ...)
+    local r = E:FindFirstChild(name)
+    if not r then log("MISS: " .. name) return nil end
+    local ok, res = pcall(r.InvokeServer, r, ...)
+    if not ok then log("ERR " .. name .. ": " .. tostring(res)) return nil end
+    return res
 end
 
--- Tween với waypoints (tránh bị kẹt)
-local function tweenPath(waypoints)
-    for i, wp in ipairs(waypoints) do
-        if not State.Running then return false end
-        local cf = typeof(wp) == "CFrame" and wp or CFrame.new(wp)
-        tweenTo(cf)
-        task.wait(0.2)
-    end
-    return true
-end
-
--- Safe remote fire
-local function fireRemote(remote, ...)
-    local success, err = pcall(function(...)
-        if remote:IsA("RemoteEvent") then
-            remote:FireServer(...)
-        elseif remote:IsA("RemoteFunction") then
-            return remote:InvokeServer(...)
-        end
-    end, ...)
-    if not success then
-        warn("[Kaitun] Remote error: " .. tostring(err))
-    end
-    return success
-end
-
--- Invoke remote function
-local function invokeRemote(remote, ...)
-    local success, result = pcall(function(...)
-        return remote:InvokeServer(...)
-    end, ...)
-    if success then
-        return result
-    else
-        warn("[Kaitun] Invoke error: " .. tostring(result))
-        return nil
+-- ═══ HIVE ═══
+local function getMyHive()
+    for _, h in pairs(workspace.Honeycombs:GetChildren()) do
+        if h:IsA("Model") and h:FindFirstChild("Owner") and h.Owner.Value == plr then return h end
     end
 end
 
--- Đếm bees hiện tại
 local function countBees()
-    local myHive = nil
-    for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-        if hive:IsA("Model") then
-            local owner = hive:FindFirstChild("Owner")
-            if owner and owner.Value == player then
-                myHive = hive
-                break
-            end
-        end
+    local h = getMyHive()
+    if not h or not h:FindFirstChild("Cells") then return 0 end
+    local n = 0
+    for _, c in pairs(h.Cells:GetChildren()) do
+        if c:IsA("Model") and #c:GetChildren() > 1 then n = n + 1 end
     end
-
-    if not myHive then return 0 end
-
-    local cells = myHive:FindFirstChild("Cells")
-    if not cells then return 0 end
-
-    local count = 0
-    for _, cell in pairs(cells:GetChildren()) do
-        if cell:IsA("Model") then
-            -- Kiểm tra cell có bee không
-            local beeType = cell:FindFirstChild("BeeType") or cell:FindFirstChild("Type")
-            if beeType then
-                count = count + 1
-            else
-                -- Đếm cell có children (occupied)
-                if #cell:GetChildren() > 2 then
-                    count = count + 1
-                end
-            end
-        end
-    end
-
-    State.BeeCount = count
-    return count
+    return n
 end
 
--- ═══════════════════════════════════════════════════════════
--- CORE FUNCTIONS
--- ═══════════════════════════════════════════════════════════
-
--- ▶ 1. CLAIM HIVE
-local function claimHive()
-    State.CurrentTask = "Claiming Hive"
-    notify("Đang tìm và claim hive...")
-
-    -- Check đã có hive chưa
-    for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-        if hive:IsA("Model") then
-            local owner = hive:FindFirstChild("Owner")
-            if owner and owner.Value == player then
-                State.HiveClaimed = true
-                notify("✅ Đã có hive!")
-                return true
-            end
+local function getEmptySlot()
+    local h = getMyHive()
+    if not h or not h:FindFirstChild("Cells") then return nil end
+    for _, c in pairs(h.Cells:GetChildren()) do
+        if c:IsA("Model") and #c:GetChildren() <= 1 then
+            local num = tonumber(c.Name:match("%d+"))
+            if num then return num end
         end
     end
+    return nil
+end
 
-    -- Tween đến khu vực hive
-    tweenTo(Locations.HiveArea)
+-- ═══ QUEST CHECK ═══
+-- Lấy quest hiện tại của player
+local function getPlayerQuests()
+    local stats = invoke("RetrievePlayerStatsSummary")
+    if stats and typeof(stats) == "table" then
+        return stats.Quests or stats.quests
+    end
+    return nil
+end
+
+-- ═══ 1. CLAIM HIVE ═══
+local function claimHive()
+    log(">> Claim Hive")
+    if getMyHive() then log("OK: da co hive") return true end
+    tween(CFrame.new(4, 7, 345))
     task.wait(1)
-
-    -- Tìm hive trống và claim
-    for _, hive in pairs(Workspace.Honeycombs:GetChildren()) do
-        if hive:IsA("Model") then
-            local owner = hive:FindFirstChild("Owner")
-            local hiveID = hive:FindFirstChild("HiveID")
-            if owner and owner.Value == nil and hiveID then
-                Remotes.ClaimHive:FireServer(hiveID.Value)
+    for _, h in pairs(workspace.Honeycombs:GetChildren()) do
+        if h:IsA("Model") and h:FindFirstChild("Owner") and h.Owner.Value == nil then
+            local id = h:FindFirstChild("HiveID")
+            if id then
+                fire("ClaimHive", id.Value)
                 task.wait(2)
-
-                -- Verify
-                if owner.Value == player then
-                    State.HiveClaimed = true
-                    notify("✅ Claim Hive " .. hiveID.Value .. " thành công!")
+                if h.Owner.Value == plr then
+                    log("OK: claimed hive " .. id.Value)
                     return true
                 end
             end
         end
     end
-
-    notify("⚠️ Không tìm thấy hive trống, thử lại...")
+    log("FAIL: claim hive")
     return false
 end
 
--- ▶ 2. REDEEM ALL CODES
-local function redeemAllCodes()
-    State.CurrentTask = "Redeeming Codes"
-    notify("Đang nhập " .. #PromoCodes .. " codes...")
-
-    for i, code in ipairs(PromoCodes) do
-        if not State.Running then return end
-        Remotes.PromoCodeEvent:FireServer(code)
-        task.wait(0.8)
-
-        if i % 10 == 0 then
-            notify("Codes: " .. i .. "/" .. #PromoCodes)
-        end
-    end
-
-    State.CodesRedeemed = true
-    notify("✅ Đã nhập xong " .. #PromoCodes .. " codes!")
-end
-
--- ▶ 3. BUY ACCESSORIES
-local function buyAccessories()
-    State.CurrentTask = "Buying Accessories"
-    notify("Đang mua accessories từ Basic Shop...")
-
-    -- Tween đến Basic Shop
-    tweenTo(Locations.BasicShop)
-    task.wait(1.5)
-
-    -- Danh sách items cần mua (theo thứ tự ưu tiên)
-    local shopItems = {
-        -- Tools
-        {name = "Rake", category = "Tool"},
-        {name = "Scooper", category = "Tool"},
-        {name = "Magnet", category = "Tool"},
-        {name = "Clippers", category = "Tool"},
-        {name = "Vacuum", category = "Tool"},
-        -- Bags
-        {name = "Pouch", category = "Bag"},
-        {name = "Jar", category = "Container"},
-        {name = "Canister", category = "Container"},
-        {name = "Backpack", category = "Container"},
-        -- Accessories
-        {name = "Helmet", category = "Accessory"},
-        {name = "Belt Pocket", category = "Accessory"},
-        {name = "Basic Boots", category = "Accessory"},
+-- ═══ 2. CODES ═══
+local function redeemCodes()
+    log(">> Codes")
+    local codes = {
+        "Wax","Teespring","Bopmaster","Cog","Connoisseur","Roof","Nectar",
+        "Troggles","1MLikes","PlushFriday","Millie","Jumpstart","WordFactory",
+        "Cubly","Mocito","2MFavorites","Gumaden","Discord100k","Sure",
+        "SecretProfileCode","ClubConverters","RebootFriday","FuzzyFriday",
+        "Tornado","Leftovers","Luther","Crawlers","Boosted","Wink",
+        "ClubBean","Gummy","500mil","1BVisits","2Billion","3Billion",
     }
-
-    for _, item in ipairs(shopItems) do
-        if not State.Running then return end
-        Remotes.PlayerPurchase:FireServer(item.name, 1)
+    for _, c in ipairs(codes) do
+        if not running then return end
+        fire("PromoCodeEvent", c)
         task.wait(0.6)
     end
-
-    State.AccessoriesBought = true
-    notify("✅ Đã mua xong accessories!")
+    log("OK: codes done")
 end
 
--- ▶ 4. BUY BASIC EGG
-local function buyBasicEgg(amount)
-    amount = amount or 1
-    State.CurrentTask = "Buying Basic Egg"
-
-    -- Tween đến Egg Shop
-    tweenTo(Locations.BasicEggShop)
+-- ═══ 3. BUY ACCESSORIES ═══
+-- Spy: ItemPackageEvent:InvokeServer("Purchase", {Category="Accessory", Type="Jar"})
+local function buyAccessories()
+    log(">> Buy Accessories")
+    tween(CFrame.new(96, 12, 318))
     task.wait(1)
-
-    for i = 1, amount do
-        if not State.Running then return false end
-        Remotes.PlayerPurchase:FireServer("BasicEgg", 1)
-        task.wait(0.8)
+    local items = {
+        {Cat = "Collector", Type = "Rake"},
+        {Cat = "Collector", Type = "Scooper"},
+        {Cat = "Collector", Type = "Magnet"},
+        {Cat = "Collector", Type = "Clippers"},
+        {Cat = "Collector", Type = "Vacuum"},
+        {Cat = "Accessory", Type = "Pouch"},
+        {Cat = "Accessory", Type = "Jar"},
+        {Cat = "Accessory", Type = "Canister"},
+        {Cat = "Accessory", Type = "Backpack"},
+        {Cat = "Accessory", Type = "Helmet"},
+        {Cat = "Accessory", Type = "Belt Pocket"},
+        {Cat = "Accessory", Type = "Basic Boots"},
+    }
+    for _, item in ipairs(items) do
+        if not running then return end
+        local res = invoke("ItemPackageEvent", "Purchase", {Category = item.Cat, Type = item.Type})
+        log("Buy " .. item.Type .. ": " .. tostring(res ~= nil))
+        task.wait(0.5)
     end
-
-    notify("🥚 Đã mua " .. amount .. " Basic Egg!")
-    return true
+    log("OK: accessories done")
 end
 
--- ▶ 5. HATCH EGG
+-- ═══ 4. BUY EGG ═══
+-- Spy: ItemPackageEvent:InvokeServer("Purchase", {Type="Basic", Category="Eggs", Amount=1})
+local function buyEgg()
+    log(">> Buy Egg")
+    tween(CFrame.new(-146, 13, 231))
+    task.wait(1)
+    local res = invoke("ItemPackageEvent", "Purchase", {Type = "Basic", Category = "Eggs", Amount = 1})
+    log("Buy egg: " .. tostring(res ~= nil))
+    task.wait(0.5)
+end
+
+-- ═══ 5. HATCH EGG ═══
+-- Spy: ConstructHiveCellFromEgg:InvokeServer(hiveID, cellSlot, "Basic", 1, false)
 local function hatchEgg()
-    State.CurrentTask = "Hatching Egg"
-
-    -- Cần ở gần hive để hatch
-    tweenTo(Locations.HiveArea)
+    log(">> Hatch Egg")
+    tween(CFrame.new(4, 7, 345))
     task.wait(1)
-
-    local result = invokeRemote(Remotes.ConstructHiveCellFromEgg, "BasicEgg")
-    task.wait(1.5)
-
-    if result then
-        notify("🐝 Hatch egg thành công!")
-        return true
-    else
-        notify("⚠️ Hatch egg thất bại")
-        return false
-    end
+    local h = getMyHive()
+    if not h then log("FAIL: no hive") return false end
+    local hiveID = h:FindFirstChild("HiveID") and h.HiveID.Value
+    local slot = getEmptySlot()
+    if not slot then log("FAIL: no empty slot") return false end
+    log("Hatch: hive=" .. tostring(hiveID) .. " slot=" .. tostring(slot))
+    local res = invoke("ConstructHiveCellFromEgg", hiveID, slot, "Basic", 1, false)
+    task.wait(1)
+    log("Hatch result: " .. tostring(res))
+    return res ~= nil
 end
 
--- ▶ 6. TALK TO NPC (với tween)
-local function talkToNPC(npcName)
-    State.CurrentTask = "Talking to " .. npcName
+-- ═══ 6. QUEST ═══
+-- Spy: GiveQuest:FireServer("Sunflower Start")
+-- Black Bear quest names (thứ tự đầu game)
+local BB_QUESTS = {
+    "Sunflower Start", "Making Honey", "Mushroom Mission",
+    "Dandelion Disaster", "Blue Flower Bonanza", "Clover Clearing",
+    "Spider Scare", "Strawberry Shortcake", "Bamboo Boogie",
+    "Pine Tree Pursuit", "Rose Rampage", "Cactus Craze",
+    "Mountain Madness", "Pumpkin Plan", "Stump Stomp",
+}
 
-    local targetCFrame
-    if npcName == "Black Bear" then
-        targetCFrame = Locations.BlackBear
-    elseif npcName == "Mother Bear" then
-        targetCFrame = Locations.MotherBear
-    else
-        return false
-    end
+local MB_QUESTS = {
+    "A Gifted Occasion", "Bee Cub", "Royal Jelly Jubilee",
+    "Honey Wreath", "Star Journey", "Petal Planter",
+}
 
-    -- Tween đến NPC
-    tweenTo(targetCFrame)
-    task.wait(1)
-
-    -- Interact với NPC
-    Remotes.PlayerActivesCommand:FireServer("npc talk", npcName)
+local function doQuest(npcName, questList)
+    log(">> Quest: " .. npcName)
+    local cf = npcName == "Black Bear" and CFrame.new(-256, 5, 297) or CFrame.new(-179, 5, 87)
+    tween(cf)
     task.wait(1.5)
 
-    return true
-end
-
--- ▶ 7. ACCEPT QUEST
-local function acceptQuest(npcName)
-    talkToNPC(npcName)
+    -- Nói chuyện NPC
+    fire("PlayerActivesCommand", "npc talk", npcName)
     task.wait(1)
 
-    -- Nhận quest
-    Remotes.GiveQuest:FireServer(npcName)
-    task.wait(1)
-
-    -- Chọn option đầu tiên (Yes/Accept)
-    Remotes.SelectNPCOption:FireServer(1)
+    -- Thử nhận quest theo danh sách
+    for _, qName in ipairs(questList) do
+        fire("GiveQuest", qName)
+        task.wait(0.3)
+    end
     task.wait(0.5)
 
-    notify("📋 Đã nhận quest từ " .. npcName)
-    return true
+    -- Chọn option
+    fire("SelectNPCOption", 1)
+    task.wait(0.5)
+    log("OK: quest " .. npcName)
 end
 
--- ▶ 8. FARM FIELD (thu thập pollen)
-local function farmField(fieldName, duration)
-    duration = duration or Config.FarmFieldTime
-    State.CurrentTask = "Farming " .. fieldName
-
-    local fieldPart = Workspace.FlowerZones:FindFirstChild(fieldName)
-    if not fieldPart then
-        notify("⚠️ Không tìm thấy " .. fieldName)
-        return false
+-- Check quest progress (dùng RetrievePlayerStatsSummary)
+local function checkQuests()
+    log(">> Check Quests")
+    local quests = getPlayerQuests()
+    if quests and typeof(quests) == "table" then
+        for k, v in pairs(quests) do
+            if typeof(v) == "table" then
+                local name = v.Name or v.name or k
+                local progress = v.Progress or v.progress or "?"
+                log("Quest: " .. tostring(name) .. " | Progress: " .. tostring(progress))
+            else
+                log("Quest: " .. tostring(k) .. " = " .. tostring(v))
+            end
+        end
+    else
+        log("No quest data (may need to accept quest first)")
     end
+end
 
-    local fieldPos = fieldPart.Position
-    local fieldSize = fieldPart.Size
-
-    -- Tween đến field
-    tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
-    task.wait(1)
-
-    notify("🌻 Farming " .. fieldName .. " (" .. duration .. "s)...")
-
-    -- Farm pattern: di chuyển zigzag trong field
-    local startTime = tick()
-    local rows = 5
-    local cols = 5
-
-    while (tick() - startTime) < duration and State.Running do
-        for row = 1, rows do
-            for col = 1, cols do
-                if (tick() - startTime) >= duration or not State.Running then
-                    return true
-                end
-
-                local xOffset = (col / cols - 0.5) * fieldSize.X * 0.8
-                local zOffset = (row / rows - 0.5) * fieldSize.Z * 0.8
-
-                -- Zigzag pattern
-                if row % 2 == 0 then
-                    xOffset = -xOffset
-                end
-
-                local targetPos = CFrame.new(
-                    fieldPos.X + xOffset,
-                    fieldPos.Y + 3,
-                    fieldPos.Z + zOffset
-                )
-
-                tweenTo(targetPos)
-                task.wait(0.3)
-
-                -- Simulate tool use (click)
-                Remotes.PlayerActivesCommand:FireServer("collect")
-                task.wait(0.2)
+-- ═══ 7. FARM FIELD ═══
+local function farmField(name)
+    log(">> Farm: " .. name)
+    local f = workspace.FlowerZones:FindFirstChild(name)
+    if not f then log("Field not found: " .. name) return end
+    local p = f.Position
+    local s = f.Size
+    tween(CFrame.new(p.X, p.Y + 3, p.Z))
+    task.wait(0.5)
+    local t0 = tick()
+    while (tick() - t0) < FARM_TIME and running do
+        for row = -2, 2 do
+            for col = -2, 2 do
+                if (tick() - t0) >= FARM_TIME or not running then return end
+                tween(CFrame.new(p.X + col * s.X * 0.18, p.Y + 3, p.Z + row * s.Z * 0.18))
+                task.wait(0.15)
             end
         end
     end
-
-    return true
 end
 
--- ▶ 9. CONVERT HONEY (về hive)
-local function convertHoney()
-    State.CurrentTask = "Converting Honey"
-    notify("🍯 Đang convert honey...")
-
-    tweenTo(Locations.HiveArea)
-    task.wait(Config.ConvertDelay)
-
-    -- Đợi convert xong
-    Remotes.PlayerHiveCommand:FireServer("
-
-
-
-")
-    task.wait(3)
-
-    notify("✅ Convert xong!")
+-- ═══ 8. CONVERT ═══
+local function convert()
+    log(">> Convert")
+    tween(CFrame.new(4, 7, 345))
+    task.wait(6)
 end
 
--- ▶ 10. FARM TO 25 BEES (logic hoàn chỉnh)
-local function farmTo25Bees()
-    State.CurrentTask = "Farming to 25 Bees"
-    local currentBees = countBees()
-    notify("🐝 Hiện có " .. currentBees .. "/" .. Config.TargetBees .. " bees")
+-- ═══ 9. FARM LOOP ═══
+local function farmLoop()
+    log(">> Farm loop -> " .. TARGET_BEES .. " bees")
+    local fields = {"Dandelion Field", "Sunflower Field", "Mushroom Field"}
+    local idx = 1
+    local bees = countBees()
+    log("Bees: " .. bees)
 
-    -- Fields dễ farm cho newbie
-    local farmFields = {"Dandelion Field", "Sunflower Field", "Mushroom Field"}
-    local fieldIndex = 1
-
-    while currentBees < Config.TargetBees and State.Running do
-        -- Bước 1: Farm pollen để kiếm honey
-        local currentField = farmFields[fieldIndex]
-        farmField(currentField, Config.FarmFieldTime)
-
-        -- Bước 2: Convert honey
-        convertHoney()
-        task.wait(2)
-
-        -- Bước 3: Mua egg
-        local bought = buyBasicEgg(1)
-        if not bought then
-            -- Không đủ tiền, farm thêm
-            notify("💰 Chưa đủ honey, farm thêm...")
-            farmField(currentField, Config.FarmFieldTime * 2)
-            convertHoney()
-            task.wait(2)
-            buyBasicEgg(1)
-        end
-
-        -- Bước 4: Hatch egg
-        task.wait(1)
+    while bees < TARGET_BEES and running do
+        farmField(fields[idx])
+        convert()
+        buyEgg()
+        task.wait(0.5)
         hatchEgg()
-        task.wait(1)
+        task.wait(0.5)
+        bees = countBees()
+        log("Bees: " .. bees .. "/" .. TARGET_BEES)
+        idx = (idx % #fields) + 1
 
-        -- Update bee count
-        currentBees = countBees()
-        notify("🐝 Bees: " .. currentBees .. "/" .. Config.TargetBees)
-
-        -- Rotate fields
-        fieldIndex = fieldIndex % #farmFields + 1
-
-        task.wait(1)
+        -- Check quest progress mỗi vòng
+        checkQuests()
     end
-
-    if currentBees >= Config.TargetBees then
-        notify("🎉 ĐÃ ĐẠT " .. Config.TargetBees .. " BEES!")
-    end
+    log("DONE: " .. bees .. " bees")
 end
 
--- ═══════════════════════════════════════════════════════════
--- ANTI-AFK
--- ═══════════════════════════════════════════════════════════
-local function antiAFK()
-    if not Config.AntiAFK then return end
-
+-- ═══ ANTI-AFK ═══
+pcall(function()
     local vu = game:GetService("VirtualUser")
-    player.Idled:Connect(function()
-        vu:CaptureController()
-        vu:ClickButton2(Vector2.new())
-        notify("🔄 Anti-AFK triggered")
-    end)
-end
+    plr.Idled:Connect(function() vu:CaptureController() vu:ClickButton2(Vector2.new()) end)
+end)
 
--- ═══════════════════════════════════════════════════════════
--- MAIN EXECUTION PIPELINE
--- ═══════════════════════════════════════════════════════════
-local function runPipeline()
-    State.Running = true
-    notify("🚀 KAITUN BẮT ĐẦU CHẠY!", 5)
-    task.wait(2)
+-- ═══ STOP UI ═══
+pcall(function()
+    local g = Instance.new("ScreenGui")
+    g.Name = "KaitunUI"; g.ResetOnSpawn = false
+    g.Parent = plr:WaitForChild("PlayerGui")
+    local b = Instance.new("TextButton", g)
+    b.Size = UDim2.new(0, 120, 0, 32)
+    b.Position = UDim2.new(0, 8, 0, 180)
+    b.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Text = "STOP KAITUN"; b.Font = Enum.Font.GothamBold; b.TextSize = 13
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    b.MouseButton1Click:Connect(function() running = false; b.Text = "STOPPED"; log("STOPPED") end)
+end)
 
-    -- ═══ PHASE 1: Setup cơ bản ═══
-    notify("━━━ PHASE 1: Setup ━━━", 4)
+-- ═══ MAIN ═══
+log("========== KAITUN v3 START ==========")
+task.wait(2)
 
-    -- 1.1 Claim Hive
-    local retries = 0
-    while not State.HiveClaimed and retries < Config.MaxRetries and State.Running do
-        claimHive()
-        retries = retries + 1
-        task.wait(2)
-    end
+for i = 1, 3 do if claimHive() then break end task.wait(2) end
+task.wait(1)
 
-    if not State.HiveClaimed then
-        notify("❌ Không thể claim hive! Dừng script.")
-        State.Running = false
-        return
-    end
+if running then redeemCodes() task.wait(1) end
+if running then buyAccessories() task.wait(1) end
+if running then doQuest("Black Bear", BB_QUESTS) task.wait(1) end
+if running then doQuest("Mother Bear", MB_QUESTS) task.wait(1) end
+if running then checkQuests() task.wait(1) end
+if running then farmLoop() end
 
-    -- 1.2 Redeem Codes
-    if not State.CodesRedeemed and State.Running then
-        redeemAllCodes()
-        task.wait(2)
-    end
-
-    -- 1.3 Buy Accessories
-    if not State.AccessoriesBought and State.Running then
-        buyAccessories()
-        task.wait(2)
-    end
-
-    -- ═══ PHASE 2: Quests ═══
-    notify("━━━ PHASE 2: Quests ━━━", 4)
-
-    if not State.QuestsAccepted and State.Running then
-        -- Black Bear quest
-        acceptQuest("Black Bear")
-        task.wait(2)
-
-        -- Mother Bear quest
-        acceptQuest("Mother Bear")
-        task.wait(2)
-
-        State.QuestsAccepted = true
-    end
-
-    -- ═══ PHASE 3: Farm to 25 Bees ═══
-    notify("━━━ PHASE 3: Farm 25 Bees ━━━", 4)
-
-    if State.Running then
-        farmTo25Bees()
-    end
-
-    -- ═══ DONE ═══
-    notify("🏆 KAITUN HOÀN THÀNH! Account đã setup xong.", 10)
-    State.Running = false
-    State.CurrentTask = "Completed"
-end
-
--- ═══════════════════════════════════════════════════════════
--- STOP FUNCTION
--- ═══════════════════════════════════════════════════════════
-local function stopKaitun()
-    State.Running = false
-    State.CurrentTask = "Stopped"
-    notify("⏹️ Kaitun đã dừng.")
-end
-
--- Expose global stop
-getgenv().StopKaitun = stopKaitun
-getgenv().KaitunState = State
-
--- ═══════════════════════════════════════════════════════════
--- START
--- ═══════════════════════════════════════════════════════════
-antiAFK()
-runPipeline()
+log("========== KAITUN COMPLETE ==========")
