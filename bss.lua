@@ -1,6 +1,4 @@
--- BSS Kaitun v3 | Remote Spy Verified
--- Executor: Synapse/Fluxus/Delta/Arceus/Wave
-
+-- BSS Kaitun v4 | Verified Remotes + Fixed Bee Count + Guide Progression
 local RS = game:GetService("ReplicatedStorage")
 local TS = game:GetService("TweenService")
 local plr = game:GetService("Players").LocalPlayer
@@ -33,16 +31,7 @@ local function tween(cf)
     task.wait(0.2)
 end
 
--- ═══ REMOTES (verified spy) ═══
--- ItemPackageEvent: InvokeServer("Purchase", {Category=..., Type=..., Amount=...})
--- ClaimHive: FireServer(hiveID)
--- PromoCodeEvent: FireServer(code)
--- GiveQuest: FireServer(questName)
--- SelectNPCOption: FireServer(optionString)
--- ConstructHiveCellFromEgg: InvokeServer(hiveID, cellSlot, eggType, qty, useRJ)
--- PlayerActivesCommand: FireServer(...)
--- CompleteQuest: FireServer(...)
-
+-- ═══ REMOTES ═══
 local function fire(name, ...)
     local r = E:FindFirstChild(name)
     if not r then log("MISS: " .. name) return false end
@@ -59,19 +48,23 @@ local function invoke(name, ...)
     return res
 end
 
--- ═══ HIVE ═══
+-- ═══ HIVE & BEE COUNT ═══
 local function getMyHive()
     for _, h in pairs(workspace.Honeycombs:GetChildren()) do
         if h:IsA("Model") and h:FindFirstChild("Owner") and h.Owner.Value == plr then return h end
     end
 end
 
+-- FIX: đếm bee bằng CellType ~= "Empty"
 local function countBees()
     local h = getMyHive()
     if not h or not h:FindFirstChild("Cells") then return 0 end
     local n = 0
-    for _, c in pairs(h.Cells:GetChildren()) do
-        if c:IsA("Model") and #c:GetChildren() > 1 then n = n + 1 end
+    for _, cell in pairs(h.Cells:GetChildren()) do
+        local ct = cell:FindFirstChild("CellType")
+        if ct and ct.Value ~= "Empty" and ct.Value ~= "" then
+            n = n + 1
+        end
     end
     return n
 end
@@ -79,21 +72,12 @@ end
 local function getEmptySlot()
     local h = getMyHive()
     if not h or not h:FindFirstChild("Cells") then return nil end
-    for _, c in pairs(h.Cells:GetChildren()) do
-        if c:IsA("Model") and #c:GetChildren() <= 1 then
-            local num = tonumber(c.Name:match("%d+"))
-            if num then return num end
+    for _, cell in pairs(h.Cells:GetChildren()) do
+        local ct = cell:FindFirstChild("CellType")
+        if ct and (ct.Value == "Empty" or ct.Value == "") then
+            local id = cell:FindFirstChild("CellID")
+            if id then return id.Value end
         end
-    end
-    return nil
-end
-
--- ═══ QUEST CHECK ═══
--- Lấy quest hiện tại của player
-local function getPlayerQuests()
-    local stats = invoke("RetrievePlayerStatsSummary")
-    if stats and typeof(stats) == "table" then
-        return stats.Quests or stats.quests
     end
     return nil
 end
@@ -121,69 +105,98 @@ local function claimHive()
     return false
 end
 
--- ═══ 2. CODES ═══
+-- ═══ 2. CODES (theo guide) ═══
 local function redeemCodes()
     log(">> Codes")
     local codes = {
-        "Wax","Teespring","Bopmaster","Cog","Connoisseur","Roof","Nectar",
-        "Troggles","1MLikes","PlushFriday","Millie","Jumpstart","WordFactory",
-        "Cubly","Mocito","2MFavorites","Gumaden","Discord100k","Sure",
-        "SecretProfileCode","ClubConverters","RebootFriday","FuzzyFriday",
-        "Tornado","Leftovers","Luther","Crawlers","Boosted","Wink",
-        "ClubBean","Gummy","500mil","1BVisits","2Billion","3Billion",
+        -- Guide codes (dùng ngay khi bắt đầu)
+        "BeesBuzz123", "38217", "BopMaster", "Connoisseur",
+        "Crawlers", "Nectar", "Roof", "Wax",
+        -- Thêm codes khác
+        "Teespring", "Cog", "Troggles", "1MLikes", "PlushFriday",
+        "Millie", "Jumpstart", "WordFactory", "Cubly", "Mocito",
+        "2MFavorites", "Gumaden", "Discord100k", "Sure",
+        "SecretProfileCode", "ClubConverters", "RebootFriday",
+        "FuzzyFriday", "Tornado", "Leftovers", "Luther",
+        "Boosted", "Wink", "ClubBean", "Gummy",
+        "500mil", "1BVisits", "2Billion", "3Billion",
     }
     for _, c in ipairs(codes) do
         if not running then return end
         fire("PromoCodeEvent", c)
         task.wait(0.6)
     end
-    log("OK: codes done")
+    log("OK: codes done (" .. #codes .. ")")
 end
 
--- ═══ 3. BUY ACCESSORIES ═══
--- Spy: ItemPackageEvent:InvokeServer("Purchase", {Category="Accessory", Type="Jar"})
-local function buyAccessories()
-    log(">> Buy Accessories")
-    tween(CFrame.new(96, 12, 318))
-    task.wait(1)
-    local items = {
-        {Cat = "Collector", Type = "Rake"},
-        {Cat = "Collector", Type = "Scooper"},
-        {Cat = "Collector", Type = "Magnet"},
-        {Cat = "Collector", Type = "Clippers"},
-        {Cat = "Collector", Type = "Vacuum"},
-        {Cat = "Accessory", Type = "Pouch"},
-        {Cat = "Accessory", Type = "Jar"},
-        {Cat = "Accessory", Type = "Canister"},
-        {Cat = "Accessory", Type = "Backpack"},
-        {Cat = "Accessory", Type = "Helmet"},
-        {Cat = "Accessory", Type = "Belt Pocket"},
-        {Cat = "Accessory", Type = "Basic Boots"},
-    }
-    for _, item in ipairs(items) do
-        if not running then return end
-        local res = invoke("ItemPackageEvent", "Purchase", {Category = item.Cat, Type = item.Type})
-        log("Buy " .. item.Type .. ": " .. tostring(res ~= nil))
+-- ═══ 3. BUY (ItemPackageEvent) ═══
+-- Spy: InvokeServer("Purchase", {Category=..., Type=..., Amount=...})
+local function buy(category, itemType, amount)
+    local args = {Category = category, Type = itemType}
+    if amount then args.Amount = amount end
+    local res = invoke("ItemPackageEvent", "Purchase", args)
+    log("Buy " .. itemType .. ": " .. tostring(res ~= nil))
+    return res ~= nil
+end
+
+-- ═══ 4. BUY PROGRESSION (theo guide) ═══
+-- Guide order:
+-- Start -> Scooper(1) -> Clippers(2) -> Magnet -> Pouch -> 5 bees
+-- 5 bees -> Jar -> Helmet -> Belt Pocket -> Basic Boots -> 10 bees
+-- 10 bees -> Canister -> Rake -> Vacuum -> Backpack -> 15 bees -> 20 bees -> 25 bees
+local function buyProgression(bees)
+    log(">> Buy progression (bees=" .. bees .. ")")
+
+    if bees < 5 then
+        -- Đầu game: tool cơ bản
+        tween(CFrame.new(96, 12, 318)) -- BasicShop
+        task.wait(1)
+        buy("Collector", "Scooper")
+        task.wait(0.5)
+        buy("Collector", "Clippers")
+        task.wait(0.5)
+        buy("Collector", "Magnet")
+        task.wait(0.5)
+        buy("Accessory", "Pouch")
+        task.wait(0.5)
+    elseif bees >= 5 and bees < 10 then
+        tween(CFrame.new(96, 12, 318))
+        task.wait(1)
+        buy("Accessory", "Jar")
+        task.wait(0.5)
+        buy("Accessory", "Helmet")
+        task.wait(0.5)
+        buy("Accessory", "Belt Pocket")
+        task.wait(0.5)
+        buy("Accessory", "Basic Boots")
+        task.wait(0.5)
+    elseif bees >= 10 and bees < 15 then
+        tween(CFrame.new(96, 12, 318))
+        task.wait(1)
+        buy("Accessory", "Canister")
+        task.wait(0.5)
+        buy("Collector", "Rake")
+        task.wait(0.5)
+        buy("Collector", "Vacuum")
+        task.wait(0.5)
+        buy("Accessory", "Backpack")
         task.wait(0.5)
     end
-    log("OK: accessories done")
+    log("OK: progression buy done")
 end
 
--- ═══ 4. BUY EGG ═══
--- Spy: ItemPackageEvent:InvokeServer("Purchase", {Type="Basic", Category="Eggs", Amount=1})
+-- ═══ 5. BUY EGG ═══
 local function buyEgg()
-    log(">> Buy Egg")
     tween(CFrame.new(-146, 13, 231))
     task.wait(1)
-    local res = invoke("ItemPackageEvent", "Purchase", {Type = "Basic", Category = "Eggs", Amount = 1})
-    log("Buy egg: " .. tostring(res ~= nil))
+    buy("Eggs", "Basic", 1)
     task.wait(0.5)
 end
 
--- ═══ 5. HATCH EGG ═══
+-- ═══ 6. HATCH EGG ═══
 -- Spy: ConstructHiveCellFromEgg:InvokeServer(hiveID, cellSlot, "Basic", 1, false)
 local function hatchEgg()
-    log(">> Hatch Egg")
+    log(">> Hatch")
     tween(CFrame.new(4, 7, 345))
     task.wait(1)
     local h = getMyHive()
@@ -191,72 +204,384 @@ local function hatchEgg()
     local hiveID = h:FindFirstChild("HiveID") and h.HiveID.Value
     local slot = getEmptySlot()
     if not slot then log("FAIL: no empty slot") return false end
-    log("Hatch: hive=" .. tostring(hiveID) .. " slot=" .. tostring(slot))
+    log("Hatch: hive=" .. hiveID .. " slot=" .. slot)
     local res = invoke("ConstructHiveCellFromEgg", hiveID, slot, "Basic", 1, false)
     task.wait(1)
-    log("Hatch result: " .. tostring(res))
+    log("Hatch: " .. tostring(res))
     return res ~= nil
 end
 
--- ═══ 6. QUEST ═══
--- Spy: GiveQuest:FireServer("Sunflower Start")
--- Black Bear quest names (thứ tự đầu game)
-local BB_QUESTS = {
-    "Sunflower Start", "Making Honey", "Mushroom Mission",
-    "Dandelion Disaster", "Blue Flower Bonanza", "Clover Clearing",
-    "Spider Scare", "Strawberry Shortcake", "Bamboo Boogie",
-    "Pine Tree Pursuit", "Rose Rampage", "Cactus Craze",
-    "Mountain Madness", "Pumpkin Plan", "Stump Stomp",
-}
-
-local MB_QUESTS = {
-    "A Gifted Occasion", "Bee Cub", "Royal Jelly Jubilee",
-    "Honey Wreath", "Star Journey", "Petal Planter",
-}
-
-local function doQuest(npcName, questList)
+-- ═══ 7. QUEST ═══
+local function doQuest(npcName)
     log(">> Quest: " .. npcName)
-    local cf = npcName == "Black Bear" and CFrame.new(-256, 5, 297) or CFrame.new(-179, 5, 87)
-    tween(cf)
-    task.wait(1.5)
 
-    -- Nói chuyện NPC
-    fire("PlayerActivesCommand", "npc talk", npcName)
+    -- Tween đến Circle part (trigger .Touched)
+    local npc = workspace.NPCs:FindFirstChild(npcName)
+    if not npc then log("FAIL: NPC not found") return end
+
+    local circle = npc:FindFirstChild("Circle")
+    local platform = npc:FindFirstChild("Platform")
+    local targetPos
+
+    if circle then
+        targetPos = circle.Position + Vector3.new(0, 3, 0)
+    elseif platform then
+        targetPos = platform.Position + Vector3.new(0, 3, 0)
+    else
+        targetPos = npcName == "Black Bear" and Vector3.new(-256, 5, 297) or Vector3.new(-179, 5, 87)
+    end
+
+    tween(CFrame.new(targetPos))
     task.wait(1)
 
-    -- Thử nhận quest theo danh sách
-    for _, qName in ipairs(questList) do
-        fire("GiveQuest", qName)
-        task.wait(0.3)
+    -- Đặt character trực tiếp lên circle để trigger touch
+    if circle and hrp then
+        hrp.CFrame = CFrame.new(circle.Position + Vector3.new(0, 3, 0))
     end
-    task.wait(0.5)
+    task.wait(1)
 
-    -- Chọn option
+    -- Fire touch manually nếu cần
+    if circle then
+        pcall(function() firetouchinterest(hrp, circle, 0) task.wait(0.1) firetouchinterest(hrp, circle, 1) end)
+    end
+    task.wait(1)
+
+    -- Thử cả platform
+    if platform then
+        pcall(function() firetouchinterest(hrp, platform, 0) task.wait(0.1) firetouchinterest(hrp, platform, 1) end)
+    end
+    task.wait(1.5)
+
+    -- Chọn option (nhận quest)
     fire("SelectNPCOption", 1)
     task.wait(0.5)
+    fire("SelectNPCOption", 1)
+    task.wait(0.5)
+
     log("OK: quest " .. npcName)
 end
 
--- Check quest progress (dùng RetrievePlayerStatsSummary)
-local function checkQuests()
-    log(">> Check Quests")
-    local quests = getPlayerQuests()
-    if quests and typeof(quests) == "table" then
-        for k, v in pairs(quests) do
-            if typeof(v) == "table" then
-                local name = v.Name or v.name or k
-                local progress = v.Progress or v.progress or "?"
-                log("Quest: " .. tostring(name) .. " | Progress: " .. tostring(progress))
-            else
-                log("Quest: " .. tostring(k) .. " = " .. tostring(v))
+-- ═══ QUEST READER ═══
+-- Path: PlayerGui.ScreenGui.Menus.Children.Quests.Content.Frame.QuestBox.TaskBar.Description
+-- Text: "Collect 5,000 Pollen.\n0/5,000" | "Collect 5 Tokens from Leaves In the Dandelion Field. 0/5"
+
+-- Map keyword trong quest text -> field name
+local QUEST_FIELD_MAP = {
+    ["Sunflower"]    = "Sunflower Field",
+    ["Mushroom"]     = "Mushroom Field",
+    ["Dandelion"]    = "Dandelion Field",
+    ["Blue Flower"]  = "Blue Flower Field",
+    ["Clover"]       = "Clover Field",
+    ["Strawberry"]   = "Strawberry Field",
+    ["Spider"]       = "Spider Field",
+    ["Bamboo"]       = "Bamboo Field",
+    ["Pine Tree"]    = "Pine Tree Forest",
+    ["Rose"]         = "Rose Field",
+    ["Cactus"]       = "Cactus Field",
+    ["Pumpkin"]      = "Pumpkin Patch",
+    ["Stump"]        = "Stump Field",
+    ["Mountain"]     = "Mountain Top Field",
+    ["Pepper"]       = "Pepper Patch",
+    ["Coconut"]      = "Coconut Field",
+}
+
+local function getQuestTasks()
+    local tasks = {}
+    local pg = plr:FindFirstChild("PlayerGui")
+    if not pg then return tasks end
+    local sg = pg:FindFirstChild("ScreenGui")
+    if not sg then return tasks end
+    local menus = sg:FindFirstChild("Menus")
+    if not menus then return tasks end
+
+    -- Tìm QuestBox trong Quests frame
+    local function findQuestBoxes(obj, depth)
+        if depth > 8 then return end
+        for _, v in pairs(obj:GetChildren()) do
+            if v.Name == "QuestBox" then
+                local taskBar = v:FindFirstChild("TaskBar")
+                if taskBar then
+                    for _, desc in pairs(taskBar:GetDescendants()) do
+                        if desc:IsA("TextLabel") and desc.Name == "Description" and desc.Text ~= "" then
+                            table.insert(tasks, desc.Text)
+                        end
+                    end
+                end
             end
+            findQuestBoxes(v, depth + 1)
         end
-    else
-        log("No quest data (may need to accept quest first)")
     end
+    findQuestBoxes(menus, 0)
+    return tasks
 end
 
--- ═══ 7. FARM FIELD ═══
+local function getQuestTitle()
+    local pg = plr:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local function findTitle(obj, depth)
+        if depth > 10 then return nil end
+        for _, v in pairs(obj:GetChildren()) do
+            if v.Name == "TitleBar" and v:IsA("TextLabel") and v.Text ~= "" then
+                return v.Text
+            end
+            local res = findTitle(v, depth + 1)
+            if res then return res end
+        end
+    end
+    return findTitle(pg, 0)
+end
+
+-- Parse task text -> field cần farm
+local function parseTaskField(taskText)
+    for keyword, fieldName in pairs(QUEST_FIELD_MAP) do
+        if taskText:find(keyword) then
+            return fieldName
+        end
+    end
+    return nil
+end
+
+-- Check progress: "0/5,000" -> current=0, target=5000
+local function parseProgress(taskText)
+    local current, target = taskText:match("(%d[%d,]*)/(%d[%d,]*)")
+    if current and target then
+        current = tonumber(current:gsub(",", "")) or 0
+        target = tonumber(target:gsub(",", "")) or 1
+        return current, target
+    end
+    return 0, 1
+end
+
+-- Kiểm tra task đã hoàn thành chưa
+local function isTaskDone(taskText)
+    local cur, tgt = parseProgress(taskText)
+    return cur >= tgt
+end
+
+-- ═══ QUEST FARMER ═══
+local function doQuestTasks()
+    local tasks = getQuestTasks()
+    if #tasks == 0 then
+        log("No quest tasks found (open quest UI first)")
+        return
+    end
+
+    local title = getQuestTitle() or "Unknown Quest"
+    log("Quest: " .. title .. " | Tasks: " .. #tasks)
+
+    for _, taskText in ipairs(tasks) do
+        if not running then return end
+
+        -- Bỏ qua task đã xong
+        if isTaskDone(taskText) then
+            log("DONE task: " .. taskText:sub(1, 50))
+        else
+            log("TODO task: " .. taskText:sub(1, 60))
+
+            -- Tìm field cần farm
+            local field = parseTaskField(taskText)
+
+            if taskText:lower():find("convert") or taskText:lower():find("at the hive") then
+                -- Convert honey task
+                log("  -> Convert at hive")
+                convert()
+
+            elseif taskText:lower():find("collect") and field then
+                -- Farm field task
+                local cur, tgt = parseProgress(taskText)
+                local needed = tgt - cur
+                log("  -> Farm " .. field .. " (need " .. needed .. ")")
+                -- Farm cho đến khi đủ (estimate time)
+                local farmRounds = math.ceil(needed / 5000) -- rough estimate
+                farmRounds = math.clamp(farmRounds, 1, 10)
+                for i = 1, farmRounds do
+                    if not running then return end
+                    farmField(field)
+                    convert()
+                    -- Re-check progress
+                    local newTasks = getQuestTasks()
+                    for _, nt in ipairs(newTasks) do
+                        if nt:find(taskText:sub(1, 20)) then
+                            if isTaskDone(nt) then
+                                log("  -> Task complete!")
+                                break
+                            end
+                        end
+                    end
+                end
+
+            elseif taskText:lower():find("collect") and taskText:lower():find("pollen") then
+                -- Generic pollen collect - farm Dandelion
+                log("  -> Farm Dandelion (generic pollen)")
+                farmField("Dandelion Field")
+                convert()
+
+            elseif taskText:lower():find("token") then
+                -- Token task - farm field có token
+                log("  -> Farm for tokens (Dandelion)")
+                farmField("Dandelion Field")
+                convert()
+
+            else
+                log("  -> Unknown task type, skip: " .. taskText:sub(1, 50))
+            end
+        end
+    end
+    log("Quest tasks processed!")
+end
+
+-- ═══ QUEST UI READER ═══
+-- Map keyword trong Description -> field name thật
+local FIELD_MAP = {
+    ["sunflower"]   = "Sunflower Field",
+    ["mushroom"]    = "Mushroom Field",
+    ["dandelion"]   = "Dandelion Field",
+    ["blue flower"] = "Blue Flower Field",
+    ["clover"]      = "Clover Field",
+    ["strawberry"]  = "Strawberry Field",
+    ["spider"]      = "Spider Field",
+    ["bamboo"]      = "Bamboo Field",
+    ["pine tree"]   = "Pine Tree Forest",
+    ["rose"]        = "Rose Field",
+    ["cactus"]      = "Cactus Field",
+    ["pumpkin"]     = "Pumpkin Patch",
+    ["stump"]       = "Stump Field",
+    ["mountain"]    = "Mountain Top Field",
+    ["coconut"]     = "Coconut Field",
+    ["pepper"]      = "Pepper Patch",
+    ["pineapple"]   = "Pineapple Patch",
+    ["ant"]         = "Ant Field",
+}
+
+-- Mở Quest UI bằng cách click tab button
+local function openQuestUI()
+    local tab = plr.PlayerGui:FindFirstChild("ScreenGui")
+    if not tab then return false end
+    local menus = tab:FindFirstChild("Menus")
+    if not menus then return false end
+    local childTabs = menus:FindFirstChild("ChildTabs")
+    if not childTabs then return false end
+    local questTab = childTabs:FindFirstChild("Quests Tab")
+    if not questTab then return false end
+    -- Fire click
+    pcall(function() questTab:Activate() end)
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendMouseButtonEvent(questTab.AbsolutePosition.X + 5, questTab.AbsolutePosition.Y + 5, 0, true, game, 1)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(questTab.AbsolutePosition.X + 5, questTab.AbsolutePosition.Y + 5, 0, false, game, 1)
+    end)
+    task.wait(0.5)
+    return true
+end
+
+-- Đọc tất cả Description text từ quest UI
+local function getQuestDescriptions()
+    local result = {}
+    local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
+    if not sg then return result end
+    local menus = sg:FindFirstChild("Menus")
+    if not menus then return result end
+    -- Path: Menus.Children.Quests.Content.Frame.QuestBox.TaskBar.Description
+    local children = menus:FindFirstChild("Children")
+    if not children then return result end
+    local questsFrame = children:FindFirstChild("Quests")
+    if not questsFrame then return result end
+    local content = questsFrame:FindFirstChild("Content")
+    if not content then return result end
+    local frame = content:FindFirstChild("Frame")
+    if not frame then return result end
+
+    -- Lấy quest title
+    local titleBar = frame:FindFirstChild("QuestBox")
+    if titleBar then
+        local title = titleBar:FindFirstChild("TitleBarBG")
+        if title then
+            local tb = title:FindFirstChild("TitleBar")
+            if tb then result.title = tb.Text end
+        end
+        -- Lấy tất cả task descriptions
+        local taskBar = titleBar:FindFirstChild("TaskBar")
+        if taskBar then
+            result.tasks = {}
+            for _, desc in pairs(taskBar:GetChildren()) do
+                if desc:IsA("TextLabel") and desc.Name == "Description" and desc.Text ~= "" then
+                    table.insert(result.tasks, desc.Text)
+                end
+            end
+        end
+    end
+    return result
+end
+
+-- Parse description text -> field names cần farm
+local function parseQuestFields(descriptions)
+    local fields = {}
+    local seen = {}
+    for _, desc in ipairs(descriptions) do
+        local lower = desc:lower()
+        for keyword, fieldName in pairs(FIELD_MAP) do
+            if lower:find(keyword) and not seen[fieldName] then
+                -- Chỉ lấy nếu là collect pollen task (không phải convert/honey token)
+                if lower:find("collect") and lower:find("pollen") then
+                    seen[fieldName] = true
+                    table.insert(fields, fieldName)
+                    log("Quest needs: " .. fieldName)
+                end
+            end
+        end
+    end
+    return fields
+end
+
+-- Check quest và farm theo yêu cầu
+local function doQuestFarm()
+    log(">> Quest Farm Check")
+
+    -- Mở quest UI
+    openQuestUI()
+    task.wait(1)
+
+    -- Đọc quest data
+    local questData = getQuestDescriptions()
+    if questData.title then
+        log("Active quest: " .. questData.title)
+    end
+
+    if not questData.tasks or #questData.tasks == 0 then
+        log("No quest tasks found")
+        return false
+    end
+
+    -- Parse fields cần farm
+    local fieldsToFarm = parseQuestFields(questData.tasks)
+
+    if #fieldsToFarm == 0 then
+        log("No pollen fields needed (maybe convert/token task)")
+        -- Nếu task là convert thì về hive
+        for _, desc in ipairs(questData.tasks) do
+            if desc:lower():find("convert") then
+                log("Convert task -> going to hive")
+                convert()
+            end
+        end
+        return false
+    end
+
+    -- Farm từng field theo quest
+    for _, fieldName in ipairs(fieldsToFarm) do
+        if not running then return false end
+        log("Quest farm: " .. fieldName)
+        farmField(fieldName)
+        task.wait(0.5)
+    end
+
+    -- Convert sau khi farm
+    convert()
+    return true
+end
+
+-- ═══ 8. FARM FIELD ═══
 local function farmField(name)
     log(">> Farm: " .. name)
     local f = workspace.FlowerZones:FindFirstChild(name)
@@ -277,36 +602,44 @@ local function farmField(name)
     end
 end
 
--- ═══ 8. CONVERT ═══
+-- ═══ 9. CONVERT ═══
 local function convert()
     log(">> Convert")
     tween(CFrame.new(4, 7, 345))
     task.wait(6)
 end
 
--- ═══ 9. FARM LOOP ═══
+-- ═══ 10. MAIN FARM LOOP ═══
 local function farmLoop()
-    log(">> Farm loop -> " .. TARGET_BEES .. " bees")
     local fields = {"Dandelion Field", "Sunflower Field", "Mushroom Field"}
     local idx = 1
     local bees = countBees()
-    log("Bees: " .. bees)
+    log(">> Farm loop | Bees: " .. bees .. "/" .. TARGET_BEES)
 
     while bees < TARGET_BEES and running do
-        farmField(fields[idx])
-        convert()
+        -- Buy progression items khi đạt milestone
+        buyProgression(bees)
+        task.wait(1)
+
+        -- Thử farm theo quest trước, nếu không có thì farm field mặc định
+        local questDone = doQuestFarm()
+        if not questDone then
+            farmField(fields[idx])
+            convert()
+            idx = (idx % #fields) + 1
+        end
+
+        -- Buy + Hatch
         buyEgg()
         task.wait(0.5)
         hatchEgg()
         task.wait(0.5)
+
+        -- Update
         bees = countBees()
         log("Bees: " .. bees .. "/" .. TARGET_BEES)
-        idx = (idx % #fields) + 1
-
-        -- Check quest progress mỗi vòng
-        checkQuests()
     end
-    log("DONE: " .. bees .. " bees")
+    log("DONE: " .. bees .. " bees!")
 end
 
 -- ═══ ANTI-AFK ═══
@@ -331,17 +664,32 @@ pcall(function()
 end)
 
 -- ═══ MAIN ═══
-log("========== KAITUN v3 START ==========")
+log("========== KAITUN v4 START ==========")
 task.wait(2)
 
+-- Check bees trước
+local startBees = countBees()
+log("Current bees in hive: " .. startBees)
+
+-- Step 1: Claim Hive
 for i = 1, 3 do if claimHive() then break end task.wait(2) end
 task.wait(1)
 
+-- Re-check bees sau claim
+startBees = countBees()
+log("Bees after claim: " .. startBees)
+
+-- Step 2: Codes
 if running then redeemCodes() task.wait(1) end
-if running then buyAccessories() task.wait(1) end
-if running then doQuest("Black Bear", BB_QUESTS) task.wait(1) end
-if running then doQuest("Mother Bear", MB_QUESTS) task.wait(1) end
-if running then checkQuests() task.wait(1) end
+
+-- Step 3: Initial buy (dựa vào số bees hiện tại)
+if running then buyProgression(startBees) task.wait(1) end
+
+-- Step 4: Quests
+if running then doQuest("Black Bear") task.wait(1) end
+if running then doQuest("Mother Bear") task.wait(1) end
+
+-- Step 5: Farm loop
 if running then farmLoop() end
 
-log("========== KAITUN COMPLETE ==========")
+log("========== KAITUN v4 COMPLETE ==========")
