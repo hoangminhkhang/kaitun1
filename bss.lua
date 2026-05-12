@@ -144,21 +144,19 @@ function checkAndDoQuests()
     local bees = countBees()
     log("Bees: " .. bees)
 
-    if hasActiveQuest() then
-        log("Already has quest, skip")
-        return
-    end
-
-    local bestNPC = nil
+    -- Nhận quest từ TẤT CẢ NPC đủ điều kiện
     for _, npc in ipairs(NPC_QUESTS) do
-        if bees >= npc.minBees then bestNPC = npc end
-    end
-
-    if bestNPC then
-        log("Best NPC: " .. bestNPC.name)
-        talkNPC(bestNPC.name, bestNPC.pos)
-    else
-        log("No NPC for " .. bees .. " bees")
+        if bees >= npc.minBees then
+            -- Check NPC này đã có quest chưa
+            local q = getQuestName(npc.name)
+            if not q then
+                log("Need quest from: " .. npc.name)
+                talkNPC(npc.name, npc.pos)
+                task.wait(1)
+            else
+                log("Already has quest from " .. npc.name .. ": " .. q)
+            end
+        end
     end
 end
 
