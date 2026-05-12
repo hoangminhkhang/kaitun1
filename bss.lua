@@ -1,7 +1,8 @@
 -- BSS Kaitun | functest: Auto Quest theo bee count
--- Mỗi lần hatch xong gọi checkAndDoQuests()
+-- Cách đúng từ script mẫu: require(Activatables.NPCs).ButtonEffect + IncrementDialogue
 local TS = game:GetService("TweenService")
 local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local plr = game:GetService("Players").LocalPlayer
 
 local E = RS:WaitForChild("Events")
@@ -10,29 +11,33 @@ local hrp = char:WaitForChild("HumanoidRootPart")
 plr.CharacterAdded:Connect(function(c) char = c hrp = c:WaitForChild("HumanoidRootPart") end)
 
 local function log(m) print("[functest] " .. m) end
-local function fire(name, ...)
-    local r = E:FindFirstChild(name)
-    if not r then return end
-    pcall(r.FireServer, r, ...)
-end
 
--- ═══ NPC CONFIG: tên, vị trí circle, yêu cầu bee tối thiểu ═══
+-- ═══ NPC CONFIG ═══
 local NPC_QUESTS = {
-    {name = "Black Bear",   pos = Vector3.new(-255.79, 4, 296.78),  minBees = 0},
-    {name = "Mother Bear",  pos = Vector3.new(-179.00, 4, 87.75),   minBees = 0},
-    {name = "Panda Bear",   pos = Vector3.new(104.29,  34, 48.47),  minBees = 5},
-    {name = "Brown Bear",   pos = Vector3.new(281.35,  44, 236.98), minBees = 10},
-    {name = "Polar Bear",   pos = Vector3.new(-106.61, 118, -77.14),minBees = 15},
-    {name = "Science Bear", pos = Vector3.new(268.63,  102, 19.67), minBees = 20},
+    {name = "Black Bear",   pos = Vector3.new(-255.79, 6, 296.78),  minBees = 0},
+    {name = "Mother Bear",  pos = Vector3.new(-179.00, 6, 87.75),   minBees = 0},
+    {name = "Panda Bear",   pos = Vector3.new(104.29,  36, 48.47),  minBees = 5},
+    {name = "Brown Bear",   pos = Vector3.new(281.35,  46, 236.98), minBees = 10},
+    {name = "Polar Bear",   pos = Vector3.new(-106.61, 120, -77.14),minBees = 15},
+    {name = "Science Bear", pos = Vector3.new(268.63,  104, 19.67), minBees = 20},
 }
 
 -- ═══ NOCLIP ═══
-local noclip = true
-game:GetService("RunService").Stepped:Connect(function()
-    if noclip and char then
+RunService.Stepped:Connect(function()
+    if char then
         for _, p in pairs(char:GetDescendants()) do
             if p:IsA("BasePart") then p.CanCollide = false end
         end
+    end
+end)
+
+-- ═══ AUTO SKIP DIALOG (RunService loop) ═══
+-- Script mẫu dùng: plr.PlayerGui.Camera.Controllers.NPC.IncrementDialogue:Invoke()
+RunService.Stepped:Connect(function()
+    if plr.PlayerGui.ScreenGui.NPC.Visible then
+        pcall(function()
+            plr.PlayerGui.Camera.Controllers.NPC.IncrementDialogue:Invoke()
+        end)
     end
 end)
 
@@ -60,124 +65,103 @@ local function countBees()
     return 0
 end
 
--- ═══ CHECK QUEST UI ═══
+-- ═══ CHECK QUEST ACTIVE ═══
+local function getQuestName(npcName)
+    -- Đọc từ quest UI
+    local ok, result = pcall(function()
+        local QuestF = plr.PlayerGui.ScreenGui.Menus.Children.Quests.Content
+        for _, v in pairs(QuestF:GetChildren()) do
+            if v:FindFirstChild("QuestBox") then
+                local title = v.QuestBox:FindFirstChild("TitleBarBG")
+                if title and title:FindFirstChild("TitleBar") then
+                    local t = title.TitleBar.Text
+                    if npcName and t:find(npcName:gsub(" Bear",""):gsub(" Bee","")) then
+                        return t
+                    elseif not npcName then
+                        return t
+                    end
+                end
+            end
+        end
+    end)
+    return ok and result or nil
+end
+
 local function hasActiveQuest()
-    local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
-    if not sg then return false end
-    local menus = sg:FindFirstChild("Menus")
-    if not menus then return false end
-    -- Mở quest tab
-    local childTabs = menus:FindFirstChild("ChildTabs")
-    local questTab = childTabs and childTabs:FindFirstChild("Quests Tab")
-    if questTab then
-        pcall(function() questTab:Activate() end)
-        task.wait(0.5)
-    end
-    -- Đọc title
-    local frame = menus:FindFirstChild("Children")
-    frame = frame and frame:FindFirstChild("Quests")
-    frame = frame and frame:FindFirstChild("Content")
-    frame = frame and frame:FindFirstChild("Frame")
-    if not frame then return false end
-    local qbox = frame:FindFirstChild("QuestBox")
-    local title = qbox and qbox:FindFirstChild("TitleBarBG")
-    title = title and title:FindFirstChild("TitleBar")
-    if title and title.Text ~= "" and not title.Text:lower():find("no quest") then
-        log("Active quest: " .. title.Text)
+    local q = getQuestName(nil)
+    if q and q ~= "" then
+        log("Active quest: " .. q)
         return true
     end
     return false
 end
 
--- ═══ CLICK ACTIVATE BUTTON ═══
-local function clickActivate()
-    local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
-    local btn = sg and sg:FindFirstChild("ActivateButton")
-    if not btn or not btn.Visible then return false end
-    pcall(function() btn:Activate() end)
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local p = btn.AbsolutePosition
-        local s = btn.AbsoluteSize
-        vim:SendMouseButtonEvent(p.X + s.X/2, p.Y + s.Y/2, 0, true, game, 1)
-        task.wait(0.05)
-        vim:SendMouseButtonEvent(p.X + s.X/2, p.Y + s.Y/2, 0, false, game, 1)
-    end)
-    task.wait(0.5)
-    return true
-end
-
--- ═══ TALK NPC + SKIP DIALOG ═══
+-- ═══ TALK NPC (cách đúng từ script mẫu) ═══
 local function talkNPC(npcName, pos)
     log("Talk: " .. npcName)
 
     local npc = workspace.NPCs:FindFirstChild(npcName)
-    local circle = npc and npc:FindFirstChild("Circle")
+    if not npc then log("FAIL: NPC not found") return false end
 
-    -- Dùng MoveTo để walk vào circle (trigger touch detection)
-    local hum = char:FindFirstChild("Humanoid")
-    if hum and circle then
-        hum:MoveTo(circle.Position)
-        hum.MoveToFinished:Wait()
-        task.wait(0.5)
-    else
-        tween(CFrame.new(pos))
-        task.wait(0.5)
-    end
+    -- Tween đến platform
+    tween(CFrame.new(pos))
+    task.wait(0.5)
+    hrp.CFrame = CFrame.new(pos)
+    task.wait(0.5)
 
-    -- Đợi ActivateButton hiện
-    local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
-    local btn = sg and sg:FindFirstChild("ActivateButton")
+    -- Dùng Activatables.NPCs.ButtonEffect (cách script mẫu dùng)
+    local ok = pcall(function()
+        local cac = require(RS:WaitForChild("Activatables"):WaitForChild("NPCs"))
+        cac.ButtonEffect(plr, npc)
+    end)
+    log("ButtonEffect ok: " .. tostring(ok))
+
+    -- Đợi NPC dialog hiện rồi tự skip (RunService loop đã handle)
+    local npcGui = plr.PlayerGui.ScreenGui.NPC
     local t = 0
-    while btn and not btn.Visible and t < 5 do
+    while not npcGui.Visible and t < 5 do
         task.wait(0.2); t += 0.2
     end
 
-    if btn and btn.Visible then
-        log("Clicking ActivateButton...")
-        clickActivate()
-        task.wait(0.5)
-        -- Spam skip dialog để nhận quest
-        for i = 1, 12 do
-            fire("SelectNPCOption", 1)
-            task.wait(0.25)
+    if npcGui.Visible then
+        log("Dialog open, waiting for close...")
+        -- Đợi dialog đóng (IncrementDialogue loop tự skip)
+        local t2 = 0
+        while npcGui.Visible and t2 < 15 do
+            task.wait(0.2); t2 += 0.2
         end
+        task.wait(1)
         log("OK: " .. npcName)
         return true
     else
-        log("FAIL: ActivateButton not visible after 5s")
+        log("FAIL: dialog not visible")
         return false
     end
 end
 
--- ═══ MAIN: CHECK VÀ NHẬN QUEST THEO BEE COUNT ═══
+-- ═══ MAIN ═══
 function checkAndDoQuests()
     local bees = countBees()
     log("Bees: " .. bees)
 
-    -- Nếu đã có quest active thì skip
     if hasActiveQuest() then
         log("Already has quest, skip")
         return
     end
 
-    -- Tìm NPC phù hợp nhất (bee đủ điều kiện, ưu tiên NPC cao nhất)
     local bestNPC = nil
     for _, npc in ipairs(NPC_QUESTS) do
-        if bees >= npc.minBees then
-            bestNPC = npc
-        end
+        if bees >= npc.minBees then bestNPC = npc end
     end
 
     if bestNPC then
-        log("Best NPC: " .. bestNPC.name .. " (min " .. bestNPC.minBees .. " bees)")
+        log("Best NPC: " .. bestNPC.name)
         talkNPC(bestNPC.name, bestNPC.pos)
     else
-        log("No NPC available for " .. bees .. " bees")
+        log("No NPC for " .. bees .. " bees")
     end
 end
 
--- TEST CHẠY THỬ
 log("=== FUNCTEST START ===")
 checkAndDoQuests()
 log("=== FUNCTEST END ===")
