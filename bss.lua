@@ -26,6 +26,16 @@ local NPC_QUESTS = {
     {name = "Science Bear", pos = Vector3.new(268.63,  102, 19.67), minBees = 20},
 }
 
+-- ═══ NOCLIP ═══
+local noclip = true
+game:GetService("RunService").Stepped:Connect(function()
+    if noclip and char then
+        for _, p in pairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
+        end
+    end
+end)
+
 -- ═══ TWEEN ═══
 local function tween(cf)
     local d = (hrp.Position - cf.Position).Magnitude
