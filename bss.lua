@@ -1,22 +1,98 @@
--- BSS Kaitun | functest v3: Auto Quest + Smart Farm + Token Collect + GUI
-local TS = game:GetService("TweenService")
-local RS = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local plr = game:GetService("Players").LocalPlayer
+--[[
+    BSS Kaitun v5 - Full Auto Pipeline
+    Chức năng:
+    1. Claim Hive
+    2. Redeem Codes
+    3. Buy Accessories (theo bee count)
+    4. Accept Quests từ NPC
+    5. Smart Farm theo quest
+    6. Buy Egg + Hatch
+    7. Loop đến đủ bees target
+]]
 
-local E = RS:WaitForChild("Events")
+-- ═══════════════════════════════════════════════════════════
+-- SERVICES
+-- ═══════════════════════════════════════════════════════════
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local plr = Players.LocalPlayer
+
+-- ═══════════════════════════════════════════════════════════
+-- CONFIG
+-- ═══════════════════════════════════════════════════════════
+local TARGET_BEES = 25
+local FARM_TIME = 30
+local TWEEN_SPEED = 130
+local FARM_WALK_SPEED = 90
+local NORMAL_WALK_SPEED = 16
+local TOKEN_COLLECT_RANGE = 60
+
+local running = true
+
+-- ═══════════════════════════════════════════════════════════
+-- CHARACTER REFERENCES
+-- ═══════════════════════════════════════════════════════════
 local char, hum, hrp
-local function refresh()
+
+local function refreshCharacter()
     char = plr.Character or plr.CharacterAdded:Wait()
     hum = char:WaitForChild("Humanoid")
     hrp = char:WaitForChild("HumanoidRootPart")
 end
-refresh()
-plr.CharacterAdded:Connect(function() task.wait(0.5) refresh() end)
+refreshCharacter()
 
-local function log(m) print("[functest] " .. m) end
+plr.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    refreshCharacter()
+end)
 
--- ═══ NPC CONFIG (theo zone) ═══
+-- ═══════════════════════════════════════════════════════════
+-- REMOTE EVENTS
+-- ═══════════════════════════════════════════════════════════
+local Events = ReplicatedStorage:WaitForChild("Events", 10)
+
+local function fireEvent(name, ...)
+    local r = Events:FindFirstChild(name)
+    if not r then
+        warn("[Kaitun] Remote not found: " .. name)
+        return false
+    end
+    local ok, err = pcall(r.FireServer, r, ...)
+    if not ok then
+        warn("[Kaitun] Fire error " .. name .. ": " .. tostring(err))
+    end
+    return ok
+end
+
+local function invokeEvent(name, ...)
+    local r = Events:FindFirstChild(name)
+    if not r then
+        warn("[Kaitun] Remote not found: " .. name)
+        return nil
+    end
+    local ok, res = pcall(r.InvokeServer, r, ...)
+    if not ok then
+        warn("[Kaitun] Invoke error " .. name .. ": " .. tostring(res))
+        return nil
+    end
+    return res
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- LOG
+-- ═══════════════════════════════════════════════════════════
+local function log(msg)
+    print("[Kaitun] " .. tostring(msg))
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- NPC CONFIG
+-- ═══════════════════════════════════════════════════════════
 local NPC_QUESTS = {
     {name = "Black Bear",   pos = Vector3.new(-256, 6, 297),   minBees = 0},
     {name = "Mother Bear",  pos = Vector3.new(-179, 6, 87),    minBees = 0},
@@ -28,7 +104,9 @@ local NPC_QUESTS = {
     {name = "Spirit Bear",  pos = Vector3.new(-365, 98, 479),  minBees = 35},
 }
 
--- ═══ FIELD MAP ═══
+-- ═══════════════════════════════════════════════════════════
+-- FIELD KEYWORD MAP
+-- ═══════════════════════════════════════════════════════════
 local FIELD_MAP = {
     ["sunflower"]   = "Sunflower Field",
     ["mushroom"]    = "Mushroom Field",
@@ -50,145 +128,418 @@ local FIELD_MAP = {
     ["ant"]         = "Ant Field",
 }
 
--- ═══ STATE ═══
-local State = {
-    Running = false,
-    NormalSpeed = 16,
-    FarmSpeed = 90,
-    SelectedQuest = "Auto",
-    AutoCollect = true,
-    CollectRange = 30,
-}
+-- ═══════════════════════════════════════════════════════════
+-- BACKGROUND TASKS (Noclip + Auto Skip Dialog + Anti-AFK)
+-- ═══════════════════════════════════════════════════════════
 
--- ═══ NOCLIP ═══
+-- Noclip: cho phép đi xuyên part
 RunService.Stepped:Connect(function()
     if char then
-        for _, p in pairs(char:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = false end
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
         end
     end
 end)
 
--- ═══ AUTO SKIP DIALOG ═══
+-- Auto skip NPC dialog (IncrementDialogue)
 RunService.Stepped:Connect(function()
-    if plr.PlayerGui:FindFirstChild("ScreenGui") and plr.PlayerGui.ScreenGui:FindFirstChild("NPC") and plr.PlayerGui.ScreenGui.NPC.Visible then
-        pcall(function()
+    pcall(function()
+        local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
+        if sg and sg:FindFirstChild("NPC") and sg.NPC.Visible then
             plr.PlayerGui.Camera.Controllers.NPC.IncrementDialogue:Invoke()
-        end)
-    end
+        end
+    end)
 end)
 
--- ═══ TWEEN ═══
-local function tween(cf, speed)
-    speed = speed or 130
-    if not hrp or not hrp.Parent then refresh() end
-    local d = (hrp.Position - cf.Position).Magnitude
-    if d < 4 then hrp.CFrame = cf return end
-    local tw = TS:Create(hrp, TweenInfo.new(d / speed, Enum.EasingStyle.Linear), {CFrame = cf})
-    tw:Play(); tw.Completed:Wait(); task.wait(0.15)
+-- Anti-AFK
+pcall(function()
+    plr.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+        log("Anti-AFK triggered")
+    end)
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- TWEEN (di chuyển xa)
+-- ═══════════════════════════════════════════════════════════
+local function tweenTo(targetCFrame, speed)
+    speed = speed or TWEEN_SPEED
+    if not hrp or not hrp.Parent then refreshCharacter() end
+
+    local distance = (hrp.Position - targetCFrame.Position).Magnitude
+    if distance < 4 then
+        hrp.CFrame = targetCFrame
+        return
+    end
+
+    local tweenTime = distance / speed
+    local tween = TweenService:Create(
+        hrp,
+        TweenInfo.new(tweenTime, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut),
+        {CFrame = targetCFrame}
+    )
+    tween:Play()
+    tween.Completed:Wait()
+    task.wait(0.15)
 end
 
--- ═══ HIVE & BEE COUNT ═══
+-- ═══════════════════════════════════════════════════════════
+-- HIVE & BEE COUNT
+-- ═══════════════════════════════════════════════════════════
 local function getMyHive()
-    for _, h in pairs(workspace.Honeycombs:GetChildren()) do
-        if h:IsA("Model") and h:FindFirstChild("Owner") and h.Owner.Value == plr then return h end
+    for _, hive in pairs(workspace.Honeycombs:GetChildren()) do
+        if hive:IsA("Model") and hive:FindFirstChild("Owner") and hive.Owner.Value == plr then
+            return hive
+        end
     end
+    return nil
 end
 
 local function countBees()
-    local h = getMyHive()
-    if not h or not h:FindFirstChild("Cells") then return 0 end
-    local n = 0
-    for _, cell in pairs(h.Cells:GetChildren()) do
-        local ct = cell:FindFirstChild("CellType")
-        if ct and ct.Value ~= "Empty" and ct.Value ~= "" then n += 1 end
+    local hive = getMyHive()
+    if not hive or not hive:FindFirstChild("Cells") then
+        return 0
     end
-    return n
+
+    local count = 0
+    for _, cell in pairs(hive.Cells:GetChildren()) do
+        local cellType = cell:FindFirstChild("CellType")
+        if cellType and cellType.Value ~= "Empty" and cellType.Value ~= "" then
+            count = count + 1
+        end
+    end
+    return count
 end
 
--- ═══ NPC ALERT CHECK ═══
+local function getEmptyHiveSlot()
+    local hive = getMyHive()
+    if not hive then return nil end
+
+    for _, cell in pairs(hive.Cells:GetChildren()) do
+        local cellType = cell:FindFirstChild("CellType")
+        if cellType and (cellType.Value == "Empty" or cellType.Value == "") then
+            local cellID = cell:FindFirstChild("CellID")
+            if cellID then
+                return cellID.Value
+            end
+        end
+    end
+    return nil
+end
+
+local function getHivePosition()
+    local hive = getMyHive()
+    if not hive then
+        return CFrame.new(4, 7, 345)
+    end
+
+    local spawnPos = hive:FindFirstChild("SpawnPos")
+    if spawnPos and spawnPos:IsA("CFrameValue") then
+        return spawnPos.Value * CFrame.new(0, 3, 0)
+    end
+
+    return CFrame.new(4, 7, 345)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 1. CLAIM HIVE
+-- ═══════════════════════════════════════════════════════════
+local function claimHive()
+    log(">> Claim Hive")
+
+    if getMyHive() then
+        log("OK: đã có hive")
+        return true
+    end
+
+    tweenTo(CFrame.new(4, 7, 345))
+    task.wait(1)
+
+    for _, hive in pairs(workspace.Honeycombs:GetChildren()) do
+        if hive:IsA("Model") and hive:FindFirstChild("Owner") and hive.Owner.Value == nil then
+            local hiveID = hive:FindFirstChild("HiveID")
+            if hiveID then
+                fireEvent("ClaimHive", hiveID.Value)
+                task.wait(2)
+
+                if hive.Owner.Value == plr then
+                    log("Claimed hive " .. hiveID.Value)
+                    return true
+                end
+            end
+        end
+    end
+
+    log("FAIL: không claim được hive")
+    return false
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 2. REDEEM CODES
+-- ═══════════════════════════════════════════════════════════
+local function redeemCodes()
+    log(">> Redeem Codes")
+
+    local codes = {
+        -- Codes từ guide
+        "BeesBuzz123", "38217", "BopMaster", "Connoisseur",
+        "Crawlers", "Nectar", "Roof", "Wax",
+        -- Codes phổ biến khác
+        "Teespring", "Cog", "Troggles", "1MLikes", "PlushFriday",
+        "Millie", "Jumpstart", "WordFactory", "Cubly", "Mocito",
+        "2MFavorites", "Gumaden", "Discord100k", "Sure",
+        "SecretProfileCode", "ClubConverters", "RebootFriday",
+        "FuzzyFriday", "Tornado", "Leftovers", "Luther",
+        "Boosted", "Wink", "ClubBean", "Gummy",
+        "500mil", "1BVisits", "2Billion", "3Billion",
+    }
+
+    for i, code in ipairs(codes) do
+        if not running then return end
+        fireEvent("PromoCodeEvent", code)
+        task.wait(0.5)
+    end
+
+    log("Codes done (" .. #codes .. ")")
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 3. BUY ITEMS (ItemPackageEvent)
+-- ═══════════════════════════════════════════════════════════
+local function buyItem(category, itemType, amount)
+    local args = {Category = category, Type = itemType}
+    if amount then
+        args.Amount = amount
+    end
+
+    local result = invokeEvent("ItemPackageEvent", "Purchase", args)
+    return result ~= nil
+end
+
+local function buyAccessoriesByMilestone(beeCount)
+    log(">> Buy accessories (bees=" .. beeCount .. ")")
+
+    -- Tween đến BasicShop
+    tweenTo(CFrame.new(96, 12, 318))
+    task.wait(1)
+
+    if beeCount < 5 then
+        -- Đầu game: tools cơ bản
+        buyItem("Collector", "Scooper")
+        task.wait(0.4)
+        buyItem("Collector", "Clippers")
+        task.wait(0.4)
+        buyItem("Collector", "Magnet")
+        task.wait(0.4)
+        buyItem("Accessory", "Pouch")
+        task.wait(0.4)
+    elseif beeCount < 10 then
+        -- 5-10 bees
+        buyItem("Accessory", "Jar")
+        task.wait(0.4)
+        buyItem("Accessory", "Helmet")
+        task.wait(0.4)
+        buyItem("Accessory", "Belt Pocket")
+        task.wait(0.4)
+        buyItem("Accessory", "Basic Boots")
+        task.wait(0.4)
+    elseif beeCount < 15 then
+        -- 10-15 bees
+        buyItem("Accessory", "Canister")
+        task.wait(0.4)
+        buyItem("Collector", "Rake")
+        task.wait(0.4)
+        buyItem("Collector", "Vacuum")
+        task.wait(0.4)
+        buyItem("Accessory", "Backpack")
+        task.wait(0.4)
+    end
+
+    log("Accessories done")
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 4. BUY EGG + HATCH
+-- ═══════════════════════════════════════════════════════════
+local function buyBasicEgg()
+    log(">> Buy Basic Egg")
+    tweenTo(CFrame.new(-146, 13, 231))
+    task.wait(1)
+    buyItem("Eggs", "Basic", 1)
+    task.wait(0.5)
+end
+
+local function hatchEgg()
+    log(">> Hatch Egg")
+
+    tweenTo(getHivePosition())
+    task.wait(1)
+
+    local hive = getMyHive()
+    if not hive then
+        log("FAIL: no hive")
+        return false
+    end
+
+    local hiveID = hive.HiveID.Value
+    local slot = getEmptyHiveSlot()
+
+    if not slot then
+        log("FAIL: no empty slot")
+        return false
+    end
+
+    log("Hatch hive=" .. hiveID .. " slot=" .. slot)
+    local result = invokeEvent("ConstructHiveCellFromEgg", hiveID, slot, "Basic", 1, false)
+    task.wait(1)
+
+    log("Hatch result: " .. tostring(result ~= nil))
+    return result ~= nil
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 5. NPC ALERT CHECK
+-- ═══════════════════════════════════════════════════════════
 local function npcHasAlert(npcName)
     local npc = workspace.NPCs:FindFirstChild(npcName)
     if not npc then return false end
+
     local platform = npc:FindFirstChild("Platform")
     if not platform then return false end
+
     local alertPos = platform:FindFirstChild("AlertPos")
     if not alertPos then return false end
+
     local alertGui = alertPos:FindFirstChild("AlertGui")
     if not alertGui then return false end
-    for _, c in pairs(alertGui:GetDescendants()) do
-        if c:IsA("ImageLabel") and c.ImageTransparency == 0 then return true end
+
+    for _, child in pairs(alertGui:GetDescendants()) do
+        if child:IsA("ImageLabel") and child.ImageTransparency == 0 then
+            return true
+        end
     end
     return false
 end
 
--- ═══ TALK NPC ═══
-local function talkNPC(npcName, pos)
-    log("Talk: " .. npcName)
+-- ═══════════════════════════════════════════════════════════
+-- 6. TALK NPC (nhận quest)
+-- ═══════════════════════════════════════════════════════════
+local function talkNPC(npcName, npcPos)
+    log(">> Talk to: " .. npcName)
+
     local npc = workspace.NPCs:FindFirstChild(npcName)
-    if not npc then return false end
+    if not npc then
+        log("FAIL: NPC not found")
+        return false
+    end
 
-    tween(CFrame.new(pos))
+    -- Tween đến NPC
+    tweenTo(CFrame.new(npcPos))
     task.wait(0.3)
-    hrp.CFrame = CFrame.new(pos)
+    hrp.CFrame = CFrame.new(npcPos)
     task.wait(0.3)
 
-    -- Gọi 2 lần để nhận cả quest thường + Beesmas
+    -- Gọi ButtonEffect 2 lần để nhận cả Beesmas + quest thường
     for i = 1, 2 do
         pcall(function()
-            local cac = require(RS.Activatables.NPCs)
-            cac.ButtonEffect(plr, npc)
+            local NPCsModule = require(ReplicatedStorage.Activatables.NPCs)
+            NPCsModule.ButtonEffect(plr, npc)
         end)
+
+        -- Đợi dialog hiện
         local npcGui = plr.PlayerGui.ScreenGui.NPC
-        local t = 0
-        while not npcGui.Visible and t < 3 do task.wait(0.2); t += 0.2 end
+        local waited = 0
+        while not npcGui.Visible and waited < 3 do
+            task.wait(0.2)
+            waited = waited + 0.2
+        end
+
+        -- Đợi dialog đóng (auto skip ở RunService loop)
         if npcGui.Visible then
-            local t2 = 0
-            while npcGui.Visible and t2 < 10 do task.wait(0.2); t2 += 0.2 end
+            local waited2 = 0
+            while npcGui.Visible and waited2 < 10 do
+                task.wait(0.2)
+                waited2 = waited2 + 0.2
+            end
             task.wait(0.5)
         end
     end
+
     log("OK: " .. npcName)
     return true
 end
 
--- ═══ MỞ QUEST UI (force visible toàn bộ) ═══
+local function acceptAllQuests()
+    local beeCount = countBees()
+    log(">> Accept all quests | Bees: " .. beeCount)
+
+    for _, info in ipairs(NPC_QUESTS) do
+        if not running then return end
+
+        if beeCount >= info.minBees then
+            if npcHasAlert(info.name) then
+                log("Alert ON: " .. info.name)
+                talkNPC(info.name, info.pos)
+                task.wait(1)
+            else
+                log("Skip " .. info.name .. " (no alert)")
+            end
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 7. QUEST UI - đọc quest
+-- ═══════════════════════════════════════════════════════════
 local function openQuestTab()
     pcall(function()
         local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
         if not sg then return end
+
         local menus = sg:FindFirstChild("Menus")
         if not menus then return end
 
-        -- Force show menus
+        -- Force show parent frames
         if menus:IsA("GuiObject") then menus.Visible = true end
 
-        -- Force show Quests frame
         local children = menus:FindFirstChild("Children")
-        if children and children:IsA("GuiObject") then children.Visible = true end
+        if children and children:IsA("GuiObject") then
+            children.Visible = true
+        end
+
         local questsFrame = children and children:FindFirstChild("Quests")
-        if questsFrame and questsFrame:IsA("GuiObject") then questsFrame.Visible = true end
+        if questsFrame and questsFrame:IsA("GuiObject") then
+            questsFrame.Visible = true
+        end
 
-        -- Tìm Quests Tab và simulate click
         local childTabs = menus:FindFirstChild("ChildTabs")
-        if childTabs and childTabs:IsA("GuiObject") then childTabs.Visible = true end
-        local questTab = childTabs and childTabs:FindFirstChild("Quests Tab")
+        if childTabs and childTabs:IsA("GuiObject") then
+            childTabs.Visible = true
+        end
 
+        -- Click Quests Tab button
+        local questTab = childTabs and childTabs:FindFirstChild("Quests Tab")
         if questTab then
-            -- Cách 1: Activate
+            -- Method 1: Activate
             pcall(function() questTab:Activate() end)
-            -- Cách 2: VirtualInput click
+
+            -- Method 2: VirtualInput click
             pcall(function()
-                local vim = game:GetService("VirtualInputManager")
-                local p = questTab.AbsolutePosition
-                local sz = questTab.AbsoluteSize
-                vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, true, game, 1)
+                local pos = questTab.AbsolutePosition
+                local size = questTab.AbsoluteSize
+                local centerX = pos.X + size.X / 2
+                local centerY = pos.Y + size.Y / 2
+                VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 1)
                 task.wait(0.05)
-                vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, false, game, 1)
+                VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 1)
             end)
-            -- Cách 3: Fire MouseButton1Click signal
+
+            -- Method 3: Fire connections
             pcall(function()
-                if questTab:IsA("ImageButton") or questTab:IsA("TextButton") then
+                if getconnections then
                     for _, conn in pairs(getconnections(questTab.MouseButton1Click)) do
                         conn:Fire()
                     end
@@ -199,40 +550,51 @@ local function openQuestTab()
     task.wait(1)
 end
 
--- ═══ READ QUEST TASKS (chỉ NPC đủ bee req) ═══
 local function getQuestTasks()
     -- Mở quest UI trước
     openQuestTab()
 
-    local bees = countBees()
+    local beeCount = countBees()
     local tasks = {}
+
+    -- Tạo danh sách NPC đủ điều kiện
     local allowedNPCs = {}
-    for _, n in ipairs(NPC_QUESTS) do
-        if bees >= n.minBees then
-            allowedNPCs[n.name] = true
-            local short = n.name:gsub(" Bear", ""):gsub(" Bee", "")
+    for _, info in ipairs(NPC_QUESTS) do
+        if beeCount >= info.minBees then
+            allowedNPCs[info.name] = true
+            -- Tên rút gọn để match title (VD: "Black Bear's Honey Wreath" -> match "Black")
+            local short = info.name:gsub(" Bear", ""):gsub(" Bee", "")
             allowedNPCs[short] = true
         end
     end
 
+    -- Đọc từ quest UI
     pcall(function()
         local QuestF = plr.PlayerGui.ScreenGui.Menus.Children.Quests.Content
+
         for _, frame in pairs(QuestF:GetDescendants()) do
             if frame:IsA("Frame") and frame.Name == "QuestBox" then
                 local titleBar = frame:FindFirstChild("TitleBarBG")
                 local titleLabel = titleBar and titleBar:FindFirstChild("TitleBar")
+
                 if titleLabel then
                     local title = titleLabel.Text
+
+                    -- Check NPC có trong danh sách allowed không
                     local isAllowed = false
                     for npcName in pairs(allowedNPCs) do
-                        if title:find(npcName) then isAllowed = true break end
+                        if title:find(npcName) then
+                            isAllowed = true
+                            break
+                        end
                     end
+
                     if isAllowed then
                         local taskBar = frame:FindFirstChild("TaskBar")
                         if taskBar then
                             for _, desc in pairs(taskBar:GetChildren()) do
                                 if desc:IsA("TextLabel") and desc.Name == "Description" and desc.Text ~= "" then
-                                    table.insert(tasks, {title = title, desc = desc.Text})
+                                    table.insert(tasks, desc.Text)
                                 end
                             end
                         end
@@ -241,34 +603,37 @@ local function getQuestTasks()
             end
         end
     end)
+
     log("Found " .. #tasks .. " quest tasks")
     return tasks
 end
 
--- ═══ PARSE FIELDS FROM QUEST ═══
-local function getQuestFields(questFilter)
+local function getQuestFields()
     local tasks = getQuestTasks()
     local fields = {}
     local seen = {}
-    for _, t in ipairs(tasks) do
-        -- Filter theo quest title nếu có
-        if questFilter and questFilter ~= "Auto" and not t.title:find(questFilter) then
-            continue
-        end
-        local lower = t.desc:lower()
+
+    for _, descText in ipairs(tasks) do
+        local lower = descText:lower()
+
+        -- Chỉ lấy task collect pollen
         if lower:find("collect") and lower:find("pollen") then
             for keyword, fieldName in pairs(FIELD_MAP) do
                 if lower:find(keyword) and not seen[fieldName] then
                     seen[fieldName] = true
                     table.insert(fields, fieldName)
+                    log("Quest field: " .. fieldName)
                 end
             end
         end
     end
+
     return fields
 end
 
--- ═══ TOKEN COLLECT (smart walk) ═══
+-- ═══════════════════════════════════════════════════════════
+-- 8. TOKEN DETECTION
+-- ═══════════════════════════════════════════════════════════
 local function isToken(obj)
     if not obj or not obj:IsA("BasePart") then return false end
     if obj.Orientation.Z ~= 0 then return false end
@@ -277,31 +642,35 @@ local function isToken(obj)
 end
 
 local function getNearbyTokens(pos, range)
-    range = range or State.CollectRange
     local list = {}
-    if not workspace:FindFirstChild("Collectibles") then return list end
-    for _, t in pairs(workspace.Collectibles:GetChildren()) do
-        if isToken(t) and (t.Position - pos).Magnitude < range then
-            table.insert(list, t)
+    local collectibles = workspace:FindFirstChild("Collectibles")
+    if not collectibles then return list end
+
+    for _, obj in pairs(collectibles:GetChildren()) do
+        if isToken(obj) and (obj.Position - pos).Magnitude < range then
+            table.insert(list, obj)
         end
     end
     return list
 end
 
--- ═══ MOB DETECTION ═══
+-- ═══════════════════════════════════════════════════════════
+-- 9. MOB DETECTION & AVOID
+-- ═══════════════════════════════════════════════════════════
 local function getNearbyMobs(pos, range)
-    range = range or 30
     local list = {}
-    local folders = {workspace:FindFirstChild("Monsters"), workspace:FindFirstChild("FEMonsters")}
-    for _, folder in ipairs(folders) do
+
+    for _, folderName in ipairs({"Monsters", "FEMonsters"}) do
+        local folder = workspace:FindFirstChild(folderName)
         if folder then
             for _, mob in pairs(folder:GetChildren()) do
                 if mob:IsA("Model") then
-                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mobHum = mob:FindFirstChildOfClass("Humanoid")
                     local part = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart")
-                    if hum and hum.Health > 0 and part then
+
+                    if mobHum and mobHum.Health > 0 and part then
                         if (part.Position - pos).Magnitude < range then
-                            table.insert(list, {model = mob, hum = hum, part = part})
+                            table.insert(list, mob)
                         end
                     end
                 end
@@ -311,118 +680,137 @@ local function getNearbyMobs(pos, range)
     return list
 end
 
--- ═══ AVOID MOB (spam nhảy đứng yên đợi mob chết) ═══
-local function avoidMobs(pos)
-    local mobs = getNearbyMobs(pos, 35)
-    if #mobs == 0 then return false end
+local function avoidMobs()
+    local mobs = getNearbyMobs(hrp.Position, 35)
+    if #mobs == 0 then return end
 
-    log("⚠️ " .. #mobs .. " mobs detected, avoiding...")
+    log("⚠️ " .. #mobs .. " mobs nearby, jumping to avoid...")
+
     local startTime = tick()
-    while #mobs > 0 and (tick() - startTime) < 30 and State.Running do
-        -- Spam nhảy
-        if hum then hum.Jump = true end
+    while #mobs > 0 and (tick() - startTime) < 30 and running do
+        if hum then
+            hum.Jump = true
+        end
         task.wait(0.3)
-        -- Re-check mobs
         mobs = getNearbyMobs(hrp.Position, 35)
     end
-    log("Mobs cleared, resume farm")
-    return true
+
+    log("Mobs cleared")
 end
 
--- ═══ CHECK IN FIELD ═══
+-- ═══════════════════════════════════════════════════════════
+-- 10. CHECK IN FIELD
+-- ═══════════════════════════════════════════════════════════
 local function isInField(field)
     if not hrp or not field then return false end
+
     local fp = field.Position
     local fs = field.Size
     local hp = hrp.Position
+
     return math.abs(hp.X - fp.X) < fs.X * 0.6
         and math.abs(hp.Z - fp.Z) < fs.Z * 0.6
         and math.abs(hp.Y - fp.Y) < 30
 end
 
--- ═══ SMART WALK ═══
+-- ═══════════════════════════════════════════════════════════
+-- 11. SMART WALK
+-- ═══════════════════════════════════════════════════════════
 local function smartWalk(targetPos)
-    if not hum or not hrp then refresh() end
+    if not hum or not hrp then refreshCharacter() end
     if not hum then return end
-    hum.WalkSpeed = State.FarmSpeed
+
+    hum.WalkSpeed = FARM_WALK_SPEED
     hum:MoveTo(targetPos)
-    local conn
+
     local arrived = false
-    conn = hum.MoveToFinished:Connect(function() arrived = true end)
-    local t0 = tick()
-    while not arrived and (tick() - t0) < 5 do
+    local conn = hum.MoveToFinished:Connect(function()
+        arrived = true
+    end)
+
+    local startTime = tick()
+    while not arrived and (tick() - startTime) < 5 do
         task.wait(0.1)
-        if (hrp.Position - targetPos).Magnitude < 5 then arrived = true end
+        if (hrp.Position - targetPos).Magnitude < 5 then
+            arrived = true
+        end
     end
+
     if conn then conn:Disconnect() end
 end
 
--- ═══ SMART FARM FIELD ═══
+-- ═══════════════════════════════════════════════════════════
+-- 12. SMART FARM FIELD
+-- ═══════════════════════════════════════════════════════════
 local function smartFarm(fieldName, duration)
-    duration = duration or 30
-    log("Smart farm: " .. fieldName)
-    local f = workspace.FlowerZones:FindFirstChild(fieldName)
-    if not f then log("Field not found: " .. fieldName) return end
+    duration = duration or FARM_TIME
+    log(">> Smart farm: " .. fieldName)
 
-    local p = f.Position
-    local s = f.Size
-    local range = f:FindFirstChild("Range") and f.Range.Value or 60
+    local field = workspace.FlowerZones:FindFirstChild(fieldName)
+    if not field then
+        log("Field not found: " .. fieldName)
+        return
+    end
 
-    -- Tween đến field
-    tween(CFrame.new(p.X, p.Y + 3, p.Z))
+    local fieldPos = field.Position
+    local fieldSize = field.Size
+    local range = field:FindFirstChild("Range") and field.Range.Value or 60
+
+    -- Tween đến center field
+    tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
     task.wait(0.3)
 
-    if hum then hum.WalkSpeed = State.FarmSpeed end
+    if hum then
+        hum.WalkSpeed = FARM_WALK_SPEED
+    end
 
-    local stepX = math.min(s.X * 0.4, range)
-    local stepZ = math.min(s.Z * 0.4, range)
+    local stepX = math.min(fieldSize.X * 0.4, range)
+    local stepZ = math.min(fieldSize.Z * 0.4, range)
 
-    local t0 = tick()
-    while (tick() - t0) < duration and State.Running do
-        -- ✅ Check rơi khỏi field -> tween lại
-        if not isInField(f) then
+    local startTime = tick()
+    while (tick() - startTime) < duration and running do
+        -- Check rơi khỏi field -> tween lại
+        if not isInField(field) then
             log("Rơi khỏi field, tween lại...")
-            tween(CFrame.new(p.X, p.Y + 3, p.Z))
-            task.wait(0.3)
-            if hum then hum.WalkSpeed = State.FarmSpeed end
+            tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
+            task.wait(0.2)
+            if hum then hum.WalkSpeed = FARM_WALK_SPEED end
         end
 
-        -- ✅ Check mob -> avoid
-        avoidMobs(hrp.Position)
+        -- Check mob -> avoid
+        avoidMobs()
 
-        -- Auto collect tokens
-        if State.AutoCollect and workspace:FindFirstChild("Collectibles") then
-            local tokens = getNearbyTokens(hrp.Position, range)
-            for _, tok in ipairs(tokens) do
-                if not State.Running then break end
-                if tok.Parent and (tok.Position - hrp.Position).Magnitude < range then
-                    smartWalk(tok.Position + Vector3.new(0, 1, 0))
-                    -- Re-check field & mob
-                    if not isInField(f) then break end
-                end
+        -- Auto collect tokens trong range
+        local tokens = getNearbyTokens(hrp.Position, range)
+        for _, tok in ipairs(tokens) do
+            if not running then break end
+            if tok.Parent and (tok.Position - hrp.Position).Magnitude < range then
+                smartWalk(tok.Position + Vector3.new(0, 1, 0))
+                if not isInField(field) then break end
             end
         end
 
         -- Zigzag pattern
         for row = -2, 2 do
             for col = -2, 2 do
-                if (tick() - t0) >= duration or not State.Running then break end
-                -- Check mob trước mỗi step
-                avoidMobs(hrp.Position)
+                if (tick() - startTime) >= duration or not running then break end
 
-                local tx = p.X + (col * 0.5) * stepX
-                local tz = p.Z + (row * 0.5) * stepZ
-                smartWalk(Vector3.new(tx, p.Y + 3, tz))
+                avoidMobs()
+
+                local tx = fieldPos.X + (col * 0.5) * stepX
+                local tz = fieldPos.Z + (row * 0.5) * stepZ
+                smartWalk(Vector3.new(tx, fieldPos.Y + 3, tz))
 
                 -- Re-check field
-                if not isInField(f) then
-                    tween(CFrame.new(p.X, p.Y + 3, p.Z))
-                    if hum then hum.WalkSpeed = State.FarmSpeed end
+                if not isInField(field) then
+                    tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
+                    if hum then hum.WalkSpeed = FARM_WALK_SPEED end
                 end
 
-                -- Collect token gần
-                if State.AutoCollect and workspace:FindFirstChild("Collectibles") then
-                    for _, tok in pairs(workspace.Collectibles:GetChildren()) do
+                -- Collect token gần khi đi
+                local collectibles = workspace:FindFirstChild("Collectibles")
+                if collectibles then
+                    for _, tok in pairs(collectibles:GetChildren()) do
                         if isToken(tok) and (tok.Position - hrp.Position).Magnitude < 20 then
                             smartWalk(tok.Position + Vector3.new(0, 1, 0))
                         end
@@ -432,206 +820,100 @@ local function smartFarm(fieldName, duration)
         end
     end
 
-    if hum then hum.WalkSpeed = State.NormalSpeed end
-end
-
--- ═══ MAIN ACTIONS ═══
-function doAcceptQuests()
-    local bees = countBees()
-    log("Accept quests | Bees: " .. bees)
-    for _, info in ipairs(NPC_QUESTS) do
-        if bees >= info.minBees then
-            if npcHasAlert(info.name) then
-                log("Alert: " .. info.name)
-                talkNPC(info.name, info.pos)
-                task.wait(1)
-            else
-                log("Skip " .. info.name)
-            end
-        end
-        if not State.Running then return end
+    -- Reset speed
+    if hum then
+        hum.WalkSpeed = NORMAL_WALK_SPEED
     end
+
+    log("Farm done: " .. fieldName)
 end
 
-function doFarmQuest()
-    local fields = getQuestFields(State.SelectedQuest)
+-- ═══════════════════════════════════════════════════════════
+-- 13. FARM QUEST FIELDS
+-- ═══════════════════════════════════════════════════════════
+local function farmQuestFields()
+    local fields = getQuestFields()
+
     if #fields == 0 then
-        log("No quest fields, default Dandelion")
-        smartFarm("Dandelion Field", 30)
+        log("No quest fields, default farm Dandelion")
+        smartFarm("Dandelion Field", FARM_TIME)
         return
     end
-    log("Farm quest fields: " .. #fields)
-    for _, f in ipairs(fields) do
-        if not State.Running then return end
-        smartFarm(f, 30)
+
+    log("Farm " .. #fields .. " quest fields")
+
+    for _, fieldName in ipairs(fields) do
+        if not running then return end
+        smartFarm(fieldName, FARM_TIME)
         task.wait(0.5)
     end
 end
 
-function getQuestList()
-    local list = {"Auto"}
-    local tasks = getQuestTasks()
-    local seen = {Auto = true}
-    for _, t in ipairs(tasks) do
-        if not seen[t.title] then
-            seen[t.title] = true
-            table.insert(list, t.title)
-        end
-    end
-    return list
+-- ═══════════════════════════════════════════════════════════
+-- 14. CONVERT HONEY
+-- ═══════════════════════════════════════════════════════════
+local function convertHoney()
+    log(">> Convert honey")
+    tweenTo(getHivePosition())
+    task.wait(6)
+    log("Convert done")
 end
 
--- ═══ GUI ═══
-local function createGUI()
-    local g = Instance.new("ScreenGui")
-    g.Name = "FunctestUI"
-    g.ResetOnSpawn = false
-    g.Parent = plr:WaitForChild("PlayerGui")
+-- ═══════════════════════════════════════════════════════════
+-- MAIN PIPELINE
+-- ═══════════════════════════════════════════════════════════
+log("========== KAITUN v5 START ==========")
+task.wait(2)
 
-    local main = Instance.new("Frame", g)
-    main.Size = UDim2.new(0, 250, 0, 280)
-    main.Position = UDim2.new(0, 10, 0, 100)
-    main.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    main.BorderSizePixel = 0
-    main.Active = true
-    main.Draggable = true
-    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+-- ─── Phase 1: Setup ───
+log("=== PHASE 1: SETUP ===")
 
-    local title = Instance.new("TextLabel", main)
-    title.Size = UDim2.new(1, 0, 0, 30)
-    title.BackgroundColor3 = Color3.fromRGB(50, 50, 80)
-    title.Text = "🐝 BSS Functest"
-    title.TextColor3 = Color3.new(1, 1, 1)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 14
-    title.BorderSizePixel = 0
-    Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+-- Claim hive (3 retries)
+for attempt = 1, 3 do
+    if claimHive() then break end
+    task.wait(2)
+end
+task.wait(1)
 
-    -- Quest selector dropdown
-    local qLabel = Instance.new("TextLabel", main)
-    qLabel.Size = UDim2.new(1, -10, 0, 20)
-    qLabel.Position = UDim2.new(0, 5, 0, 35)
-    qLabel.Text = "Quest:"
-    qLabel.TextColor3 = Color3.new(1, 1, 1)
-    qLabel.BackgroundTransparency = 1
-    qLabel.Font = Enum.Font.Gotham
-    qLabel.TextSize = 12
-    qLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-    local qBox = Instance.new("TextButton", main)
-    qBox.Size = UDim2.new(1, -10, 0, 30)
-    qBox.Position = UDim2.new(0, 5, 0, 55)
-    qBox.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-    qBox.Text = "Auto (all)"
-    qBox.TextColor3 = Color3.new(1, 1, 1)
-    qBox.Font = Enum.Font.Gotham
-    qBox.TextSize = 12
-    qBox.BorderSizePixel = 0
-    Instance.new("UICorner", qBox).CornerRadius = UDim.new(0, 4)
-
-    local dropdown = Instance.new("ScrollingFrame", main)
-    dropdown.Size = UDim2.new(1, -10, 0, 120)
-    dropdown.Position = UDim2.new(0, 5, 0, 88)
-    dropdown.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    dropdown.Visible = false
-    dropdown.ScrollBarThickness = 4
-    dropdown.CanvasSize = UDim2.new(0, 0, 0, 0)
-    dropdown.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    Instance.new("UICorner", dropdown).CornerRadius = UDim.new(0, 4)
-    local layout = Instance.new("UIListLayout", dropdown)
-    layout.SortOrder = Enum.SortOrder.LayoutOrder
-
-    qBox.MouseButton1Click:Connect(function()
-        dropdown.Visible = not dropdown.Visible
-        if dropdown.Visible then
-            -- Refresh list
-            for _, c in pairs(dropdown:GetChildren()) do
-                if c:IsA("TextButton") then c:Destroy() end
-            end
-            for _, q in ipairs(getQuestList()) do
-                local b = Instance.new("TextButton", dropdown)
-                b.Size = UDim2.new(1, 0, 0, 25)
-                b.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-                b.TextColor3 = Color3.new(1, 1, 1)
-                b.Text = q
-                b.Font = Enum.Font.Gotham
-                b.TextSize = 11
-                b.BorderSizePixel = 0
-                b.MouseButton1Click:Connect(function()
-                    State.SelectedQuest = q
-                    qBox.Text = q:sub(1, 30)
-                    dropdown.Visible = false
-                end)
-            end
-        end
-    end)
-
-    -- Buttons
-    local function btn(text, y, color, onClick)
-        local b = Instance.new("TextButton", main)
-        b.Size = UDim2.new(1, -10, 0, 32)
-        b.Position = UDim2.new(0, 5, 0, y)
-        b.BackgroundColor3 = color
-        b.Text = text
-        b.TextColor3 = Color3.new(1, 1, 1)
-        b.Font = Enum.Font.GothamBold
-        b.TextSize = 13
-        b.BorderSizePixel = 0
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
-        b.MouseButton1Click:Connect(onClick)
-        return b
-    end
-
-    btn("📋 Accept Quests", 95, Color3.fromRGB(70, 130, 200), function()
-        State.Running = true
-        task.spawn(doAcceptQuests)
-    end)
-
-    btn("🌻 Farm Quest", 132, Color3.fromRGB(70, 180, 70), function()
-        State.Running = true
-        task.spawn(doFarmQuest)
-    end)
-
-    btn("🔄 Loop (Accept + Farm)", 169, Color3.fromRGB(180, 130, 70), function()
-        State.Running = true
-        task.spawn(function()
-            while State.Running do
-                doAcceptQuests()
-                task.wait(1)
-                doFarmQuest()
-                task.wait(1)
-            end
-        end)
-    end)
-
-    btn("⏹ STOP", 206, Color3.fromRGB(200, 50, 50), function()
-        State.Running = false
-        if hum then hum.WalkSpeed = State.NormalSpeed end
-        log("STOPPED")
-    end)
-
-    local status = Instance.new("TextLabel", main)
-    status.Size = UDim2.new(1, -10, 0, 30)
-    status.Position = UDim2.new(0, 5, 0, 243)
-    status.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    status.Text = "Ready"
-    status.TextColor3 = Color3.fromRGB(150, 255, 150)
-    status.Font = Enum.Font.Gotham
-    status.TextSize = 11
-    status.BorderSizePixel = 0
-    Instance.new("UICorner", status).CornerRadius = UDim.new(0, 4)
-
-    -- Update status
-    task.spawn(function()
-        while g.Parent do
-            status.Text = string.format("Bees: %d | %s | Speed: %d",
-                countBees(),
-                State.Running and "RUNNING" or "Idle",
-                hum and hum.WalkSpeed or 16)
-            task.wait(1)
-        end
-    end)
+-- Redeem codes
+if running then
+    redeemCodes()
+    task.wait(1)
 end
 
-createGUI()
-log("=== FUNCTEST READY ===")
+-- Buy initial accessories
+if running then
+    buyAccessoriesByMilestone(countBees())
+    task.wait(1)
+end
+
+-- ─── Phase 2: Main Loop ───
+log("=== PHASE 2: MAIN LOOP ===")
+
+while countBees() < TARGET_BEES and running do
+    -- Accept quests từ NPC có alert
+    acceptAllQuests()
+    task.wait(1)
+
+    -- Farm theo quest field
+    farmQuestFields()
+    task.wait(0.5)
+
+    -- Convert honey
+    convertHoney()
+    task.wait(0.5)
+
+    -- Buy egg + hatch
+    buyBasicEgg()
+    task.wait(0.5)
+    hatchEgg()
+    task.wait(0.5)
+
+    -- Buy accessories milestone tiếp theo
+    buyAccessoriesByMilestone(countBees())
+    task.wait(0.5)
+
+    log("=== Bees: " .. countBees() .. "/" .. TARGET_BEES .. " ===")
+end
+
+log("========== KAITUN COMPLETE: " .. countBees() .. " bees ==========")
