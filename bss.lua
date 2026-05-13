@@ -287,14 +287,6 @@ local function redeemCodes()
         -- Codes từ guide
         "BeesBuzz123", "38217", "BopMaster", "Connoisseur",
         "Crawlers", "Nectar", "Roof", "Wax",
-        -- Codes phổ biến khác
-        "Teespring", "Cog", "Troggles", "1MLikes", "PlushFriday",
-        "Millie", "Jumpstart", "WordFactory", "Cubly", "Mocito",
-        "2MFavorites", "Gumaden", "Discord100k", "Sure",
-        "SecretProfileCode", "ClubConverters", "RebootFriday",
-        "FuzzyFriday", "Tornado", "Leftovers", "Luther",
-        "Boosted", "Wink", "ClubBean", "Gummy",
-        "500mil", "1BVisits", "2Billion", "3Billion",
     }
 
     for i, code in ipairs(codes) do
@@ -373,8 +365,9 @@ local function buyBasicEgg()
 end
 
 local function hatchEgg()
-    log(">> Hatch Egg")
+    log(">> Hatch Egg (tween về hive)")
 
+    -- Tween đến hive trước
     tweenTo(getHivePosition())
     task.wait(1)
 
@@ -398,6 +391,46 @@ local function hatchEgg()
 
     log("Hatch result: " .. tostring(result ~= nil))
     return result ~= nil
+end
+
+-- Hatch tất cả egg đang có (loop đến khi không hatch được nữa)
+local function hatchAllEggs()
+    log(">> Hatch ALL eggs")
+
+    -- Tween về hive 1 lần
+    tweenTo(getHivePosition())
+    task.wait(1)
+
+    local maxAttempts = 50
+    local hatched = 0
+
+    for i = 1, maxAttempts do
+        if not running then return hatched end
+
+        local hive = getMyHive()
+        if not hive then break end
+
+        local slot = getEmptyHiveSlot()
+        if not slot then
+            log("Hết slot trống")
+            break
+        end
+
+        local hiveID = hive.HiveID.Value
+        local result = invokeEvent("ConstructHiveCellFromEgg", hiveID, slot, "Basic", 1, false)
+        task.wait(0.8)
+
+        if result then
+            hatched = hatched + 1
+            log("Hatched #" .. hatched)
+        else
+            log("Hết egg hoặc fail, dừng hatch")
+            break
+        end
+    end
+
+    log("Hatch all done: " .. hatched .. " eggs")
+    return hatched
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -906,7 +939,7 @@ while countBees() < TARGET_BEES and running do
     -- Buy egg + hatch
     buyBasicEgg()
     task.wait(0.5)
-    hatchEgg()
+    hatchAllEggs() -- hatch hết egg đang có
     task.wait(0.5)
 
     -- Buy accessories milestone tiếp theo
