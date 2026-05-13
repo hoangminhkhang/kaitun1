@@ -96,21 +96,27 @@ local function hasActiveQuest()
     return false
 end
 
--- ═══ TALK NPC (KHÔNG cần tween đến NPC) ═══
+-- ═══ TALK NPC (tween đến NPC + ButtonEffect) ═══
 local function talkNPC(npcName, pos)
     log("Talk: " .. npcName)
 
     local npc = workspace.NPCs:FindFirstChild(npcName)
     if not npc then log("FAIL: NPC not found") return false end
 
-    -- Gọi ButtonEffect trực tiếp - không cần tween
+    -- Tween đến platform NPC
+    tween(CFrame.new(pos))
+    task.wait(0.5)
+    hrp.CFrame = CFrame.new(pos)
+    task.wait(0.5)
+
+    -- Gọi ButtonEffect để mở dialog
     local ok = pcall(function()
         local cac = require(RS:WaitForChild("Activatables"):WaitForChild("NPCs"))
         cac.ButtonEffect(plr, npc)
     end)
     log("ButtonEffect ok: " .. tostring(ok))
 
-    -- Đợi dialog hiện
+    -- Đợi dialog hiện rồi auto-skip (RunService loop)
     local npcGui = plr.PlayerGui.ScreenGui.NPC
     local t = 0
     while not npcGui.Visible and t < 5 do
