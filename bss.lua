@@ -166,14 +166,56 @@ local FIELD_MAP = {
     ["ant"]         = "Ant Field",
 }
 
--- ═══ ĐỌC QUEST TASKS TỪ UI ═══
+-- ═══ ĐỌC QUEST TASKS TỪ UI (chỉ NPC đủ bee req) ═══
 local function getQuestTasks()
+    local bees = countBees()
     local tasks = {}
+
+    -- Tạo set NPC đủ điều kiện
+    local allowedNPCs = {}
+    for _, n in ipairs(NPC_QUESTS) do
+        if bees >= n.minBees then
+            allowedNPCs[n.name] = true
+            -- Cho cả tên rút gọn (bỏ "Bear"/"Bee")
+            local short = n.name:gsub(" Bear", ""):gsub(" Bee", "")
+            allowedNPCs[short] = true
+        end
+    end
+
     pcall(function()
         local QuestF = plr.PlayerGui.ScreenGui.Menus.Children.Quests.Content
+        -- Mỗi quest box có TitleBar (tên NPC) + TaskBar (descriptions)
         for _, frame in pairs(QuestF:GetDescendants()) do
-            if frame:IsA("TextLabel") and frame.Name == "Description" and frame.Text ~= "" then
-                table.insert(tasks, frame.Text)
+            if frame:IsA("Frame") and frame.Name == "QuestBox" then
+                -- Đọc title NPC
+                local titleBar = frame:FindFirstChild("TitleBarBG")
+                local titleLabel = titleBar and titleBar:FindFirstChild("TitleBar")
+                if not titleLabel then continue end
+                local title = titleLabel.Text -- VD: "Black Bear's Honey Wreath"
+
+                -- Check NPC có trong allowed list không
+                local isAllowed = false
+                for npcName in pairs(allowedNPCs) do
+                    if title:find(npcName) then
+                        isAllowed = true
+                        break
+                    end
+                end
+
+                if isAllowed then
+                    -- Lấy tất cả Description từ quest này
+                    local taskBar = frame:FindFirstChild("TaskBar")
+                    if taskBar then
+                        for _, desc in pairs(taskBar:GetChildren()) do
+                            if desc:IsA("TextLabel") and desc.Name == "Description" and desc.Text ~= "" then
+                                table.insert(tasks, desc.Text)
+                                log("Task[" .. title .. "]: " .. desc.Text:sub(1, 40))
+                            end
+                        end
+                    end
+                else
+                    log("Skip quest: " .. title .. " (NPC out of bee req)")
+                end
             end
         end
     end)
@@ -266,18 +308,22 @@ local function getAllQuestNPCs()
     return list
 end
 
--- ═══ CHECK NPC CÓ QUEST AVAILABLE KHÔNG ═══
--- Script mẫu: v.Platform.AlertPos.AlertGui.ImageLabel.ImageTransparency == 0
-local function npcHasQuestAvailable(npc)
+-- ═══ CHECK NPC CÓ QUEST AVAILABLE ═══
+-- Game hiện AlertGui (chấm than vàng) trên NPC khi có quest sẵn
+local function npcHasAlert(npcName)
+    local npc = workspace.NPCs:FindFirstChild(npcName)
+    if not npc then return false end
     local platform = npc:FindFirstChild("Platform")
     if not platform then return false end
     local alertPos = platform:FindFirstChild("AlertPos")
     if not alertPos then return false end
     local alertGui = alertPos:FindFirstChild("AlertGui")
     if not alertGui then return false end
-    local img = alertGui:FindFirstChildWhichIsA("ImageLabel")
-    if img and img.ImageTransparency == 0 then
-        return true
+    -- Có ImageLabel với ImageTransparency = 0 nghĩa là alert visible
+    for _, child in pairs(alertGui:GetDescendants()) do
+        if child:IsA("ImageLabel") and child.ImageTransparency == 0 then
+            return true
+        end
     end
     return false
 end
@@ -287,17 +333,16 @@ function checkAndDoQuests()
     local bees = countBees()
     log("Bees: " .. bees)
 
-    local npcs = getAllQuestNPCs()
-    log("Found " .. #npcs .. " NPCs")
-
-    for _, info in ipairs(npcs) do
-        -- Check NPC có quest available (có dấu chấm than vàng)
-        if npcHasQuestAvailable(info.npc) then
-            log("Quest available: " .. info.name)
-            talkNPC(info.name, info.pos)
-            task.wait(1.5)
-        else
-            log("Skip " .. info.name .. " (no alert)")
+    for _, info in ipairs(NPC_QUESTS) do
+        if bees >= info.minBees then
+            -- Check NPC có alert (chấm than vàng) - chỉ talk khi có quest available
+            if npcHasAlert(info.name) then
+                log("Alert ON: " .. info.name)
+                talkNPC(info.name, info.pos)
+                task.wait(1)
+            else
+                log("Skip " .. info.name .. " (no alert - already has quest)")
+            end
         end
     end
     log("All quests checked")
