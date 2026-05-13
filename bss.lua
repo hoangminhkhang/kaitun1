@@ -154,15 +154,29 @@ end
 
 -- ═══ MỞ QUEST UI ═══
 local function openQuestTab()
-    pcall(function()
+    local ok = pcall(function()
         local sg = plr.PlayerGui.ScreenGui
         local menus = sg:FindFirstChild("Menus")
         if not menus then return end
+
+        -- Set Menus visible
+        if menus:IsA("GuiObject") then menus.Visible = true end
+
+        -- Tìm Quests Tab
         local childTabs = menus:FindFirstChild("ChildTabs")
         local questTab = childTabs and childTabs:FindFirstChild("Quests Tab")
+
+        -- Force show Quests frame
+        local children = menus:FindFirstChild("Children")
+        local questsFrame = children and children:FindFirstChild("Quests")
+        if questsFrame and questsFrame:IsA("GuiObject") then
+            questsFrame.Visible = true
+        end
+
+        -- Activate tab button
         if questTab then
-            questTab:Activate()
-            -- Backup: Click trực tiếp
+            pcall(function() questTab:Activate() end)
+            -- VirtualInputManager click backup
             local vim = game:GetService("VirtualInputManager")
             local p = questTab.AbsolutePosition
             local sz = questTab.AbsoluteSize
@@ -171,7 +185,8 @@ local function openQuestTab()
             vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, false, game, 1)
         end
     end)
-    task.wait(0.5)
+    log("Open quest tab: " .. tostring(ok))
+    task.wait(0.8)
 end
 
 -- ═══ READ QUEST TASKS (chỉ NPC đủ bee req) ═══
@@ -263,13 +278,64 @@ local function getNearbyTokens(pos, range)
     return list
 end
 
--- ═══ SMART WALK (Humanoid MoveTo với WalkSpeed cao) ═══
+-- ═══ MOB DETECTION ═══
+local function getNearbyMobs(pos, range)
+    range = range or 30
+    local list = {}
+    local folders = {workspace:FindFirstChild("Monsters"), workspace:FindFirstChild("FEMonsters")}
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, mob in pairs(folder:GetChildren()) do
+                if mob:IsA("Model") then
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local part = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart")
+                    if hum and hum.Health > 0 and part then
+                        if (part.Position - pos).Magnitude < range then
+                            table.insert(list, {model = mob, hum = hum, part = part})
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return list
+end
+
+-- ═══ AVOID MOB (spam nhảy đứng yên đợi mob chết) ═══
+local function avoidMobs(pos)
+    local mobs = getNearbyMobs(pos, 35)
+    if #mobs == 0 then return false end
+
+    log("⚠️ " .. #mobs .. " mobs detected, avoiding...")
+    local startTime = tick()
+    while #mobs > 0 and (tick() - startTime) < 30 and State.Running do
+        -- Spam nhảy
+        if hum then hum.Jump = true end
+        task.wait(0.3)
+        -- Re-check mobs
+        mobs = getNearbyMobs(hrp.Position, 35)
+    end
+    log("Mobs cleared, resume farm")
+    return true
+end
+
+-- ═══ CHECK IN FIELD ═══
+local function isInField(field)
+    if not hrp or not field then return false end
+    local fp = field.Position
+    local fs = field.Size
+    local hp = hrp.Position
+    return math.abs(hp.X - fp.X) < fs.X * 0.6
+        and math.abs(hp.Z - fp.Z) < fs.Z * 0.6
+        and math.abs(hp.Y - fp.Y) < 30
+end
+
+-- ═══ SMART WALK ═══
 local function smartWalk(targetPos)
     if not hum or not hrp then refresh() end
     if not hum then return end
     hum.WalkSpeed = State.FarmSpeed
     hum:MoveTo(targetPos)
-    -- Đợi đến nơi (max 5s)
     local conn
     local arrived = false
     conn = hum.MoveToFinished:Connect(function() arrived = true end)
@@ -292,11 +358,10 @@ local function smartFarm(fieldName, duration)
     local s = f.Size
     local range = f:FindFirstChild("Range") and f.Range.Value or 60
 
-    -- Tween đến field (nhanh, vì xa)
+    -- Tween đến field
     tween(CFrame.new(p.X, p.Y + 3, p.Z))
     task.wait(0.3)
 
-    -- Set walk speed cao
     if hum then hum.WalkSpeed = State.FarmSpeed end
 
     local stepX = math.min(s.X * 0.4, range)
@@ -304,26 +369,48 @@ local function smartFarm(fieldName, duration)
 
     local t0 = tick()
     while (tick() - t0) < duration and State.Running do
-        -- Auto collect tokens trong range bằng smart walk
+        -- ✅ Check rơi khỏi field -> tween lại
+        if not isInField(f) then
+            log("Rơi khỏi field, tween lại...")
+            tween(CFrame.new(p.X, p.Y + 3, p.Z))
+            task.wait(0.3)
+            if hum then hum.WalkSpeed = State.FarmSpeed end
+        end
+
+        -- ✅ Check mob -> avoid
+        avoidMobs(hrp.Position)
+
+        -- Auto collect tokens
         if State.AutoCollect and workspace:FindFirstChild("Collectibles") then
             local tokens = getNearbyTokens(hrp.Position, range)
             for _, tok in ipairs(tokens) do
                 if not State.Running then break end
                 if tok.Parent and (tok.Position - hrp.Position).Magnitude < range then
                     smartWalk(tok.Position + Vector3.new(0, 1, 0))
+                    -- Re-check field & mob
+                    if not isInField(f) then break end
                 end
             end
         end
 
-        -- Zigzag pattern bằng smart walk
+        -- Zigzag pattern
         for row = -2, 2 do
             for col = -2, 2 do
                 if (tick() - t0) >= duration or not State.Running then break end
+                -- Check mob trước mỗi step
+                avoidMobs(hrp.Position)
+
                 local tx = p.X + (col * 0.5) * stepX
                 local tz = p.Z + (row * 0.5) * stepZ
                 smartWalk(Vector3.new(tx, p.Y + 3, tz))
 
-                -- Collect tokens gần khi đi
+                -- Re-check field
+                if not isInField(f) then
+                    tween(CFrame.new(p.X, p.Y + 3, p.Z))
+                    if hum then hum.WalkSpeed = State.FarmSpeed end
+                end
+
+                -- Collect token gần
                 if State.AutoCollect and workspace:FindFirstChild("Collectibles") then
                     for _, tok in pairs(workspace.Collectibles:GetChildren()) do
                         if isToken(tok) and (tok.Position - hrp.Position).Magnitude < 20 then
@@ -335,7 +422,6 @@ local function smartFarm(fieldName, duration)
         end
     end
 
-    -- Reset
     if hum then hum.WalkSpeed = State.NormalSpeed end
 end
 
