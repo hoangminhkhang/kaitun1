@@ -12,14 +12,21 @@ plr.CharacterAdded:Connect(function(c) char = c hrp = c:WaitForChild("HumanoidRo
 
 local function log(m) print("[functest] " .. m) end
 
--- ═══ NPC CONFIG ═══
+-- ═══ NPC CONFIG (theo zone đúng) ═══
 local NPC_QUESTS = {
-    {name = "Black Bear",   pos = Vector3.new(-255.79, 6, 296.78),  minBees = 0},
-    {name = "Mother Bear",  pos = Vector3.new(-179.00, 6, 87.75),   minBees = 0},
-    {name = "Panda Bear",   pos = Vector3.new(104.29,  36, 48.47),  minBees = 5},
-    {name = "Brown Bear",   pos = Vector3.new(281.35,  46, 236.98), minBees = 10},
-    {name = "Polar Bear",   pos = Vector3.new(-106.61, 120, -77.14),minBees = 15},
-    {name = "Science Bear", pos = Vector3.new(268.63,  104, 19.67), minBees = 20},
+    -- 0 bees (Hub)
+    {name = "Black Bear",   pos = Vector3.new(-256, 6, 297),    minBees = 0},
+    {name = "Mother Bear",  pos = Vector3.new(-179, 6, 87),     minBees = 0},
+    {name = "Brown Bear",   pos = Vector3.new(281, 46, 237),    minBees = 0},
+    -- 5 bees
+    {name = "Panda Bear",   pos = Vector3.new(104, 36, 48),     minBees = 5},
+    -- 10 bees
+    {name = "Science Bear", pos = Vector3.new(269, 104, 20),    minBees = 10},
+    -- 15 bees
+    {name = "Honey Bee",    pos = Vector3.new(-387, 90, -220),  minBees = 15},
+    {name = "Polar Bear",   pos = Vector3.new(-107, 120, -77),  minBees = 15},
+    -- 35 bees
+    {name = "Spirit Bear",  pos = Vector3.new(-365, 98, 479),   minBees = 35},
 }
 
 -- ═══ NOCLIP ═══
@@ -96,45 +103,138 @@ local function hasActiveQuest()
     return false
 end
 
--- ═══ TALK NPC (tween đến NPC + ButtonEffect) ═══
+-- ═══ TALK NPC (gọi 2 lần để nhận cả quest thường + Beesmas) ═══
 local function talkNPC(npcName, pos)
     log("Talk: " .. npcName)
 
     local npc = workspace.NPCs:FindFirstChild(npcName)
     if not npc then log("FAIL: NPC not found") return false end
 
-    -- Tween đến platform NPC
+    -- Tween đến platform
     tween(CFrame.new(pos))
     task.wait(0.5)
     hrp.CFrame = CFrame.new(pos)
     task.wait(0.5)
 
-    -- Gọi ButtonEffect để mở dialog
-    local ok = pcall(function()
-        local cac = require(RS:WaitForChild("Activatables"):WaitForChild("NPCs"))
-        cac.ButtonEffect(plr, npc)
-    end)
-    log("ButtonEffect ok: " .. tostring(ok))
+    -- Gọi ButtonEffect 2 lần (lần 1 nhận quest thường, lần 2 nhận Beesmas/Give Present)
+    for i = 1, 2 do
+        local ok = pcall(function()
+            local cac = require(RS:WaitForChild("Activatables"):WaitForChild("NPCs"))
+            cac.ButtonEffect(plr, npc)
+        end)
+        log("ButtonEffect " .. i .. ": " .. tostring(ok))
 
-    -- Đợi dialog hiện rồi auto-skip (RunService loop)
-    local npcGui = plr.PlayerGui.ScreenGui.NPC
-    local t = 0
-    while not npcGui.Visible and t < 5 do
-        task.wait(0.2); t += 0.2
-    end
-
-    if npcGui.Visible then
-        log("Dialog open, auto-skipping...")
-        local t2 = 0
-        while npcGui.Visible and t2 < 15 do
-            task.wait(0.2); t2 += 0.2
+        -- Đợi dialog hiện
+        local npcGui = plr.PlayerGui.ScreenGui.NPC
+        local t = 0
+        while not npcGui.Visible and t < 5 do
+            task.wait(0.2); t += 0.2
         end
-        task.wait(1)
-        log("OK: " .. npcName)
-        return true
-    else
-        log("FAIL: dialog not visible")
-        return false
+
+        if npcGui.Visible then
+            -- Đợi dialog đóng (IncrementDialogue tự skip)
+            local t2 = 0
+            while npcGui.Visible and t2 < 12 do
+                task.wait(0.2); t2 += 0.2
+            end
+            task.wait(1)
+        end
+    end
+    log("OK: " .. npcName)
+    return true
+end
+
+-- ═══ FIELD MAP (parse quest description -> field name) ═══
+local FIELD_MAP = {
+    ["sunflower"]   = "Sunflower Field",
+    ["mushroom"]    = "Mushroom Field",
+    ["dandelion"]   = "Dandelion Field",
+    ["blue flower"] = "Blue Flower Field",
+    ["clover"]      = "Clover Field",
+    ["strawberry"]  = "Strawberry Field",
+    ["spider"]      = "Spider Field",
+    ["bamboo"]      = "Bamboo Field",
+    ["pine tree"]   = "Pine Tree Forest",
+    ["rose"]        = "Rose Field",
+    ["cactus"]      = "Cactus Field",
+    ["pumpkin"]     = "Pumpkin Patch",
+    ["stump"]       = "Stump Field",
+    ["mountain"]    = "Mountain Top Field",
+    ["coconut"]     = "Coconut Field",
+    ["pepper"]      = "Pepper Patch",
+    ["pineapple"]   = "Pineapple Patch",
+    ["ant"]         = "Ant Field",
+}
+
+-- ═══ ĐỌC QUEST TASKS TỪ UI ═══
+local function getQuestTasks()
+    local tasks = {}
+    pcall(function()
+        local QuestF = plr.PlayerGui.ScreenGui.Menus.Children.Quests.Content
+        for _, frame in pairs(QuestF:GetDescendants()) do
+            if frame:IsA("TextLabel") and frame.Name == "Description" and frame.Text ~= "" then
+                table.insert(tasks, frame.Text)
+            end
+        end
+    end)
+    return tasks
+end
+
+-- ═══ PARSE FIELDS CẦN FARM ═══
+local function getQuestFields()
+    local tasks = getQuestTasks()
+    log("Quest tasks: " .. #tasks)
+    local fields = {}
+    local seen = {}
+    for _, desc in ipairs(tasks) do
+        local lower = desc:lower()
+        -- Chỉ lấy task collect pollen
+        if lower:find("collect") and lower:find("pollen") then
+            for keyword, fieldName in pairs(FIELD_MAP) do
+                if lower:find(keyword) and not seen[fieldName] then
+                    seen[fieldName] = true
+                    table.insert(fields, fieldName)
+                    log("Quest field: " .. fieldName)
+                end
+            end
+        end
+    end
+    return fields
+end
+
+-- ═══ FARM FIELD ═══
+local function farmField(fieldName, duration)
+    duration = duration or 30
+    log("Farm: " .. fieldName)
+    local f = workspace.FlowerZones:FindFirstChild(fieldName)
+    if not f then log("Field not found: " .. fieldName) return end
+    local p = f.Position
+    local s = f.Size
+    tween(CFrame.new(p.X, p.Y + 3, p.Z))
+    task.wait(0.5)
+    local t0 = tick()
+    while (tick() - t0) < duration do
+        for row = -2, 2 do
+            for col = -2, 2 do
+                if (tick() - t0) >= duration then return end
+                tween(CFrame.new(p.X + col * s.X * 0.18, p.Y + 3, p.Z + row * s.Z * 0.18))
+                task.wait(0.15)
+            end
+        end
+    end
+end
+
+-- ═══ FARM THEO QUEST ═══
+function farmQuestFields()
+    local fields = getQuestFields()
+    if #fields == 0 then
+        log("No quest fields, default farm Dandelion")
+        farmField("Dandelion Field", 30)
+        return
+    end
+    for _, fieldName in ipairs(fields) do
+        farmField(fieldName, 30)
+        task.wait(0.5)
     end
 end
 
@@ -148,6 +248,7 @@ local function getAllQuestNPCs()
         ["Bubble Bee Man 2"] = true,
         ["Stick Bug"] = true,
         ["Onett"] = true,
+        ["Gummy Bear"] = true,
     }
     for _, npc in pairs(workspace.NPCs:GetChildren()) do
         if npc:IsA("Model") and not blacklist[npc.Name] then
