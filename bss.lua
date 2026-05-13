@@ -96,27 +96,21 @@ local function hasActiveQuest()
     return false
 end
 
--- ═══ TALK NPC (cách đúng từ script mẫu) ═══
+-- ═══ TALK NPC (KHÔNG cần tween đến NPC) ═══
 local function talkNPC(npcName, pos)
     log("Talk: " .. npcName)
 
     local npc = workspace.NPCs:FindFirstChild(npcName)
     if not npc then log("FAIL: NPC not found") return false end
 
-    -- Tween đến platform
-    tween(CFrame.new(pos))
-    task.wait(0.5)
-    hrp.CFrame = CFrame.new(pos)
-    task.wait(0.5)
-
-    -- Dùng Activatables.NPCs.ButtonEffect (cách script mẫu dùng)
+    -- Gọi ButtonEffect trực tiếp - không cần tween
     local ok = pcall(function()
         local cac = require(RS:WaitForChild("Activatables"):WaitForChild("NPCs"))
         cac.ButtonEffect(plr, npc)
     end)
     log("ButtonEffect ok: " .. tostring(ok))
 
-    -- Đợi NPC dialog hiện rồi tự skip (RunService loop đã handle)
+    -- Đợi dialog hiện
     local npcGui = plr.PlayerGui.ScreenGui.NPC
     local t = 0
     while not npcGui.Visible and t < 5 do
@@ -124,8 +118,7 @@ local function talkNPC(npcName, pos)
     end
 
     if npcGui.Visible then
-        log("Dialog open, waiting for close...")
-        -- Đợi dialog đóng (IncrementDialogue loop tự skip)
+        log("Dialog open, auto-skipping...")
         local t2 = 0
         while npcGui.Visible and t2 < 15 do
             task.wait(0.2); t2 += 0.2
@@ -139,25 +132,68 @@ local function talkNPC(npcName, pos)
     end
 end
 
+-- ═══ TÌM TẤT CẢ NPC QUEST BEARS ═══
+local function getAllQuestNPCs()
+    local list = {}
+    -- Blacklist NPC không nhận quest từ
+    local blacklist = {
+        ["Ant Challenge Info"] = true,
+        ["Wind Shrine"] = true,
+        ["Bubble Bee Man 2"] = true,
+        ["Stick Bug"] = true,
+        ["Onett"] = true,
+    }
+    for _, npc in pairs(workspace.NPCs:GetChildren()) do
+        if npc:IsA("Model") and not blacklist[npc.Name] then
+            local platform = npc:FindFirstChild("Platform")
+            local circle = npc:FindFirstChild("Circle")
+            if platform and platform:IsA("BasePart") and circle then
+                table.insert(list, {
+                    name = npc.Name,
+                    pos = platform.Position + Vector3.new(0, 5, 0),
+                    npc = npc,
+                })
+            end
+        end
+    end
+    return list
+end
+
+-- ═══ CHECK NPC CÓ QUEST AVAILABLE KHÔNG ═══
+-- Script mẫu: v.Platform.AlertPos.AlertGui.ImageLabel.ImageTransparency == 0
+local function npcHasQuestAvailable(npc)
+    local platform = npc:FindFirstChild("Platform")
+    if not platform then return false end
+    local alertPos = platform:FindFirstChild("AlertPos")
+    if not alertPos then return false end
+    local alertGui = alertPos:FindFirstChild("AlertGui")
+    if not alertGui then return false end
+    local img = alertGui:FindFirstChildWhichIsA("ImageLabel")
+    if img and img.ImageTransparency == 0 then
+        return true
+    end
+    return false
+end
+
 -- ═══ MAIN ═══
 function checkAndDoQuests()
     local bees = countBees()
     log("Bees: " .. bees)
 
-    -- Nhận quest từ TẤT CẢ NPC đủ điều kiện
-    for _, npc in ipairs(NPC_QUESTS) do
-        if bees >= npc.minBees then
-            -- Check NPC này đã có quest chưa
-            local q = getQuestName(npc.name)
-            if not q then
-                log("Need quest from: " .. npc.name)
-                talkNPC(npc.name, npc.pos)
-                task.wait(1)
-            else
-                log("Already has quest from " .. npc.name .. ": " .. q)
-            end
+    local npcs = getAllQuestNPCs()
+    log("Found " .. #npcs .. " NPCs")
+
+    for _, info in ipairs(npcs) do
+        -- Check NPC có quest available (có dấu chấm than vàng)
+        if npcHasQuestAvailable(info.npc) then
+            log("Quest available: " .. info.name)
+            talkNPC(info.name, info.pos)
+            task.wait(1.5)
+        else
+            log("Skip " .. info.name .. " (no alert)")
         end
     end
+    log("All quests checked")
 end
 
 log("=== FUNCTEST START ===")
