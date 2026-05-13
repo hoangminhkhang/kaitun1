@@ -152,41 +152,51 @@ local function talkNPC(npcName, pos)
     return true
 end
 
--- ═══ MỞ QUEST UI ═══
+-- ═══ MỞ QUEST UI (force visible toàn bộ) ═══
 local function openQuestTab()
-    local ok = pcall(function()
-        local sg = plr.PlayerGui.ScreenGui
+    pcall(function()
+        local sg = plr.PlayerGui:FindFirstChild("ScreenGui")
+        if not sg then return end
         local menus = sg:FindFirstChild("Menus")
         if not menus then return end
 
-        -- Set Menus visible
+        -- Force show menus
         if menus:IsA("GuiObject") then menus.Visible = true end
-
-        -- Tìm Quests Tab
-        local childTabs = menus:FindFirstChild("ChildTabs")
-        local questTab = childTabs and childTabs:FindFirstChild("Quests Tab")
 
         -- Force show Quests frame
         local children = menus:FindFirstChild("Children")
+        if children and children:IsA("GuiObject") then children.Visible = true end
         local questsFrame = children and children:FindFirstChild("Quests")
-        if questsFrame and questsFrame:IsA("GuiObject") then
-            questsFrame.Visible = true
-        end
+        if questsFrame and questsFrame:IsA("GuiObject") then questsFrame.Visible = true end
 
-        -- Activate tab button
+        -- Tìm Quests Tab và simulate click
+        local childTabs = menus:FindFirstChild("ChildTabs")
+        if childTabs and childTabs:IsA("GuiObject") then childTabs.Visible = true end
+        local questTab = childTabs and childTabs:FindFirstChild("Quests Tab")
+
         if questTab then
+            -- Cách 1: Activate
             pcall(function() questTab:Activate() end)
-            -- VirtualInputManager click backup
-            local vim = game:GetService("VirtualInputManager")
-            local p = questTab.AbsolutePosition
-            local sz = questTab.AbsoluteSize
-            vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, true, game, 1)
-            task.wait(0.05)
-            vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, false, game, 1)
+            -- Cách 2: VirtualInput click
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                local p = questTab.AbsolutePosition
+                local sz = questTab.AbsoluteSize
+                vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, true, game, 1)
+                task.wait(0.05)
+                vim:SendMouseButtonEvent(p.X + sz.X/2, p.Y + sz.Y/2, 0, false, game, 1)
+            end)
+            -- Cách 3: Fire MouseButton1Click signal
+            pcall(function()
+                if questTab:IsA("ImageButton") or questTab:IsA("TextButton") then
+                    for _, conn in pairs(getconnections(questTab.MouseButton1Click)) do
+                        conn:Fire()
+                    end
+                end
+            end)
         end
     end)
-    log("Open quest tab: " .. tostring(ok))
-    task.wait(0.8)
+    task.wait(1)
 end
 
 -- ═══ READ QUEST TASKS (chỉ NPC đủ bee req) ═══
