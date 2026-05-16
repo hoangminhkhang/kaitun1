@@ -163,14 +163,14 @@ pcall(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- TWEEN (di chuyển xa)
+-- TWEEN (di chuyển mượt bằng TweenService)
 -- ═══════════════════════════════════════════════════════════
 local function tweenTo(targetCFrame, speed)
     speed = speed or TWEEN_SPEED
     if not hrp or not hrp.Parent then refreshCharacter() end
 
     local distance = (hrp.Position - targetCFrame.Position).Magnitude
-    if distance < 4 then
+    if distance < 5 then
         hrp.CFrame = targetCFrame
         return
     end
@@ -178,7 +178,7 @@ local function tweenTo(targetCFrame, speed)
     local tweenTime = distance / speed
     local tween = TweenService:Create(
         hrp,
-        TweenInfo.new(tweenTime, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut),
+        TweenInfo.new(tweenTime, Enum.EasingStyle.Linear),
         {CFrame = targetCFrame}
     )
     tween:Play()
@@ -216,18 +216,19 @@ end
 
 local function getEmptyHiveSlot()
     local hive = getMyHive()
-    if not hive then return nil end
+    if not hive or not hive:FindFirstChild("Cells") then return nil, nil end
 
     for _, cell in pairs(hive.Cells:GetChildren()) do
         local cellType = cell:FindFirstChild("CellType")
         if cellType and (cellType.Value == "Empty" or cellType.Value == "") then
-            local cellID = cell:FindFirstChild("CellID")
-            if cellID then
-                return cellID.Value
+            local cellX = cell:FindFirstChild("CellX")
+            local cellY = cell:FindFirstChild("CellY")
+            if cellX and cellY then
+                return cellX.Value, cellY.Value
             end
         end
     end
-    return nil
+    return nil, nil
 end
 
 local function getHivePosition()
@@ -255,20 +256,31 @@ local function claimHive()
         return true
     end
 
-    tweenTo(CFrame.new(4, 7, 345))
-    task.wait(1)
-
     for _, hive in pairs(workspace.Honeycombs:GetChildren()) do
         if hive:IsA("Model") and hive:FindFirstChild("Owner") and hive.Owner.Value == nil then
             local hiveID = hive:FindFirstChild("HiveID")
-            if hiveID then
-                fireEvent("ClaimHive", hiveID.Value)
-                task.wait(2)
+            if not hiveID then continue end
 
-                if hive.Owner.Value == plr then
-                    log("Claimed hive " .. hiveID.Value)
-                    return true
+            -- Tween đến LightHolder (giống source mẫu)
+            local lh = hive:FindFirstChildWhichIsA("BasePart", true)
+            for _, child in pairs(hive:GetChildren()) do
+                if child.Name == "LightHolder" and child:IsA("BasePart") then
+                    lh = child
+                    break
                 end
+            end
+
+            if lh then
+                tweenTo(lh.CFrame)
+            end
+            task.wait(1)
+
+            fireEvent("ClaimHive", hiveID.Value)
+            task.wait(2)
+
+            if hive.Owner.Value == plr then
+                log("Claimed hive " .. hiveID.Value)
+                return true
             end
         end
     end
@@ -311,125 +323,236 @@ local function buyItem(category, itemType, amount)
     return result ~= nil
 end
 
-local function buyAccessoriesByMilestone(beeCount)
-    log(">> Buy accessories (bees=" .. beeCount .. ")")
+-- Track items đã mua để không mua lại
+local boughtItems = {}
 
-    -- Tween đến BasicShop
-    tweenTo(CFrame.new(96, 12, 318))
-    task.wait(1)
+local function tryBuy(category, itemType, shopPos)
+    if boughtItems[itemType] then
+        return true
+    end
+    if shopPos then
+        tweenTo(shopPos)
+        task.wait(0.5)
+    end
+    local ok = buyItem(category, itemType, 1)
+    if ok then
+        boughtItems[itemType] = true
+        log("Bought: " .. itemType)
+    else
+        log("FAIL buy " .. itemType .. " (not enough resources)")
+    end
+    task.wait(0.5)
+    return ok
+end
 
-    if beeCount < 5 then
-        -- Đầu game: tools cơ bản
-        buyItem("Collector", "Scooper")
-        task.wait(0.4)
-        buyItem("Collector", "Clippers")
-        task.wait(0.4)
-        buyItem("Collector", "Magnet")
-        task.wait(0.4)
-        buyItem("Accessory", "Pouch")
-        task.wait(0.4)
-    elseif beeCount < 10 then
-        -- 5-10 bees
-        buyItem("Accessory", "Jar")
-        task.wait(0.4)
-        buyItem("Accessory", "Helmet")
-        task.wait(0.4)
-        buyItem("Accessory", "Belt Pocket")
-        task.wait(0.4)
-        buyItem("Accessory", "Basic Boots")
-        task.wait(0.4)
-    elseif beeCount < 15 then
-        -- 10-15 bees
-        buyItem("Accessory", "Canister")
-        task.wait(0.4)
-        buyItem("Collector", "Rake")
-        task.wait(0.4)
-        buyItem("Collector", "Vacuum")
-        task.wait(0.4)
-        buyItem("Accessory", "Backpack")
-        task.wait(0.4)
+-- Shop positions
+local SHOPS = {
+    Basic   = CFrame.new(98, 15, 292),
+    Pro     = CFrame.new(165, 84, -178),
+    Egg     = CFrame.new(-146, 15, 231),
+}
+
+-- Phase 1: 0->5 bees
+local function phase1_buy()
+    log(">> Phase 1: Buy Clippers + Scissors")
+    tryBuy("Collector", "Clippers", SHOPS.Basic)
+    tryBuy("Collector", "Scissors", SHOPS.Pro)
+end
+
+-- Phase 2: 5->10 bees
+local function phase2_buy()
+    log(">> Phase 2: Buy Canister + Vacuum + Boots/Belt/Helmet")
+    tryBuy("Accessory", "Canister", SHOPS.Basic)
+    tryBuy("Collector", "Vacuum", SHOPS.Basic)
+    -- Optional nếu đủ
+    tryBuy("Accessory", "Basic Boots", SHOPS.Basic)
+    tryBuy("Accessory", "Belt Pocket", SHOPS.Basic)
+    tryBuy("Accessory", "Helmet", SHOPS.Basic)
+end
+
+-- Phase 3: 10->15 bees
+local function phase3_buy()
+    log(">> Phase 3: Buy Compressor + Pulsar")
+    tryBuy("Accessory", "Compressor", SHOPS.Pro)
+    tryBuy("Collector", "Pulsar", SHOPS.Pro)
+end
+
+-- Phase 4: 15->20 bees
+local function phase4_buy()
+    log(">> Phase 4: Buy Port-O-Hive")
+    tryBuy("Accessory", "Port-O-Hive", SHOPS.Pro)
+end
+
+-- Phase 5: 20->25 bees
+local function phase5_buy()
+    log(">> Phase 5: Buy Propeller Hat")
+    tryBuy("Accessory", "Propeller Hat", SHOPS.Pro)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- ROYAL JELLY: reroll Basic/Brave bee → Blue bee
+-- ═══════════════════════════════════════════════════════════
+-- List bee Blue mong muốn (target khi reroll)
+local TARGET_BLUE_BEES = {
+    BumbleBee = true,
+    CoolBee = true,
+    BubbleBee = true,
+    BuckoBee = true,
+    FrostyBee = true,
+    DiamondBee = true,
+    NinjaBee = true,
+    BuoyantBee = true,
+    TadpoleBee = true,
+}
+
+-- Bee cần reroll (Basic/Brave)
+local REROLL_TARGETS = {
+    BasicBee = true,
+    BraveBee = true,
+}
+
+local function isBlueBee(beeType)
+    return TARGET_BLUE_BEES[beeType] == true
+end
+
+-- Tìm cell Basic/Brave bee để reroll
+local function findCellToReroll()
+    local hive = getMyHive()
+    if not hive or not hive:FindFirstChild("Cells") then return nil end
+
+    for _, cell in pairs(hive.Cells:GetChildren()) do
+        local ct = cell:FindFirstChild("CellType")
+        local locked = cell:FindFirstChild("CellLocked")
+
+        if ct and (locked == nil or not locked.Value) then
+            if REROLL_TARGETS[ct.Value] then
+                local cellX = cell:FindFirstChild("CellX")
+                local cellY = cell:FindFirstChild("CellY")
+                if cellX and cellY then
+                    return {x = cellX.Value, y = cellY.Value, cell = cell, original = ct.Value}
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Reroll 1 cell cho đến khi ra Blue bee
+local function rerollCellToBlue(cellInfo, maxAttempts)
+    maxAttempts = maxAttempts or 100
+    log(">> Reroll C" .. cellInfo.x .. "," .. cellInfo.y .. " (" .. cellInfo.original .. ") -> Blue bee")
+
+    for i = 1, maxAttempts do
+        if not running then return false end
+
+        local ct = cellInfo.cell:FindFirstChild("CellType")
+        if ct and isBlueBee(ct.Value) then
+            log("✅ Got Blue bee: " .. ct.Value .. " after " .. i .. " rolls!")
+            return true
+        end
+
+        invokeEvent("ConstructHiveCellFromEgg", cellInfo.x, cellInfo.y, "RoyalJelly", 1, false)
+        task.wait(0.6)
     end
 
-    log("Accessories done")
+    log("RJ max attempts reached")
+    return false
+end
+
+-- Main: reroll all Basic/Brave -> Blue
+local function rerollBasicToBlue()
+    log(">> Royal Jelly: Basic/Brave -> Blue bees")
+    tweenTo(getHivePosition())
+    task.wait(1)
+
+    local maxCells = 25
+    for i = 1, maxCells do
+        if not running then break end
+
+        local cellInfo = findCellToReroll()
+        if not cellInfo then
+            log("No more Basic/Brave cells to reroll")
+            break
+        end
+
+        rerollCellToBlue(cellInfo, 80)
+        task.wait(0.3)
+    end
+
+    log("RJ reroll done")
 end
 
 -- ═══════════════════════════════════════════════════════════
 -- 4. BUY EGG + HATCH
 -- ═══════════════════════════════════════════════════════════
-local function buyBasicEgg()
-    log(">> Buy Basic Egg")
-    tweenTo(CFrame.new(-146, 13, 231))
+local function buyBasicEgg(amount)
+    amount = amount or 1
+    log(">> Buy " .. amount .. " Basic Egg(s)")
+    tweenTo(SHOPS.Egg)
     task.wait(1)
-    buyItem("Eggs", "Basic", 1)
-    task.wait(0.5)
+    for i = 1, amount do
+        if not running then break end
+        buyItem("Eggs", "Basic", 1)
+        task.wait(0.4)
+    end
+end
+
+-- Đếm số slot trống trong hive
+local function countEmptySlots()
+    local hive = getMyHive()
+    if not hive or not hive:FindFirstChild("Cells") then return 0 end
+    local n = 0
+    for _, cell in pairs(hive.Cells:GetChildren()) do
+        local ct = cell:FindFirstChild("CellType")
+        if ct and (ct.Value == "Empty" or ct.Value == "") then
+            n += 1
+        end
+    end
+    return n
 end
 
 local function hatchEgg()
-    log(">> Hatch Egg (tween về hive)")
-
-    -- Tween đến hive trước
+    log(">> Hatch Basic Egg")
     tweenTo(getHivePosition())
     task.wait(1)
 
-    local hive = getMyHive()
-    if not hive then
-        log("FAIL: no hive")
-        return false
-    end
+    local x, y = getEmptyHiveSlot()
+    if not x then log("FAIL: no empty slot") return false end
 
-    local hiveID = hive.HiveID.Value
-    local slot = getEmptyHiveSlot()
-
-    if not slot then
-        log("FAIL: no empty slot")
-        return false
-    end
-
-    log("Hatch hive=" .. hiveID .. " slot=" .. slot)
-    local result = invokeEvent("ConstructHiveCellFromEgg", hiveID, slot, "Basic", 1, false)
+    log("Hatch C" .. x .. "," .. y)
+    -- Args: (x, y, eggType, amount, useRoyalJelly)
+    local result = invokeEvent("ConstructHiveCellFromEgg", x, y, "Basic", 1, false)
     task.wait(1)
-
-    log("Hatch result: " .. tostring(result ~= nil))
+    log("Hatch: " .. tostring(result ~= nil))
     return result ~= nil
 end
 
--- Hatch tất cả egg đang có (loop đến khi không hatch được nữa)
 local function hatchAllEggs()
     log(">> Hatch ALL eggs")
-
-    -- Tween về hive 1 lần
     tweenTo(getHivePosition())
     task.wait(1)
 
-    local maxAttempts = 50
     local hatched = 0
+    for i = 1, 50 do
+        if not running then break end
 
-    for i = 1, maxAttempts do
-        if not running then return hatched end
+        local x, y = getEmptyHiveSlot()
+        if not x then log("No empty slot left") break end
 
-        local hive = getMyHive()
-        if not hive then break end
-
-        local slot = getEmptyHiveSlot()
-        if not slot then
-            log("Hết slot trống")
-            break
-        end
-
-        local hiveID = hive.HiveID.Value
-        local result = invokeEvent("ConstructHiveCellFromEgg", hiveID, slot, "Basic", 1, false)
+        -- Args: (x, y, "Basic", 1, false) - KHÔNG có hiveID
+        local result = invokeEvent("ConstructHiveCellFromEgg", x, y, "Basic", 1, false)
         task.wait(0.8)
 
         if result then
             hatched = hatched + 1
-            log("Hatched #" .. hatched)
+            log("Hatched #" .. hatched .. " C" .. x .. "," .. y)
         else
-            log("Hết egg hoặc fail, dừng hatch")
+            log("No more eggs or fail")
             break
         end
     end
 
-    log("Hatch all done: " .. hatched .. " eggs")
+    log("Hatch done: " .. hatched)
     return hatched
 end
 
@@ -665,26 +788,91 @@ local function getQuestFields()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- 8. TOKEN DETECTION
+-- 8. TOKEN DETECTION (giống source mẫu IsToken + IsValidTokenPos)
 -- ═══════════════════════════════════════════════════════════
 local function isToken(obj)
-    if not obj or not obj:IsA("BasePart") then return false end
+    if obj == nil then return false end
+    if not obj.Parent then return false end
+    if not obj:IsA("Part") then return false end
     if obj.Orientation.Z ~= 0 then return false end
     if not obj:FindFirstChild("FrontDecal") then return false end
+    if obj.Name ~= "C" then return false end
     return true
 end
 
-local function getNearbyTokens(pos, range)
+-- Check token có nằm trong field không (giống source mẫu IsValidTokenPos)
+local function isValidTokenPos(token, fieldName)
+    local field = workspace.FlowerZones:FindFirstChild(fieldName)
+    if not field then return false end
+
+    local pos = typeof(token) == "Vector3" and token or token.Position
+    local range = field:FindFirstChild("Range") and field.Range.Value or 60
+
+    if (pos - field.Position).Magnitude < range then
+        return math.abs(pos.Y - field.Position.Y)
+    end
+    return false
+end
+
+local function getNearbyTokens(fieldName, range)
+    range = range or 60
     local list = {}
     local collectibles = workspace:FindFirstChild("Collectibles")
     if not collectibles then return list end
 
     for _, obj in pairs(collectibles:GetChildren()) do
-        if isToken(obj) and (obj.Position - pos).Magnitude < range then
+        if isToken(obj) and isValidTokenPos(obj, fieldName) then
             table.insert(list, obj)
         end
     end
     return list
+end
+
+-- Collect tất cả token trong field (giống source mẫu CollectAllTokenInField)
+local function collectAllTokensInField(fieldName)
+    local collectibles = workspace:FindFirstChild("Collectibles")
+    if not collectibles then return end
+
+    for _, v in pairs(collectibles:GetChildren()) do
+        if isToken(v) and isValidTokenPos(v, fieldName) then
+            smartWalk(Vector3.new(v.Position.X, hrp.Position.Y, v.Position.Z))
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 8.5 SPROUT DETECTION (giống source mẫu IsSprout)
+-- ═══════════════════════════════════════════════════════════
+local function isSprout()
+    local particles = workspace:FindFirstChild("Particles")
+    if not particles then return nil end
+    local folder2 = particles:FindFirstChild("Folder2")
+    if not folder2 then return nil end
+
+    for _, v in pairs(folder2:GetChildren()) do
+        if v.Name == "Sprout" then
+            return v
+        end
+    end
+    return nil
+end
+
+-- Tìm field gần sprout nhất
+local function getFieldByObject(obj)
+    if not obj or not obj:IsA("BasePart") then return nil end
+    local nearest = nil
+    local nearestDist = math.huge
+
+    for _, field in pairs(workspace.FlowerZones:GetChildren()) do
+        if field:IsA("BasePart") then
+            local dist = (obj.Position - field.Position).Magnitude
+            if dist < nearestDist then
+                nearestDist = dist
+                nearest = field.Name
+            end
+        end
+    end
+    return nearest
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -747,7 +935,7 @@ local function isInField(field)
 end
 
 -- ═══════════════════════════════════════════════════════════
--- 11. SMART WALK
+-- 11. SMART WALK nang
 -- ═══════════════════════════════════════════════════════════
 local function smartWalk(targetPos)
     if not hum or not hrp then refreshCharacter() end
@@ -756,16 +944,19 @@ local function smartWalk(targetPos)
     hum.WalkSpeed = FARM_WALK_SPEED
     hum:MoveTo(targetPos)
 
-    local arrived = false
+    local stop = false
     local conn = hum.MoveToFinished:Connect(function()
-        arrived = true
+        stop = true
     end)
 
     local startTime = tick()
-    while not arrived and (tick() - startTime) < 5 do
+    while not stop do
         task.wait(0.1)
-        if (hrp.Position - targetPos).Magnitude < 5 then
-            arrived = true
+        -- Timeout 5s -> teleport thẳng (giống source mẫu)
+        if tick() - startTime >= 5 then
+            hum:Move(Vector3.new(0, 0, 0))
+            hrp.CFrame = CFrame.new(targetPos)
+            stop = true
         end
     end
 
@@ -789,7 +980,7 @@ local function smartFarm(fieldName, duration)
     local fieldSize = field.Size
     local range = field:FindFirstChild("Range") and field.Range.Value or 60
 
-    -- Tween đến center field
+    -- Teleport đến field
     tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
     task.wait(0.3)
 
@@ -802,9 +993,12 @@ local function smartFarm(fieldName, duration)
 
     local startTime = tick()
     while (tick() - startTime) < duration and running do
-        -- Check rơi khỏi field -> tween lại
+        if not hrp or not hrp.Parent then refreshCharacter() end
+        if not hrp then break end
+
+        -- Check rơi khỏi field -> tp lại
         if not isInField(field) then
-            log("Rơi khỏi field, tween lại...")
+            log("Rơi khỏi field, tp lại...")
             tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
             task.wait(0.2)
             if hum then hum.WalkSpeed = FARM_WALK_SPEED end
@@ -813,17 +1007,30 @@ local function smartFarm(fieldName, duration)
         -- Check mob -> avoid
         avoidMobs()
 
-        -- Auto collect tokens trong range
-        local tokens = getNearbyTokens(hrp.Position, range)
-        for _, tok in ipairs(tokens) do
-            if not running then break end
-            if tok.Parent and (tok.Position - hrp.Position).Magnitude < range then
-                smartWalk(tok.Position + Vector3.new(0, 1, 0))
-                if not isInField(field) then break end
+        -- Check sprout -> farm sprout nếu có
+        local sprout = isSprout()
+        if sprout then
+            local sproutField = getFieldByObject(sprout)
+            if sproutField then
+                log("Sprout detected at " .. sproutField)
+                tweenTo(CFrame.new(sprout.Position.X, sprout.Position.Y + 5, sprout.Position.Z))
+                task.wait(0.5)
+                local sproutStart = tick()
+                while isSprout() and (tick() - sproutStart) < 60 and running do
+                    collectAllTokensInField(sproutField)
+                    fireEvent("ToolCollect")
+                    task.wait(0.3)
+                end
+                -- Quay lại field chính
+                tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
+                task.wait(0.3)
             end
         end
 
-        -- Zigzag pattern
+        -- Collect tokens trong field (giống source mẫu)
+        collectAllTokensInField(fieldName)
+
+        -- Zigzag pattern + dig
         for row = -2, 2 do
             for col = -2, 2 do
                 if (tick() - startTime) >= duration or not running then break end
@@ -834,23 +1041,22 @@ local function smartFarm(fieldName, duration)
                 local tz = fieldPos.Z + (row * 0.5) * stepZ
                 smartWalk(Vector3.new(tx, fieldPos.Y + 3, tz))
 
+                -- Dig mỗi step
+                fireEvent("ToolCollect")
+                task.wait(0.1)
+
                 -- Re-check field
                 if not isInField(field) then
                     tweenTo(CFrame.new(fieldPos.X, fieldPos.Y + 3, fieldPos.Z))
                     if hum then hum.WalkSpeed = FARM_WALK_SPEED end
                 end
 
-                -- Collect token gần khi đi
-                local collectibles = workspace:FindFirstChild("Collectibles")
-                if collectibles then
-                    for _, tok in pairs(collectibles:GetChildren()) do
-                        if isToken(tok) and (tok.Position - hrp.Position).Magnitude < 20 then
-                            smartWalk(tok.Position + Vector3.new(0, 1, 0))
-                        end
-                    end
-                end
+                -- Collect token gần
+                collectAllTokensInField(fieldName)
             end
         end
+
+        task.wait(0.1)
     end
 
     -- Reset speed
@@ -883,70 +1089,121 @@ local function farmQuestFields()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- 14. CONVERT HONEY
+-- 14. CONVERT HONEY (đúng cách: PlayerHiveCommand ToggleHoneyMaking)
 -- ═══════════════════════════════════════════════════════════
 local function convertHoney()
     log(">> Convert honey")
     tweenTo(getHivePosition())
-    task.wait(6)
+    task.wait(0.5)
+
+    -- Bật convert
+    fireEvent("PlayerHiveCommand", "ToggleHoneyMaking")
+    task.wait(0.5)
+
+    -- Đợi pollen = 0 (max 30s)
+    local startTime = tick()
+    while running and (tick() - startTime) < 30 do
+        local pollen = plr:FindFirstChild("CoreStats") and plr.CoreStats:FindFirstChild("Pollen")
+        if pollen and pollen.Value <= 0 then
+            break
+        end
+        task.wait(0.5)
+    end
+
+    task.wait(1)
     log("Convert done")
 end
 
 -- ═══════════════════════════════════════════════════════════
--- MAIN PIPELINE
+-- MAIN PIPELINE (5 Phases)
 -- ═══════════════════════════════════════════════════════════
-log("========== KAITUN v5 START ==========")
+log("========== KAITUN v6 START ==========")
 task.wait(2)
 
--- ─── Phase 1: Setup ───
-log("=== PHASE 1: SETUP ===")
-
--- Claim hive (3 retries)
+-- Setup ban đầu
+log("=== SETUP ===")
 for attempt = 1, 3 do
     if claimHive() then break end
     task.wait(2)
 end
 task.wait(1)
 
--- Redeem codes
 if running then
     redeemCodes()
     task.wait(1)
 end
 
--- Buy initial accessories
-if running then
-    buyAccessoriesByMilestone(countBees())
-    task.wait(1)
+-- Helper: farm + accept quest cho đến khi đạt target bees
+local function farmUntilBees(targetBees)
+    while countBees() < targetBees and running do
+        -- Accept quests có alert
+        acceptAllQuests()
+        task.wait(1)
+
+        -- Farm theo quest field
+        farmQuestFields()
+        task.wait(0.5)
+
+        -- Convert
+        convertHoney()
+        task.wait(0.5)
+
+        -- Buy basic egg + hatch
+        local emptySlots = countEmptySlots()
+        if emptySlots > 0 then
+            buyBasicEgg(math.min(emptySlots, 3))  -- mua tối đa 3 quả mỗi vòng
+            task.wait(0.5)
+            hatchAllEggs()
+            task.wait(0.5)
+        end
+
+        log("=== Bees: " .. countBees() .. "/" .. targetBees .. " ===")
+    end
 end
 
--- ─── Phase 2: Main Loop ───
-log("=== PHASE 2: MAIN LOOP ===")
+-- ─── Phase 1: 0→5 bees ───
+if running then
+    log("=== PHASE 1: 0→5 bees ===")
+    phase1_buy()  -- Clippers + Scissors trước khi mua egg
+    task.wait(1)
+    farmUntilBees(5)
+end
 
-while countBees() < TARGET_BEES and running do
-    -- Accept quests từ NPC có alert
-    acceptAllQuests()
+-- ─── Phase 2: 5→10 bees ───
+if running then
+    log("=== PHASE 2: 5→10 bees ===")
+    phase2_buy()  -- Canister + Vacuum + Boots/Belt/Helmet
+    task.wait(1)
+    farmUntilBees(10)
+end
+
+-- ─── Phase 3: 10→15 bees ───
+if running then
+    log("=== PHASE 3: 10→15 bees ===")
+    phase3_buy()  -- Compressor + Pulsar
+    task.wait(1)
+    farmUntilBees(15)
+end
+
+-- ─── Phase 4: 15→20 bees ───
+if running then
+    log("=== PHASE 4: 15→20 bees ===")
+    phase4_buy()  -- Port-O-Hive
+    task.wait(1)
+    farmUntilBees(20)
+end
+
+-- ─── Phase 5: 20→25 bees + Royal Jelly ───
+if running then
+    log("=== PHASE 5: 20→25 bees ===")
+    phase5_buy()  -- Propeller Hat (nếu đủ)
     task.wait(1)
 
-    -- Farm theo quest field
-    farmQuestFields()
-    task.wait(0.5)
+    -- Reroll Blue bees với Royal Jelly
+    rerollBasicToBlue()
+    task.wait(1)
 
-    -- Convert honey
-    convertHoney()
-    task.wait(0.5)
-
-    -- Buy egg + hatch
-    buyBasicEgg()
-    task.wait(0.5)
-    hatchAllEggs() -- hatch hết egg đang có
-    task.wait(0.5)
-
-    -- Buy accessories milestone tiếp theo
-    buyAccessoriesByMilestone(countBees())
-    task.wait(0.5)
-
-    log("=== Bees: " .. countBees() .. "/" .. TARGET_BEES .. " ===")
+    farmUntilBees(25)
 end
 
 log("========== KAITUN COMPLETE: " .. countBees() .. " bees ==========")
