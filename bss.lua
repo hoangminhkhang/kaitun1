@@ -531,17 +531,30 @@ local function hatchEgg()
     if not x then log("FAIL: no empty slot") return false end
 
     log("Hatch C" .. x .. "," .. y)
-    -- Args: (x, y, eggType, amount, useRoyalJelly)
-    local result = invokeEvent("ConstructHiveCellFromEgg", x, y, "Basic", 1, false)
+    -- Format xac nhan: InvokeServer(cellX, cellY, "Basic", 1, false)
+    local remote = Events:FindFirstChild("ConstructHiveCellFromEgg")
+    if not remote then log("FAIL: remote not found") return false end
+    local ok, result = pcall(function()
+        local args = {x, y, "Basic", 1, false}
+        return remote:InvokeServer(unpack(args))
+    end)
     task.wait(1)
-    log("Hatch: " .. tostring(result ~= nil))
-    return result ~= nil
+    if ok then
+        log("Hatch OK C" .. x .. "," .. y)
+        return true
+    else
+        log("Hatch FAIL: " .. tostring(result))
+        return false
+    end
 end
 
 local function hatchAllEggs()
     log(">> Hatch ALL eggs")
     tweenTo(getHivePosition())
     task.wait(1)
+
+    local remote = Events:FindFirstChild("ConstructHiveCellFromEgg")
+    if not remote then log("FAIL: ConstructHiveCellFromEgg not found") return 0 end
 
     local hatched = 0
     for i = 1, 50 do
@@ -550,15 +563,18 @@ local function hatchAllEggs()
         local x, y = getEmptyHiveSlot()
         if not x then log("No empty slot left") break end
 
-        -- Args: (x, y, "Basic", 1, false) - KHÔNG có hiveID
-        local result = invokeEvent("ConstructHiveCellFromEgg", x, y, "Basic", 1, false)
+        -- Format xac nhan: InvokeServer(cellX, cellY, "Basic", 1, false)
+        local ok, result = pcall(function()
+            local args = {x, y, "Basic", 1, false}
+            return remote:InvokeServer(unpack(args))
+        end)
         task.wait(0.8)
 
-        if result then
+        if ok and result then
             hatched = hatched + 1
             log("Hatched #" .. hatched .. " C" .. x .. "," .. y)
         else
-            log("No more eggs or fail")
+            log("No more eggs or fail at C" .. x .. "," .. y)
             break
         end
     end
@@ -1146,21 +1162,55 @@ local function convertHoney()
     end
 
     log(">> Convert honey (pollen: " .. pollen .. ")")
+
+    -- Buoc 1: tp den hive (theo NormalSell cua source mau)
     tweenTo(getHivePosition())
+    task.wait(0.3)
+
+    -- Buoc 2: ToggleHoneyMaking lan 1 de bat dau convert
+    local hiveEvent = game:GetService("ReplicatedStorage").Events:FindFirstChild("PlayerHiveCommand")
+    if not hiveEvent then
+        log("FAIL: PlayerHiveCommand not found")
+        return
+    end
+    hiveEvent:FireServer("ToggleHoneyMaking")
     task.wait(0.5)
 
-    -- Bật convert
-    fireEvent("PlayerHiveCommand", "ToggleHoneyMaking")
-    task.wait(0.5)
+    -- Buoc 3: Check UI button va re-fire neu can (theo NormalSell)
+    -- Neu ActivateButton chua o trang thai dung -> fire them
+    pcall(function()
+        local tpos = plr.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+        if tpos and tpos.AbsolutePosition.Y == 4 then
+            -- Da dung trang thai, khong can fire them
+        else
+            hiveEvent:FireServer("ToggleHoneyMaking")
+            task.wait(0.3)
+        end
+    end)
 
-    -- Đợi pollen = 0 (max 30s)
+    -- Buoc 4: Doi pollen = 0 (max 60s, theo source mau dung repeat until)
     local startTime = tick()
-    while running and (tick() - startTime) < 30 do
+    repeat
+        task.wait(0.5)
         local cs = plr:FindFirstChild("CoreStats")
         local p = cs and cs:FindFirstChild("Pollen")
         if p and p.Value <= 0 then break end
-        task.wait(0.5)
-    end
+
+        -- Neu bi stuck (hive chua bat) -> retry fire
+        if (tick() - startTime) > 5 then
+            pcall(function()
+                local tpos = plr.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+                if tpos then
+                    local txt = tpos:FindFirstChild("TextBox")
+                    if txt and not string.find(txt.Text or "", "Stop") then
+                        hiveEvent:FireServer("ToggleHoneyMaking")
+                        tweenTo(getHivePosition())
+                        task.wait(0.5)
+                    end
+                end
+            end)
+        end
+    until not running or (tick() - startTime) >= 60
 
     task.wait(1)
     local honey, _, _ = getStats()
@@ -1245,10 +1295,22 @@ local function farmUntilBees(targetBees)
         if countBees() < targetBees then
             local emptySlots = countEmptySlots()
             if emptySlots > 0 then
-                buyBasicEgg(math.min(emptySlots, 3))
-                task.wait(0.5)
-                hatchAllEggs()
-                task.wait(0.5)
+                -- Mua egg + hatch song song cùng lúc
+                local hatchDone = false
+                task.spawn(function()
+                    buyBasicEgg(math.min(emptySlots, 3))
+                    hatchAllEggs()
+                    hatchDone = true
+                end)
+                -- Đồng thời redeem codes lần nữa (cooldown ngắn không hại gì)
+                task.spawn(function()
+                    redeemCodes()
+                end)
+                -- Đợi hatch xong trước khi tiếp tục
+                local t0 = tick()
+                while not hatchDone and (tick() - t0) < 30 do
+                    task.wait(0.5)
+                end
             end
         end
     end
@@ -1262,16 +1324,19 @@ task.wait(2)
 
 -- Setup ban đầu
 log("=== SETUP ===")
+
+-- Chạy redeem codes song song với claim hive (không cần chờ nhau)
+task.spawn(function()
+    if running then
+        redeemCodes()
+    end
+end)
+
 for attempt = 1, 3 do
     if claimHive() then break end
     task.wait(2)
 end
 task.wait(1)
-
-if running then
-    redeemCodes()
-    task.wait(1)
-end
 
 -- ─── Phase 1: 0→5 bees ───
 if running then
