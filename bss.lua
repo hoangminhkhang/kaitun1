@@ -62,11 +62,14 @@ local function fireEvent(name, ...)
         warn("[Kaitun] Remote not found: " .. name)
         return false
     end
-    local ok, err = pcall(r.FireServer, r, ...)
-    if not ok then
-        warn("[Kaitun] Fire error " .. name .. ": " .. tostring(err))
+    -- ✅ Improve: retry 3 lần nếu fail (lag mạng)
+    for attempt = 1, 3 do
+        local ok, err = pcall(r.FireServer, r, ...)
+        if ok then return true end
+        warn("[Kaitun] Fire error " .. name .. " (attempt " .. attempt .. "): " .. tostring(err))
+        if attempt < 3 then task.wait(0.5) end
     end
-    return ok
+    return false
 end
 
 local function invokeEvent(name, ...)
@@ -423,9 +426,16 @@ local function findCellToReroll()
     for _, cell in pairs(hive.Cells:GetChildren()) do
         local ct = cell:FindFirstChild("CellType")
         local locked = cell:FindFirstChild("CellLocked")
+        -- ✅ Improve: bảo vệ Gifted bee - không reroll nếu cell là Gifted
+        local gifted = cell:FindFirstChild("CellGifted")
 
         if ct and (locked == nil or not locked.Value) then
             if REROLL_TARGETS[ct.Value] then
+                -- Bỏ qua Gifted bee
+                if gifted and gifted.Value == true then
+                    log("Skip Gifted " .. ct.Value .. " at C" .. (cell:FindFirstChild("CellX") and cell.CellX.Value or "?") .. "," .. (cell:FindFirstChild("CellY") and cell.CellY.Value or "?"))
+                    continue
+                end
                 local cellX = cell:FindFirstChild("CellX")
                 local cellY = cell:FindFirstChild("CellY")
                 if cellX and cellY then
@@ -809,7 +819,7 @@ local function isValidTokenPos(token, fieldName)
     local range = field:FindFirstChild("Range") and field.Range.Value or 60
 
     if (pos - field.Position).Magnitude < range then
-        return math.abs(pos.Y - field.Position.Y)
+        return true  -- ✅ Fix: trả về true thay vì số (0 = falsy bug)
     end
     return false
 end
@@ -828,13 +838,46 @@ local function getNearbyTokens(fieldName, range)
     return list
 end
 
+-- ═══════════════════════════════════════════════════════════
+-- 11. SMART WALK
+-- ═══════════════════════════════════════════════════════════
+local function smartWalk(targetPos)
+    if not hum or not hrp then refreshCharacter() end
+    if not hum then return end
+
+    hum.WalkSpeed = FARM_WALK_SPEED
+
+    -- ✅ Fix race condition: connect TRƯỚC khi MoveTo
+    local stop = false
+    local conn = hum.MoveToFinished:Connect(function()
+        stop = true
+    end)
+
+    hum:MoveTo(targetPos)
+
+    local startTime = tick()
+    while not stop do
+        task.wait(0.1)
+        -- Timeout 5s -> teleport thẳng
+        if tick() - startTime >= 5 then
+            hum:Move(Vector3.new(0, 0, 0))
+            hrp.CFrame = CFrame.new(targetPos)
+            stop = true
+        end
+    end
+
+    conn:Disconnect()
+end
+
 -- Collect tất cả token trong field (giống source mẫu CollectAllTokenInField)
 local function collectAllTokensInField(fieldName)
     local collectibles = workspace:FindFirstChild("Collectibles")
     if not collectibles then return end
 
-    for _, v in pairs(collectibles:GetChildren()) do
-        if isToken(v) and isValidTokenPos(v, fieldName) then
+    -- ✅ Fix: snapshot list trước, check v.Parent trước khi dùng (tránh lỗi khi token bị destroy)
+    local tokens = collectibles:GetChildren()
+    for _, v in pairs(tokens) do
+        if v.Parent and isToken(v) and isValidTokenPos(v, fieldName) then
             smartWalk(Vector3.new(v.Position.X, hrp.Position.Y, v.Position.Z))
         end
     end
@@ -905,18 +948,34 @@ local function avoidMobs()
     local mobs = getNearbyMobs(hrp.Position, 35)
     if #mobs == 0 then return end
 
-    log("⚠️ " .. #mobs .. " mobs nearby, jumping to avoid...")
+    log("⚠️ " .. #mobs .. " mobs nearby, spam jump until dead...")
 
+    -- Spam jump đến khi bees kill hết mob (Health <= 0 bị filter bởi getNearbyMobs)
+    -- Timeout 30s làm safety net phòng mob quá trâu
     local startTime = tick()
     while #mobs > 0 and (tick() - startTime) < 30 and running do
+        -- Jump để dodge damage
         if hum then
             hum.Jump = true
         end
+        -- Exploit jump fallback (nếu có)
+        pcall(function()
+            local uis = game:GetService("UserInputService")
+            for _, conn in pairs(getconnections(uis.JumpRequest)) do
+                conn:Fire()
+            end
+        end)
         task.wait(0.3)
+        -- getNearbyMobs chỉ lấy mob còn Health > 0
+        -- → khi bees kill xong thì #mobs = 0, thoát loop
         mobs = getNearbyMobs(hrp.Position, 35)
     end
 
-    log("Mobs cleared")
+    if #mobs == 0 then
+        log("Mobs killed, resume farming")
+    else
+        log("Mob timeout (30s), resume anyway")
+    end
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -934,34 +993,7 @@ local function isInField(field)
         and math.abs(hp.Y - fp.Y) < 30
 end
 
--- ═══════════════════════════════════════════════════════════
--- 11. SMART WALK nang
--- ═══════════════════════════════════════════════════════════
-local function smartWalk(targetPos)
-    if not hum or not hrp then refreshCharacter() end
-    if not hum then return end
-
-    hum.WalkSpeed = FARM_WALK_SPEED
-    hum:MoveTo(targetPos)
-
-    local stop = false
-    local conn = hum.MoveToFinished:Connect(function()
-        stop = true
-    end)
-
-    local startTime = tick()
-    while not stop do
-        task.wait(0.1)
-        -- Timeout 5s -> teleport thẳng (giống source mẫu)
-        if tick() - startTime >= 5 then
-            hum:Move(Vector3.new(0, 0, 0))
-            hrp.CFrame = CFrame.new(targetPos)
-            stop = true
-        end
-    end
-
-    if conn then conn:Disconnect() end
-end
+-- (smartWalk đã được định nghĩa phía trên, trước collectAllTokensInField)
 
 -- ═══════════════════════════════════════════════════════════
 -- 12. SMART FARM FIELD
@@ -1089,10 +1121,30 @@ local function farmQuestFields()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- 14. CONVERT HONEY (đúng cách: PlayerHiveCommand ToggleHoneyMaking)
+-- 14. STATS HELPER
 -- ═══════════════════════════════════════════════════════════
+local function getStats()
+    local cs = plr:FindFirstChild("CoreStats")
+    if not cs then return 0, 0, 0 end
+    local honey  = cs:FindFirstChild("Honey")  and cs.Honey.Value  or 0
+    local pollen = cs:FindFirstChild("Pollen") and cs.Pollen.Value or 0
+    local honey2 = cs:FindFirstChild("Honey2") and cs.Honey2.Value or 0  -- royal honey
+    return honey, pollen, honey2
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 15. CONVERT HONEY (smart: chỉ convert khi đủ pollen)
+-- ═══════════════════════════════════════════════════════════
+local MIN_POLLEN_TO_CONVERT = 500  -- ✅ Improve: không convert trip vô ích khi pollen ít
+
 local function convertHoney()
-    log(">> Convert honey")
+    local _, pollen, _ = getStats()
+    if pollen < MIN_POLLEN_TO_CONVERT then
+        log("Skip convert (pollen: " .. pollen .. " < " .. MIN_POLLEN_TO_CONVERT .. ")")
+        return
+    end
+
+    log(">> Convert honey (pollen: " .. pollen .. ")")
     tweenTo(getHivePosition())
     task.wait(0.5)
 
@@ -1103,15 +1155,102 @@ local function convertHoney()
     -- Đợi pollen = 0 (max 30s)
     local startTime = tick()
     while running and (tick() - startTime) < 30 do
-        local pollen = plr:FindFirstChild("CoreStats") and plr.CoreStats:FindFirstChild("Pollen")
-        if pollen and pollen.Value <= 0 then
-            break
-        end
+        local cs = plr:FindFirstChild("CoreStats")
+        local p = cs and cs:FindFirstChild("Pollen")
+        if p and p.Value <= 0 then break end
         task.wait(0.5)
     end
 
     task.wait(1)
-    log("Convert done")
+    local honey, _, _ = getStats()
+    log("Convert done | Honey: " .. honey)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- 16. TOKEN PRIORITY COLLECT
+-- ═══════════════════════════════════════════════════════════
+-- Thứ tự ưu tiên collect token (tên FrontDecal texture / item)
+local TOKEN_PRIORITY = {
+    ["RoyalJelly"]  = 1,
+    ["Glue"]        = 2,
+    ["MoonCharm"]   = 3,
+    ["Tropical"]    = 4,  -- Tropical drink
+    ["Gumdrops"]    = 5,
+}
+
+local function getTokenPriority(token)
+    -- Dùng tên hoặc FrontDecal texture để phân loại
+    local decal = token:FindFirstChild("FrontDecal")
+    if decal then
+        for key, pri in pairs(TOKEN_PRIORITY) do
+            if decal.Texture:find(key) then return pri end
+        end
+    end
+    return 99  -- pollen thường = thấp nhất
+end
+
+local function collectPriorityTokensInField(fieldName)
+    local collectibles = workspace:FindFirstChild("Collectibles")
+    if not collectibles then return end
+
+    -- Lấy tất cả token hợp lệ trong field
+    local tokens = {}
+    for _, v in pairs(collectibles:GetChildren()) do
+        if v.Parent and isToken(v) and isValidTokenPos(v, fieldName) then
+            table.insert(tokens, v)
+        end
+    end
+
+    -- ✅ Improve: sort theo priority (RJ > Glue > Moon Charm > pollen)
+    table.sort(tokens, function(a, b)
+        return getTokenPriority(a) < getTokenPriority(b)
+    end)
+
+    for _, v in pairs(tokens) do
+        if v.Parent then
+            smartWalk(Vector3.new(v.Position.X, hrp.Position.Y, v.Position.Z))
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- HELPER: FARM LOOP
+-- ═══════════════════════════════════════════════════════════
+
+-- Farm + accept quest + hatch cho đến khi đạt target bees
+local function farmUntilBees(targetBees)
+    while countBees() < targetBees and running do
+        local bees = countBees()
+        local honey, pollen, _ = getStats()
+        -- ✅ Improve: log stats mỗi loop để dễ theo dõi
+        log(string.format("=== Bees: %d/%d | Honey: %d | Pollen: %d ===", bees, targetBees, honey, pollen))
+
+        -- Accept quests có alert
+        acceptAllQuests()
+        task.wait(1)
+        if not running then break end
+
+        -- Farm theo quest field
+        farmQuestFields()
+        task.wait(0.5)
+        if not running then break end
+
+        -- Convert (smart: chỉ convert khi pollen đủ ngưỡng)
+        convertHoney()
+        task.wait(0.5)
+        if not running then break end
+
+        -- Chỉ mua egg nếu vẫn chưa đủ bees
+        if countBees() < targetBees then
+            local emptySlots = countEmptySlots()
+            if emptySlots > 0 then
+                buyBasicEgg(math.min(emptySlots, 3))
+                task.wait(0.5)
+                hatchAllEggs()
+                task.wait(0.5)
+            end
+        end
+    end
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -1133,77 +1272,179 @@ if running then
     task.wait(1)
 end
 
--- Helper: farm + accept quest cho đến khi đạt target bees
-local function farmUntilBees(targetBees)
-    while countBees() < targetBees and running do
-        -- Accept quests có alert
-        acceptAllQuests()
-        task.wait(1)
-
-        -- Farm theo quest field
-        farmQuestFields()
-        task.wait(0.5)
-
-        -- Convert
-        convertHoney()
-        task.wait(0.5)
-
-        -- Buy basic egg + hatch
-        local emptySlots = countEmptySlots()
-        if emptySlots > 0 then
-            buyBasicEgg(math.min(emptySlots, 3))  -- mua tối đa 3 quả mỗi vòng
-            task.wait(0.5)
-            hatchAllEggs()
-            task.wait(0.5)
-        end
-
-        log("=== Bees: " .. countBees() .. "/" .. targetBees .. " ===")
-    end
-end
-
 -- ─── Phase 1: 0→5 bees ───
 if running then
-    log("=== PHASE 1: 0→5 bees ===")
-    phase1_buy()  -- Clippers + Scissors trước khi mua egg
-    task.wait(1)
+    local cur = countBees()
+    log("=== PHASE 1: 0→5 bees === (current: " .. cur .. ")")
+    -- ✅ Fix: chỉ mua nếu chưa qua phase này (tránh waste honey khi restart)
+    if cur < 5 then
+        phase1_buy()
+        task.wait(1)
+    end
     farmUntilBees(5)
 end
 
 -- ─── Phase 2: 5→10 bees ───
 if running then
-    log("=== PHASE 2: 5→10 bees ===")
-    phase2_buy()  -- Canister + Vacuum + Boots/Belt/Helmet
-    task.wait(1)
+    local cur = countBees()
+    log("=== PHASE 2: 5→10 bees === (current: " .. cur .. ")")
+    if cur < 10 then
+        phase2_buy()
+        task.wait(1)
+    end
     farmUntilBees(10)
 end
 
 -- ─── Phase 3: 10→15 bees ───
 if running then
-    log("=== PHASE 3: 10→15 bees ===")
-    phase3_buy()  -- Compressor + Pulsar
-    task.wait(1)
+    local cur = countBees()
+    log("=== PHASE 3: 10→15 bees === (current: " .. cur .. ")")
+    if cur < 15 then
+        phase3_buy()
+        task.wait(1)
+    end
     farmUntilBees(15)
 end
 
 -- ─── Phase 4: 15→20 bees ───
 if running then
-    log("=== PHASE 4: 15→20 bees ===")
-    phase4_buy()  -- Port-O-Hive
-    task.wait(1)
+    local cur = countBees()
+    log("=== PHASE 4: 15→20 bees === (current: " .. cur .. ")")
+    if cur < 20 then
+        phase4_buy()
+        task.wait(1)
+    end
     farmUntilBees(20)
 end
 
 -- ─── Phase 5: 20→25 bees + Royal Jelly ───
 if running then
-    log("=== PHASE 5: 20→25 bees ===")
-    phase5_buy()  -- Propeller Hat (nếu đủ)
-    task.wait(1)
+    local cur = countBees()
+    log("=== PHASE 5: 20→25 bees === (current: " .. cur .. ")")
+    if cur < 25 then
+        phase5_buy()
+        task.wait(1)
+    end
 
-    -- Reroll Blue bees với Royal Jelly
-    rerollBasicToBlue()
-    task.wait(1)
-
+    -- Farm đến 25 bees trước
     farmUntilBees(25)
+
+    -- Reroll SAU KHI đã đủ 25 bees (hive đầy mới reroll có ý nghĩa)
+    task.wait(1)
+    rerollBasicToBlue()
 end
 
 log("========== KAITUN COMPLETE: " .. countBees() .. " bees ==========")
+
+-- ═══════════════════════════════════════════════════════════
+-- NIGHT: COLLECT FIREFLIES
+-- ═══════════════════════════════════════════════════════════
+local Lighting = game:GetService("Lighting")
+
+-- Kiểm tra có đang ban đêm không (ClockTime: 19:00 → 06:00)
+local function isNight()
+    local t = Lighting.ClockTime  -- range 0..24
+    return t >= 19 or t < 6
+end
+
+-- Tìm tất cả Firefly trong workspace
+local function getFireflies()
+    local list = {}
+    -- BSS lưu firefly trong workspace trực tiếp hoặc trong folder
+    local folders = {
+        workspace:FindFirstChild("Fireflies"),
+        workspace:FindFirstChild("Particles"),
+        workspace,
+    }
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, obj in pairs(folder:GetChildren()) do
+                -- Firefly là Part hoặc Model tên "Firefly"
+                if obj.Name == "Firefly" and obj.Parent then
+                    local part = obj:IsA("BasePart") and obj
+                        or obj:FindFirstChildWhichIsA("BasePart")
+                    if part then
+                        table.insert(list, {obj = obj, part = part})
+                    end
+                end
+            end
+        end
+    end
+    return list
+end
+
+-- Collect fireflies: đi đến từng con, sort theo distance để tối ưu path
+local function collectFireflies()
+    if not isNight() then
+        log(string.format("[Firefly] Skip - not night (ClockTime: %.1f)", Lighting.ClockTime))
+        return
+    end
+
+    local flies = getFireflies()
+    if #flies == 0 then
+        log("[Firefly] No fireflies found")
+        return
+    end
+
+    log("[Firefly] Found " .. #flies .. " fireflies, collecting...")
+
+    -- Sort theo distance từ char hiện tại (nearest first)
+    table.sort(flies, function(a, b)
+        local da = (a.part.Position - hrp.Position).Magnitude
+        local db = (b.part.Position - hrp.Position).Magnitude
+        return da < db
+    end)
+
+    local collected = 0
+    for _, entry in ipairs(flies) do
+        if not running then break end
+        -- Check còn tồn tại không (có thể bị collect bởi script trước)
+        if not entry.obj.Parent then continue end
+        if not isNight() then
+            log("[Firefly] Daytime - stop collecting")
+            break
+        end
+
+        -- Tween nhanh đến firefly (giữ Y của char để không bị rơi)
+        local tp = entry.part.Position
+        tweenTo(CFrame.new(tp.X, hrp.Position.Y, tp.Z), TWEEN_SPEED)
+        task.wait(0.2)
+        collected = collected + 1
+    end
+
+    log("[Firefly] Collected " .. collected)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- ✅ Improve: PERSISTENT LOOP - tiếp tục farm vô hạn sau khi đủ 25 bees
+-- ═══════════════════════════════════════════════════════════
+log("=== ENTERING PERSISTENT FARM LOOP ===")
+while running do
+    local honey, pollen, _ = getStats()
+    local bees = countBees()
+    log(string.format("[Loop] Bees: %d | Honey: %d | Pollen: %d | Night: %s",
+        bees, honey, pollen, tostring(isNight())))
+
+    -- Nếu ban đêm → ưu tiên collect fireflies trước
+    if isNight() then
+        collectFireflies()
+        task.wait(0.5)
+    end
+
+    -- Accept quest nếu có alert
+    acceptAllQuests()
+    task.wait(1)
+
+    -- Farm quest fields
+    farmQuestFields()
+    task.wait(0.5)
+
+    -- Convert khi đủ pollen
+    convertHoney()
+    task.wait(0.5)
+
+    -- Reroll bất kỳ Basic/Brave còn sót
+    rerollBasicToBlue()
+    task.wait(0.5)
+end
+
