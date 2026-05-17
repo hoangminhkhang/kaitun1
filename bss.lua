@@ -1,3 +1,4 @@
+print("[Kaitun] ===== SCRIPT LOADED =====")
 --[[
     BSS Kaitun v5 - Full Auto Pipeline
     Chức năng:
@@ -1405,14 +1406,105 @@ local function collectFireflies()
             break
         end
 
-        -- Tween nhanh đến firefly (giữ Y của char để không bị rơi)
+        -- ✅ Fix: Tween đến đúng Y của firefly (bay trên không)
         local tp = entry.part.Position
-        tweenTo(CFrame.new(tp.X, hrp.Position.Y, tp.Z), TWEEN_SPEED)
-        task.wait(0.2)
+        -- Tween nhanh đến gần firefly
+        tweenTo(CFrame.new(tp.X, tp.Y, tp.Z), TWEEN_SPEED)
+        task.wait(0.1)
+        -- Teleport thẳng vào để trigger collect (touch detection)
+        if entry.obj.Parent then
+            hrp.CFrame = CFrame.new(tp.X, tp.Y, tp.Z)
+            task.wait(0.15)
+        end
         collected = collected + 1
     end
 
     log("[Firefly] Collected " .. collected)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- SPARKLES COLLECTOR
+-- Cơ chế: workspace.Flowers có flower nào mang child "Sparkles"
+-- → teleport vào flower đó → Dig → collect tokens xung quanh
+-- ═══════════════════════════════════════════════════════════
+
+-- Tìm flower gần nhất đang có Sparkles (chưa bị đánh dấu Ignored)
+local function getNearestSparklesFlower()
+    local flowers = workspace:FindFirstChild("Flowers")
+    if not flowers then return nil end
+
+    local nearest = nil
+    local nearestDist = math.huge
+
+    for _, v in pairs(flowers:GetChildren()) do
+        if v:IsA("BasePart")
+        and v:FindFirstChild("Sparkles")
+        and not v:FindFirstChild("_KaitunIgnored") then
+            local dist = (v.Position - hrp.Position).Magnitude
+            if dist < nearestDist then
+                nearestDist = dist
+                nearest = v
+            end
+        end
+    end
+    return nearest
+end
+
+-- Thu hoạch tất cả Sparkles flowers hiện tại
+local function farmSparkles()
+    if not hrp then return end
+
+    local count = 0
+    -- Loop lấy từng flower có Sparkles
+    while running do
+        local flower = getNearestSparklesFlower()
+        if not flower then break end
+
+        log("[Sparkles] Found flower at " .. tostring(flower.Position))
+
+        -- Bước 1: Teleport thẳng đến flower
+        tweenTo(CFrame.new(flower.Position), 200)
+        task.wait(0.3)
+        hrp.CFrame = CFrame.new(flower.Position)
+        task.wait(0.3)
+
+        -- Bước 2: Dig để collect sparkle
+        fireEvent("ToolCollect")
+        task.wait(0.3)
+        fireEvent("ToolCollect")
+        task.wait(0.3)
+
+        -- Bước 3: Đánh dấu đã xử lý (tránh loop lại)
+        pcall(function()
+            local tag = Instance.new("BoolValue")
+            tag.Name = "_KaitunIgnored"
+            tag.Parent = flower
+            game:GetService("Debris"):AddItem(tag, 10)  -- tự xóa sau 10s
+        end)
+
+        -- Bước 4: Collect tokens xung quanh radius 20
+        local collectibles = workspace:FindFirstChild("Collectibles")
+        if collectibles then
+            for _, token in pairs(collectibles:GetChildren()) do
+                if token.Parent
+                and isToken(token)
+                and (token.Position - hrp.Position).Magnitude < 20 then
+                    smartWalk(Vector3.new(
+                        token.Position.X,
+                        hrp.Position.Y,
+                        token.Position.Z
+                    ))
+                end
+            end
+        end
+
+        count = count + 1
+        task.wait(0.2)
+    end
+
+    if count > 0 then
+        log("[Sparkles] Done - collected from " .. count .. " flowers")
+    end
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -1430,6 +1522,10 @@ while running do
         collectFireflies()
         task.wait(0.5)
     end
+
+    -- Thu hoạch Sparkles flowers nếu có
+    farmSparkles()
+    task.wait(0.5)
 
     -- Accept quest nếu có alert
     acceptAllQuests()
