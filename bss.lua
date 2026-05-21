@@ -1292,25 +1292,15 @@ local function farmUntilBees(targetBees)
         if not running then break end
 
         -- Chỉ mua egg nếu vẫn chưa đủ bees
+        -- ✅ Fix: codes đã nhập từ đầu, không nhập lại ở đây
         if countBees() < targetBees then
             local emptySlots = countEmptySlots()
             if emptySlots > 0 then
-                -- Mua egg + hatch song song cùng lúc
-                local hatchDone = false
-                task.spawn(function()
-                    buyBasicEgg(math.min(emptySlots, 3))
-                    hatchAllEggs()
-                    hatchDone = true
-                end)
-                -- Đồng thời redeem codes lần nữa (cooldown ngắn không hại gì)
-                task.spawn(function()
-                    redeemCodes()
-                end)
-                -- Đợi hatch xong trước khi tiếp tục
-                local t0 = tick()
-                while not hatchDone and (tick() - t0) < 30 do
-                    task.wait(0.5)
-                end
+                -- Mua egg trước, hatch sau (sequential - đảm bảo thứ tự)
+                buyBasicEgg(math.min(emptySlots, 3))
+                task.wait(0.5)
+                hatchAllEggs()
+                task.wait(0.5)
             end
         end
     end
@@ -1325,18 +1315,26 @@ task.wait(2)
 -- Setup ban đầu
 log("=== SETUP ===")
 
--- Chạy redeem codes song song với claim hive (không cần chờ nhau)
-task.spawn(function()
-    if running then
-        redeemCodes()
-    end
-end)
-
+-- Claim hive trước
 for attempt = 1, 3 do
     if claimHive() then break end
     task.wait(2)
 end
 task.wait(1)
+
+-- ✅ Hatch ngay Basic Egg miễn phí được tặng khi claim hive
+-- (game tặng 1 Basic Egg lúc claim → hatch ngay để có bee sớm nhất)
+if running then
+    log(">> Hatch starter egg từ claim hive")
+    hatchAllEggs()
+    task.wait(1)
+end
+
+-- Redeem codes SAU hatch starter egg
+if running then
+    redeemCodes()
+    task.wait(1)
+end
 
 -- ─── Phase 1: 0→5 bees ───
 if running then
