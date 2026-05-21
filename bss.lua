@@ -99,13 +99,6 @@ end
 -- ═══════════════════════════════════════════════════════════
 local NPC_QUESTS = {
     {name = "Black Bear",   pos = Vector3.new(-256, 6, 297),   minBees = 0},
-    {name = "Mother Bear",  pos = Vector3.new(-179, 6, 87),    minBees = 0},
-    {name = "Brown Bear",   pos = Vector3.new(281, 46, 237),   minBees = 0},
-    {name = "Panda Bear",   pos = Vector3.new(104, 36, 48),    minBees = 5},
-    {name = "Science Bear", pos = Vector3.new(269, 104, 20),   minBees = 10},
-    {name = "Honey Bee",    pos = Vector3.new(-387, 90, -220), minBees = 15},
-    {name = "Polar Bear",   pos = Vector3.new(-107, 120, -77), minBees = 15},
-    {name = "Spirit Bear",  pos = Vector3.new(-365, 98, 479),  minBees = 35},
 }
 
 -- ═══════════════════════════════════════════════════════════
