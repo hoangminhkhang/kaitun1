@@ -360,7 +360,7 @@ local SHOPS = {
 local function phase1_buy()
     log(">> Phase 1: Buy Clippers + Scissors")
     tryBuy("Collector", "Clippers", SHOPS.Basic)
-    tryBuy("Collector", "Scissors", SHOPS.Pro)
+    tryBuy("Collector", "Scissors", SHOPS.Basic)  -- ✅ Fix: Scissors ở Basic shop, không phải Pro
 end
 
 -- Phase 2: 5->10 bees
@@ -396,81 +396,172 @@ end
 -- ═══════════════════════════════════════════════════════════
 -- ROYAL JELLY: reroll Basic/Brave bee → Blue bee
 -- ═══════════════════════════════════════════════════════════
--- List bee Blue mong muốn (target khi reroll)
+-- List Blue bee mục tiêu khi reroll
 local TARGET_BLUE_BEES = {
-    BumbleBee = true,
-    CoolBee = true,
-    BubbleBee = true,
-    BuckoBee = true,
-    FrostyBee = true,
-    DiamondBee = true,
-    NinjaBee = true,
-    BuoyantBee = true,
-    TadpoleBee = true,
+    BumbleBee = true, CoolBee = true, BubbleBee = true,
+    BuckoBee = true,  FrostyBee = true, DiamondBee = true,
+    NinjaBee = true,  BuoyantBee = true, TadpoleBee = true,
 }
-
--- Bee cần reroll (Basic/Brave)
-local REROLL_TARGETS = {
-    BasicBee = true,
-    BraveBee = true,
-}
+local REROLL_TARGETS = { BasicBee = true, BraveBee = true }
 
 local function isBlueBee(beeType)
     return TARGET_BLUE_BEES[beeType] == true
 end
 
--- Tìm cell Basic/Brave bee để reroll
+-- Tìm cell Basic/Brave để reroll (bảo vệ Gifted)
 local function findCellToReroll()
     local hive = getMyHive()
     if not hive or not hive:FindFirstChild("Cells") then return nil end
-
     for _, cell in pairs(hive.Cells:GetChildren()) do
-        local ct = cell:FindFirstChild("CellType")
+        local ct     = cell:FindFirstChild("CellType")
         local locked = cell:FindFirstChild("CellLocked")
-        -- ✅ Improve: bảo vệ Gifted bee - không reroll nếu cell là Gifted
         local gifted = cell:FindFirstChild("CellGifted")
-
-        if ct and (locked == nil or not locked.Value) then
-            if REROLL_TARGETS[ct.Value] then
-                -- Bỏ qua Gifted bee
-                if gifted and gifted.Value == true then
-                    log("Skip Gifted " .. ct.Value .. " at C" .. (cell:FindFirstChild("CellX") and cell.CellX.Value or "?") .. "," .. (cell:FindFirstChild("CellY") and cell.CellY.Value or "?"))
-                    continue
-                end
-                local cellX = cell:FindFirstChild("CellX")
-                local cellY = cell:FindFirstChild("CellY")
-                if cellX and cellY then
-                    return {x = cellX.Value, y = cellY.Value, cell = cell, original = ct.Value}
-                end
+        if ct and (locked == nil or not locked.Value) and REROLL_TARGETS[ct.Value] then
+            if gifted and gifted.Value == true then
+                log("Skip Gifted " .. ct.Value)
+                continue
+            end
+            local cx = cell:FindFirstChild("CellX")
+            local cy = cell:FindFirstChild("CellY")
+            if cx and cy then
+                return {x = cx.Value, y = cy.Value, cell = cell, original = ct.Value}
             end
         end
     end
     return nil
 end
 
--- Reroll 1 cell cho đến khi ra Blue bee
+-- Reroll 1 cell đến khi ra Blue bee
 local function rerollCellToBlue(cellInfo, maxAttempts)
     maxAttempts = maxAttempts or 100
-    log(">> Reroll C" .. cellInfo.x .. "," .. cellInfo.y .. " (" .. cellInfo.original .. ") -> Blue bee")
-
+    log(">> Reroll C" .. cellInfo.x .. "," .. cellInfo.y .. " (" .. cellInfo.original .. ") → Blue")
     for i = 1, maxAttempts do
         if not running then return false end
-
         local ct = cellInfo.cell:FindFirstChild("CellType")
         if ct and isBlueBee(ct.Value) then
             log("✅ Got Blue bee: " .. ct.Value .. " after " .. i .. " rolls!")
             return true
         end
-
         invokeEvent("ConstructHiveCellFromEgg", cellInfo.x, cellInfo.y, "RoyalJelly", 1, false)
         task.wait(0.6)
     end
-
     log("RJ max attempts reached")
     return false
 end
 
--- Main: reroll all Basic/Brave -> Blue
+-- ═══════════════════════════════════════════════════════════
+-- EGG COUNT + HATCH
+-- ═══════════════════════════════════════════════════════════
+local function countEmptySlots()
+    local hive = getMyHive()
+    if not hive or not hive:FindFirstChild("Cells") then return 0 end
+    local n = 0
+    for _, cell in pairs(hive.Cells:GetChildren()) do
+        local ct = cell:FindFirstChild("CellType")
+        if ct and (ct.Value == "Empty" or ct.Value == "") then
+            n += 1
+        end
+    end
+    return n
+end
+
+-- ✅ NEW: Đếm số Basic Egg đang có trong inventory
+local function countBasicEggs()
+    -- BSS lưu egg count trong DataFolder hoặc Inventory
+    local paths = {
+        function() return plr.DataFolder.Inventory.BasicEgg.Value end,
+        function() return plr.PlayerData.Inventory.BasicEgg.Value end,
+        function() return plr.Inventory.BasicEgg.Value end,
+        function() return plr.CoreStats.BasicEgg.Value end,
+        function() return plr.Stats.BasicEgg.Value end,
+    }
+    for _, getter in ipairs(paths) do
+        local ok, val = pcall(getter)
+        if ok and type(val) == "number" then
+            return math.floor(val)
+        end
+    end
+    -- Fallback: không đọc được → trả về nil (hatchAllEggs sẽ dùng result từ server)
+    return nil
+end
+
+local function hatchAllEggs()
+    log(">> Hatch ALL eggs")
+    tweenTo(getHivePosition())
+    task.wait(1)
+
+    local remote = Events:FindFirstChild("ConstructHiveCellFromEgg")
+    if not remote then log("FAIL: ConstructHiveCellFromEgg not found") return 0 end
+
+    -- ✅ Fix: check inventory trước để biết tối đa bao nhiêu lần cần hatch
+    local eggCount = countBasicEggs()
+    local emptySlots = countEmptySlots()
+
+    if eggCount ~= nil then
+        log(string.format("Inv: %d Basic Egg(s) | Empty slots: %d", eggCount, emptySlots))
+        if eggCount == 0 then
+            log("No eggs in inventory")
+            return 0
+        end
+    else
+        log(string.format("Empty slots: %d (egg count unknown, rely on server)", emptySlots))
+    end
+
+    -- Số lần hatch tối đa = min(egg, slot) nếu biết egg count
+    local maxHatch = eggCount ~= nil and math.min(eggCount, emptySlots) or emptySlots
+
+    -- ✅ Fix: track slot đã dùng trong session này để không pick lại cùng 1 slot
+    local usedSlots = {}
+
+    local function getNextEmptySlot()
+        local hive = getMyHive()
+        if not hive or not hive:FindFirstChild("Cells") then return nil, nil end
+        for _, cell in pairs(hive.Cells:GetChildren()) do
+            local ct = cell:FindFirstChild("CellType")
+            local cellX = cell:FindFirstChild("CellX")
+            local cellY = cell:FindFirstChild("CellY")
+            if ct and cellX and cellY then
+                local key = cellX.Value .. "," .. cellY.Value
+                if (ct.Value == "Empty" or ct.Value == "") and not usedSlots[key] then
+                    return cellX.Value, cellY.Value, key
+                end
+            end
+        end
+        return nil, nil, nil
+    end
+
+    local hatched = 0
+    for i = 1, maxHatch do
+        if not running then break end
+
+        local x, y, key = getNextEmptySlot()
+        if not x then
+            log("No empty slot left")
+            break
+        end
+
+        -- Đánh dấu slot này đã dùng NGAY để lần sau không pick lại
+        usedSlots[key] = true
+
+        local ok, result = pcall(function()
+            return remote:InvokeServer(x, y, "Basic", 1, false)
+        end)
+        task.wait(0.8)
+
+        if ok and result then
+            hatched = hatched + 1
+            log(string.format("Hatched #%d C%s,%s", hatched, x, y))
+        else
+            -- Server báo fail = hết egg
+            log("No more eggs (server) at C" .. x .. "," .. y)
+            break
+        end
+    end
+
+    log("Hatch done: " .. hatched .. "/" .. (eggCount or "?"))
+    return hatched
+end
+
 local function rerollBasicToBlue()
     log(">> Royal Jelly: Basic/Brave -> Blue bees")
     tweenTo(getHivePosition())
@@ -508,80 +599,6 @@ local function buyBasicEgg(amount)
     end
 end
 
--- Đếm số slot trống trong hive
-local function countEmptySlots()
-    local hive = getMyHive()
-    if not hive or not hive:FindFirstChild("Cells") then return 0 end
-    local n = 0
-    for _, cell in pairs(hive.Cells:GetChildren()) do
-        local ct = cell:FindFirstChild("CellType")
-        if ct and (ct.Value == "Empty" or ct.Value == "") then
-            n += 1
-        end
-    end
-    return n
-end
-
-local function hatchEgg()
-    log(">> Hatch Basic Egg")
-    tweenTo(getHivePosition())
-    task.wait(1)
-
-    local x, y = getEmptyHiveSlot()
-    if not x then log("FAIL: no empty slot") return false end
-
-    log("Hatch C" .. x .. "," .. y)
-    -- Format xac nhan: InvokeServer(cellX, cellY, "Basic", 1, false)
-    local remote = Events:FindFirstChild("ConstructHiveCellFromEgg")
-    if not remote then log("FAIL: remote not found") return false end
-    local ok, result = pcall(function()
-        local args = {x, y, "Basic", 1, false}
-        return remote:InvokeServer(unpack(args))
-    end)
-    task.wait(1)
-    if ok then
-        log("Hatch OK C" .. x .. "," .. y)
-        return true
-    else
-        log("Hatch FAIL: " .. tostring(result))
-        return false
-    end
-end
-
-local function hatchAllEggs()
-    log(">> Hatch ALL eggs")
-    tweenTo(getHivePosition())
-    task.wait(1)
-
-    local remote = Events:FindFirstChild("ConstructHiveCellFromEgg")
-    if not remote then log("FAIL: ConstructHiveCellFromEgg not found") return 0 end
-
-    local hatched = 0
-    for i = 1, 50 do
-        if not running then break end
-
-        local x, y = getEmptyHiveSlot()
-        if not x then log("No empty slot left") break end
-
-        -- Format xac nhan: InvokeServer(cellX, cellY, "Basic", 1, false)
-        local ok, result = pcall(function()
-            local args = {x, y, "Basic", 1, false}
-            return remote:InvokeServer(unpack(args))
-        end)
-        task.wait(0.8)
-
-        if ok and result then
-            hatched = hatched + 1
-            log("Hatched #" .. hatched .. " C" .. x .. "," .. y)
-        else
-            log("No more eggs or fail at C" .. x .. "," .. y)
-            break
-        end
-    end
-
-    log("Hatch done: " .. hatched)
-    return hatched
-end
 
 -- ═══════════════════════════════════════════════════════════
 -- 5. NPC ALERT CHECK
@@ -1340,11 +1357,42 @@ end
 if running then
     local cur = countBees()
     log("=== PHASE 1: 0→5 bees === (current: " .. cur .. ")")
-    -- ✅ Fix: chỉ mua nếu chưa qua phase này (tránh waste honey khi restart)
+
     if cur < 5 then
-        phase1_buy()
-        task.wait(1)
+        -- ✅ Improve: ưu tiên mua egg + hatch TRƯỚC, tools mua SAU
+        -- Lý do: cần bee vào hive sớm để bắt đầu farm pollen, tools có thể chờ
+
+        -- Bước 1: mua đủ egg để fill slot trống (tối đa 5 egg cho phase 1)
+        local emptySlots = countEmptySlots()
+        local eggsNeeded = math.max(0, 5 - cur)  -- cần thêm bao nhiêu bee nữa
+        local buyCount   = math.min(eggsNeeded, emptySlots)
+
+        if buyCount > 0 then
+            log("Bước 1: Mua " .. buyCount .. " egg(s) trước khi mua tools")
+            buyBasicEgg(buyCount)
+            task.wait(0.5)
+        end
+
+        -- Bước 2: hatch nếu có egg trong inv HOẶC có slot trống sau khi mua
+        local eggCount = countBasicEggs()
+        local hasEggs  = (eggCount ~= nil and eggCount > 0)  -- ✅ Fix: tránh nil ~= 0 = true
+                      or (eggCount == nil and countEmptySlots() > 0)  -- fallback: không đọc được inv thì dựa vào slot
+        if hasEggs then
+            hatchAllEggs()
+            task.wait(1)
+        else
+            log("Bước 2: Không có egg để hatch, bỏ qua")
+        end
+
+        -- Bước 3: SAU KHI có bee mới mua tools early
+        if countBees() > 0 then
+            log("Bước 3: Mua tools early (Clippers + Scissors)")
+            phase1_buy()
+            task.wait(1)
+        end
     end
+
+    -- Tiếp tục farm cho đến đủ 5 bees
     farmUntilBees(5)
 end
 
