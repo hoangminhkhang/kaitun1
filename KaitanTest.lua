@@ -1,13 +1,12 @@
 --[[
     ============================================
-    FORCE CUSTOMER - Run A Restaurant
+    RESTAURANT AUTOMATION SYSTEM
     ============================================
-    Script: ServerScriptService (Script)
-    
-    - Scan tất cả restaurant tìm Chair/Table
-    - Force customer NPC vào tất cả ghế trống
-    - Không phân biệt loại ghế/bàn
-    - Tự động spawn, pathfind, ngồi, ăn, rời đi
+    Scripts:
+    1. FORCE CUSTOMER - Spawn & manage customers
+    2. INSTANT COOK - Cook food instantly
+    3. INSTANT EAT - Customers eat instantly
+    4. INSTANT MONEY PAY - Process payments instantly
     ============================================
 ]]
 
@@ -18,21 +17,36 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
 
 -- ========== CONFIG ==========
 local CONFIG = {
-    SPAWN_INTERVAL = 1.5,          -- Thời gian giữa mỗi lần spawn (giây)
-    MAX_CUSTOMERS_PER_RESTAURANT = 50, -- Max customer mỗi restaurant
-    EATING_TIME = 12,              -- Thời gian ăn (giây)
-    WALK_SPEED = 16,               -- Tốc độ đi
-    SEAT_REACH_DISTANCE = 5,       -- Khoảng cách tới ghế = đã tới
-    TIP_MIN = 5,                   -- Tip tối thiểu
-    TIP_MAX = 25,                  -- Tip tối đa
-    FORCE_ENABLED = true,          -- Bật force mặc định
-    NPC_CLEANUP_DELAY = 2,         -- Delay trước khi xóa NPC sau khi rời
-    PATHFIND_TIMEOUT = 15,         -- Timeout pathfinding (giây)
-    RESPAWN_AFTER_LEAVE = true,    -- Tự động spawn lại sau khi customer rời
-    CUSTOMER_COLORS = {            -- Màu áo random cho NPC
+    -- Force Customer
+    SPAWN_INTERVAL = 1.5,
+    MAX_CUSTOMERS_PER_RESTAURANT = 50,
+    EATING_TIME = 3,
+    WALK_SPEED = 16,
+    SEAT_REACH_DISTANCE = 5,
+    TIP_MIN = 5,
+    TIP_MAX = 25,
+    FORCE_ENABLED = true,
+    NPC_CLEANUP_DELAY = 2,
+    PATHFIND_TIMEOUT = 15,
+    RESPAWN_AFTER_LEAVE = true,
+    
+    -- Instant Cook
+    COOK_ENABLED = true,
+    COOK_SPEED_MULTIPLIER = 10,
+    
+    -- Instant Eat
+    EAT_ENABLED = true,
+    EAT_DURATION = 1,
+    
+    -- Instant Money Pay
+    PAY_ENABLED = true,
+    PAY_SPEED_MULTIPLIER = 5,
+    
+    CUSTOMER_COLORS = {
         BrickColor.new("Bright red"),
         BrickColor.new("Bright blue"),
         BrickColor.new("Bright green"),
@@ -47,7 +61,6 @@ local CONFIG = {
 }
 
 -- ========== REFERENCES ==========
-local Workspace = game:GetService("Workspace")
 local ThingsFolder = Workspace:FindFirstChild("__THINGS")
 local RestaurantsFolder = ThingsFolder and ThingsFolder:FindFirstChild("Restaurants")
 local SpotsFolder = ThingsFolder and ThingsFolder:FindFirstChild("Spots")
@@ -61,20 +74,33 @@ local ForceCustomerRemote = Instance.new("RemoteEvent")
 ForceCustomerRemote.Name = "ForceCustomerToggle"
 ForceCustomerRemote.Parent = ReplicatedStorage
 
-local CustomerStatusRemote = Instance.new("RemoteEvent")
-CustomerStatusRemote.Name = "CustomerStatusUpdate"
-CustomerStatusRemote.Parent = ReplicatedStorage
+local InstantCookRemote = Instance.new("RemoteEvent")
+InstantCookRemote.Name = "InstantCookToggle"
+InstantCookRemote.Parent = ReplicatedStorage
+
+local InstantEatRemote = Instance.new("RemoteEvent")
+InstantEatRemote.Name = "InstantEatToggle"
+InstantEatRemote.Parent = ReplicatedStorage
+
+local InstantPayRemote = Instance.new("RemoteEvent")
+InstantPayRemote.Name = "InstantPayToggle"
+InstantPayRemote.Parent = ReplicatedStorage
+
+local StatusRemote = Instance.new("RemoteEvent")
+StatusRemote.Name = "SystemStatusUpdate"
+StatusRemote.Parent = ReplicatedStorage
 
 -- ========== STATE ==========
-local activeCustomers = {}       -- {[npcModel] = customerData}
-local occupiedSeats = {}         -- {[seatPart] = npcModel}
-local restaurantData = {}        -- {[restaurantModel] = {chairs = {}, tables = {}}}
-local forceEnabledPlayers = {}   -- {[player] = true/false}
-local customerCount = {}         -- {[restaurantName] = count}
+local activeCustomers = {}
+local occupiedSeats = {}
+local restaurantData = {}
+local customerCount = {}
+local cookingItems = {}
+local eatingCustomers = {}
+local payingCustomers = {}
 
 -- ========== UTILITY FUNCTIONS ==========
 
--- Tìm tất cả Chair và Table trong 1 restaurant
 local function scanRestaurantSeats(restaurant)
     local chairs = {}
     local tables = {}
@@ -85,10 +111,8 @@ local function scanRestaurantSeats(restaurant)
     for _, entity in ipairs(entities:GetChildren()) do
         if entity:IsA("Model") then
             local name = entity.Name:lower()
-            -- Check tên có chứa "chair" hoặc "stool" -> ghế
             if name:find("chair") or name:find("stool") or name:find("seat") or name:find("bench") then
                 table.insert(chairs, entity)
-            -- Check tên có chứa "table" -> bàn
             elseif name:find("table") or name:find("desk") then
                 table.insert(tables, entity)
             end
@@ -98,7 +122,6 @@ local function scanRestaurantSeats(restaurant)
     return chairs, tables
 end
 
--- Lấy vị trí ngồi của một ghế (PrimaryPart hoặc first BasePart)
 local function getSeatPosition(chairModel)
     if chairModel.PrimaryPart then
         return chairModel.PrimaryPart.Position + Vector3.new(0, 2, 0)
@@ -113,12 +136,10 @@ local function getSeatPosition(chairModel)
     return nil
 end
 
--- Lấy CFrame ngồi (hướng về phía bàn gần nhất)
 local function getSeatCFrame(chairModel, allTables)
     local seatPos = getSeatPosition(chairModel)
     if not seatPos then return nil end
     
-    -- Tìm bàn gần nhất để quay mặt về phía bàn
     local nearestTable = nil
     local nearestDist = math.huge
     
@@ -137,7 +158,7 @@ local function getSeatCFrame(chairModel, allTables)
         
         if tblPos then
             local dist = (tblPos - seatPos).Magnitude
-            if dist < nearestDist and dist < 15 then -- Bàn trong phạm vi 15 studs
+            if dist < nearestDist and dist < 15 then
                 nearestDist = dist
                 nearestTable = tblPos
             end
@@ -151,15 +172,12 @@ local function getSeatCFrame(chairModel, allTables)
     return CFrame.new(seatPos)
 end
 
--- Tạo NPC Customer
 local function createCustomerNPC(spawnPosition)
     local npc = nil
     
-    -- Thử clone từ template ShopNPC
     if NPCTemplate then
         npc = NPCTemplate:Clone()
     else
-        -- Fallback: Tạo NPC đơn giản bằng rig cơ bản
         npc = Instance.new("Model")
         npc.Name = "Customer"
         
@@ -225,7 +243,6 @@ local function createCustomerNPC(spawnPosition)
         
         npc.PrimaryPart = humanoidRootPart
         
-        -- Build character joints
         local neck = Instance.new("Motor6D")
         neck.Name = "Neck"
         neck.Part0 = torso
@@ -273,15 +290,12 @@ local function createCustomerNPC(spawnPosition)
         rightShoulder.Parent = torso
     end
     
-    -- Đặt tên
     npc.Name = "Customer_" .. tostring(math.random(10000, 99999))
     
-    -- Set position
     if npc.PrimaryPart then
         npc:PivotTo(CFrame.new(spawnPosition))
     end
     
-    -- Set humanoid
     local humanoid = npc:FindFirstChildOfClass("Humanoid")
     if humanoid then
         humanoid.WalkSpeed = CONFIG.WALK_SPEED
@@ -291,9 +305,7 @@ local function createCustomerNPC(spawnPosition)
     return npc
 end
 
--- Tạo BillboardGui hiển thị trạng thái trên đầu NPC
 local function createStatusBillboard(npc, text, color)
-    -- Xóa billboard cũ nếu có
     local head = npc:FindFirstChild("Head")
     if not head then return end
     
@@ -332,7 +344,6 @@ local function createStatusBillboard(npc, text, color)
     return billboard
 end
 
--- Update billboard text
 local function updateStatusBillboard(npc, text, color)
     local head = npc:FindFirstChild("Head")
     if not head then return end
@@ -352,14 +363,12 @@ local function updateStatusBillboard(npc, text, color)
     end
 end
 
--- Pathfind NPC tới vị trí
 local function moveNPCToPosition(npc, targetPosition)
     local humanoid = npc:FindFirstChildOfClass("Humanoid")
     local rootPart = npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
     
     if not humanoid or not rootPart then return false end
     
-    -- Thử pathfinding trước
     local success, errorMsg = pcall(function()
         local path = PathfindingService:CreatePath({
             AgentRadius = 2,
@@ -373,28 +382,25 @@ local function moveNPCToPosition(npc, targetPosition)
         if path.Status == Enum.PathStatus.Success then
             local waypoints = path:GetWaypoints()
             for i, waypoint in ipairs(waypoints) do
-                if not npc.Parent then return end -- NPC đã bị xóa
+                if not npc.Parent then return end
                 humanoid:MoveTo(waypoint.Position)
                 
                 local reached = humanoid.MoveToFinished:Wait()
                 if not reached then break end
             end
         else
-            -- Fallback: đi thẳng tới
             humanoid:MoveTo(targetPosition)
             humanoid.MoveToFinished:Wait()
         end
     end)
     
     if not success then
-        -- Fallback nếu pathfinding lỗi: MoveTo trực tiếp
         pcall(function()
             humanoid:MoveTo(targetPosition)
             humanoid.MoveToFinished:Wait()
         end)
     end
     
-    -- Check đã tới chưa
     if rootPart and rootPart.Parent then
         local dist = (rootPart.Position - targetPosition).Magnitude
         return dist < CONFIG.SEAT_REACH_DISTANCE
@@ -403,7 +409,6 @@ local function moveNPCToPosition(npc, targetPosition)
     return false
 end
 
--- Force NPC ngồi xuống ghế (teleport + anchor)
 local function sitNPCAtChair(npc, chairModel, allTables)
     local seatCF = getSeatCFrame(chairModel, allTables)
     if not seatCF then return false end
@@ -413,19 +418,16 @@ local function sitNPCAtChair(npc, chairModel, allTables)
         humanoid.WalkSpeed = 0
     end
     
-    -- Teleport NPC tới ghế
     if npc.PrimaryPart then
         npc:PivotTo(seatCF)
     end
     
-    -- Anchor tất cả parts để NPC không rớt
     for _, part in ipairs(npc:GetDescendants()) do
         if part:IsA("BasePart") then
             part.Anchored = true
         end
     end
     
-    -- Play sit animation nếu có Humanoid
     if humanoid then
         humanoid.Sit = true
     end
@@ -433,17 +435,12 @@ local function sitNPCAtChair(npc, chairModel, allTables)
     return true
 end
 
--- Unanchor NPC để đi lại
 local function unanchorNPC(npc)
     local humanoid = npc:FindFirstChildOfClass("Humanoid")
     
     for _, part in ipairs(npc:GetDescendants()) do
         if part:IsA("BasePart") then
-            if part.Name == "HumanoidRootPart" then
-                part.Anchored = false
-            else
-                part.Anchored = false
-            end
+            part.Anchored = false
         end
     end
     
@@ -453,14 +450,176 @@ local function unanchorNPC(npc)
     end
 end
 
--- ========== MAIN FORCE CUSTOMER LOGIC ==========
+local function getSpawnPosition(restaurant)
+    local tiles = restaurant:FindFirstChild("Tiles")
+    if tiles then
+        local front = tiles:FindFirstChild("Front")
+        if front and front.PrimaryPart then
+            return front.PrimaryPart.Position + Vector3.new(0, 3, 8)
+        end
+    end
+    
+    local primaryPart = restaurant:FindFirstChild("PrimaryPart")
+    if primaryPart then
+        return primaryPart.Position + Vector3.new(0, 5, 20)
+    end
+    
+    return Vector3.new(0, 10, 0)
+end
 
--- Scan tất cả restaurants và lưu data
+local function getLeavePosition(restaurant)
+    local spawnPos = getSpawnPosition(restaurant)
+    return spawnPos + Vector3.new(math.random(-30, 30), 0, 30)
+end
+
+-- ========== FORCE CUSTOMER LOGIC ==========
+
+local function handleCustomerLifecycle(npc, chairModel, restaurant, data)
+    local allTables = data.tables
+    local customerData = {
+        npc = npc,
+        chair = chairModel,
+        restaurant = restaurant,
+        state = "walking",
+    }
+    activeCustomers[npc] = customerData
+    
+    createStatusBillboard(npc, "🚶 Đang đi...", Color3.fromRGB(150, 200, 255))
+    
+    local seatPos = getSeatPosition(chairModel)
+    if seatPos then
+        local reached = moveNPCToPosition(npc, seatPos)
+        if not npc.Parent then return end
+        if not reached then
+            if npc.PrimaryPart then
+                npc:PivotTo(CFrame.new(seatPos))
+            end
+        end
+    end
+    
+    if not npc.Parent then return end
+    
+    customerData.state = "sitting"
+    sitNPCAtChair(npc, chairModel, allTables)
+    updateStatusBillboard(npc, "🪑 Đã ngồi", Color3.fromRGB(100, 255, 100))
+    task.wait(1)
+    
+    if not npc.Parent then return end
+    
+    customerData.state = "waiting_order"
+    local menuItems = {"🍔", "🍕", "🍝", "🥗", "🥩", "🍲", "🍣", "🍜", "🥪", "🍰"}
+    local orderIcon = menuItems[math.random(#menuItems)]
+    updateStatusBillboard(npc, orderIcon .. " Chờ order...", Color3.fromRGB(255, 200, 50))
+    task.wait(math.random(2, 4))
+    
+    if not npc.Parent then return end
+    
+    customerData.state = "waiting_food"
+    updateStatusBillboard(npc, orderIcon .. " Chờ đồ ăn...", Color3.fromRGB(255, 165, 0))
+    
+    -- INSTANT COOK: Nếu bật thì nấu nhanh
+    if CONFIG.COOK_ENABLED then
+        task.wait(1 / CONFIG.COOK_SPEED_MULTIPLIER)
+    else
+        task.wait(math.random(4, 8))
+    end
+    
+    if not npc.Parent then return end
+    
+    customerData.state = "eating"
+    eatingCustomers[npc] = true
+    updateStatusBillboard(npc, orderIcon .. " Đang ăn~ 😋", Color3.fromRGB(100, 255, 100))
+    
+    -- INSTANT EAT: Nếu bật thì ăn nhanh
+    if CONFIG.EAT_ENABLED then
+        task.wait(CONFIG.EAT_DURATION)
+    else
+        task.wait(CONFIG.EATING_TIME)
+    end
+    
+    eatingCustomers[npc] = nil
+    
+    if not npc.Parent then return end
+    
+    customerData.state = "paying"
+    payingCustomers[npc] = true
+    local tip = math.random(CONFIG.TIP_MIN, CONFIG.TIP_MAX)
+    updateStatusBillboard(npc, "💰 +$" .. tostring(tip), Color3.fromRGB(255, 215, 0))
+    
+    -- INSTANT PAY: Nếu bật thì trả tiền nhanh
+    if CONFIG.PAY_ENABLED then
+        task.wait(0.5 / CONFIG.PAY_SPEED_MULTIPLIER)
+    else
+        task.wait(2)
+    end
+    
+    payingCustomers[npc] = nil
+    
+    if not npc.Parent then return end
+    
+    customerData.state = "leaving"
+    updateStatusBillboard(npc, "👋 Tạm biệt!", Color3.fromRGB(200, 200, 200))
+    
+    unanchorNPC(npc)
+    occupiedSeats[chairModel] = nil
+    
+    local leavePos = getLeavePosition(restaurant)
+    moveNPCToPosition(npc, leavePos)
+    
+    task.wait(CONFIG.NPC_CLEANUP_DELAY)
+    
+    activeCustomers[npc] = nil
+    customerCount[restaurant.Name] = math.max(0, (customerCount[restaurant.Name] or 1) - 1)
+    
+    if npc.Parent then
+        npc:Destroy()
+    end
+end
+
+local function forceCustomerToChair(chairModel, restaurant, data)
+    if occupiedSeats[chairModel] then
+        return false
+    end
+    
+    local count = customerCount[restaurant.Name] or 0
+    if count >= CONFIG.MAX_CUSTOMERS_PER_RESTAURANT then
+        return false
+    end
+    
+    occupiedSeats[chairModel] = true
+    customerCount[restaurant.Name] = count + 1
+    
+    local spawnPos = getSpawnPosition(restaurant)
+    local npc = createCustomerNPC(spawnPos)
+    
+    if not npc then
+        occupiedSeats[chairModel] = nil
+        customerCount[restaurant.Name] = count
+        return false
+    end
+    
+    local parentFolder = DebrisFolder or Workspace
+    npc.Parent = parentFolder
+    
+    occupiedSeats[chairModel] = npc
+    
+    task.spawn(function()
+        handleCustomerLifecycle(npc, chairModel, restaurant, data)
+        
+        if CONFIG.RESPAWN_AFTER_LEAVE and CONFIG.FORCE_ENABLED then
+            task.wait(CONFIG.SPAWN_INTERVAL)
+            forceCustomerToChair(chairModel, restaurant, data)
+        end
+    end)
+    
+    return true
+end
+
 local function scanAllRestaurants()
     restaurantData = {}
     
     if not RestaurantsFolder then
-        warn("[ForceCustomer] Không tìm thấy folder Restaurants!")
+        warn("[System] Không tìm thấy folder Restaurants!")
         return
     end
     
@@ -475,187 +634,15 @@ local function scanAllRestaurants()
             customerCount[restaurant.Name] = customerCount[restaurant.Name] or 0
             
             print(string.format(
-                "[ForceCustomer] %s: Tìm thấy %d ghế, %d bàn",
+                "[ForceCustomer] %s: %d ghế, %d bàn",
                 restaurant.Name, #chairs, #tables
             ))
         end
     end
 end
 
--- Lấy vị trí spawn (trước cửa restaurant)
-local function getSpawnPosition(restaurant)
-    -- Thử tìm Front tile
-    local tiles = restaurant:FindFirstChild("Tiles")
-    if tiles then
-        local front = tiles:FindFirstChild("Front")
-        if front and front.PrimaryPart then
-            return front.PrimaryPart.Position + Vector3.new(0, 3, 8)
-        end
-    end
-    
-    -- Fallback: dùng PrimaryPart của restaurant + offset
-    local primaryPart = restaurant:FindFirstChild("PrimaryPart")
-    if primaryPart then
-        return primaryPart.Position + Vector3.new(0, 5, 20)
-    end
-    
-    return Vector3.new(0, 10, 0)
-end
-
--- Lấy vị trí rời đi (xa khỏi restaurant)
-local function getLeavePosition(restaurant)
-    local spawnPos = getSpawnPosition(restaurant)
-    return spawnPos + Vector3.new(math.random(-30, 30), 0, 30)
-end
-
--- Xử lý 1 customer lifecycle
-local function handleCustomerLifecycle(npc, chairModel, restaurant, data)
-    local allTables = data.tables
-    local customerData = {
-        npc = npc,
-        chair = chairModel,
-        restaurant = restaurant,
-        state = "walking",
-    }
-    activeCustomers[npc] = customerData
-    
-    -- PHASE 1: Đi tới ghế
-    customerData.state = "walking"
-    createStatusBillboard(npc, "🚶 Đang đi...", Color3.fromRGB(150, 200, 255))
-    
-    local seatPos = getSeatPosition(chairModel)
-    if seatPos then
-        local reached = moveNPCToPosition(npc, seatPos)
-        
-        if not npc.Parent then return end -- NPC bị xóa
-        
-        -- Nếu không tới được, teleport thẳng
-        if not reached then
-            if npc.PrimaryPart then
-                npc:PivotTo(CFrame.new(seatPos))
-            end
-        end
-    end
-    
-    if not npc.Parent then return end
-    
-    -- PHASE 2: Ngồi xuống
-    customerData.state = "sitting"
-    sitNPCAtChair(npc, chairModel, allTables)
-    updateStatusBillboard(npc, "🪑 Đã ngồi", Color3.fromRGB(100, 255, 100))
-    task.wait(1)
-    
-    if not npc.Parent then return end
-    
-    -- PHASE 3: Chờ order
-    customerData.state = "waiting_order"
-    local menuItems = {"🍔", "🍕", "🍝", "🥗", "🥩", "🍲", "🍣", "🍜", "🥪", "🍰"}
-    local orderIcon = menuItems[math.random(#menuItems)]
-    updateStatusBillboard(npc, orderIcon .. " Đang chờ order...", Color3.fromRGB(255, 200, 50))
-    task.wait(math.random(3, 6))
-    
-    if not npc.Parent then return end
-    
-    -- PHASE 4: Đã order, chờ đồ ăn
-    customerData.state = "waiting_food"
-    updateStatusBillboard(npc, orderIcon .. " Chờ đồ ăn...", Color3.fromRGB(255, 165, 0))
-    task.wait(math.random(4, 8))
-    
-    if not npc.Parent then return end
-    
-    -- PHASE 5: Ăn
-    customerData.state = "eating"
-    updateStatusBillboard(npc, orderIcon .. " Đang ăn~ 😋", Color3.fromRGB(100, 255, 100))
-    task.wait(CONFIG.EATING_TIME)
-    
-    if not npc.Parent then return end
-    
-    -- PHASE 6: Trả tiền
-    customerData.state = "paying"
-    local tip = math.random(CONFIG.TIP_MIN, CONFIG.TIP_MAX)
-    updateStatusBillboard(npc, "💰 +$" .. tostring(tip), Color3.fromRGB(255, 215, 0))
-    task.wait(2)
-    
-    if not npc.Parent then return end
-    
-    -- PHASE 7: Rời đi
-    customerData.state = "leaving"
-    updateStatusBillboard(npc, "👋 Tạm biệt!", Color3.fromRGB(200, 200, 200))
-    
-    -- Unanchor để đi
-    unanchorNPC(npc)
-    
-    -- Giải phóng ghế
-    occupiedSeats[chairModel] = nil
-    
-    -- Đi ra
-    local leavePos = getLeavePosition(restaurant)
-    moveNPCToPosition(npc, leavePos)
-    
-    task.wait(CONFIG.NPC_CLEANUP_DELAY)
-    
-    -- Cleanup
-    activeCustomers[npc] = nil
-    customerCount[restaurant.Name] = math.max(0, (customerCount[restaurant.Name] or 1) - 1)
-    
-    if npc.Parent then
-        npc:Destroy()
-    end
-end
-
--- Force customer vào 1 ghế cụ thể
-local function forceCustomerToChair(chairModel, restaurant, data)
-    -- Check ghế đã có người chưa
-    if occupiedSeats[chairModel] then
-        return false
-    end
-    
-    -- Check max customers
-    local count = customerCount[restaurant.Name] or 0
-    if count >= CONFIG.MAX_CUSTOMERS_PER_RESTAURANT then
-        return false
-    end
-    
-    -- Đánh dấu ghế đã chiếm
-    occupiedSeats[chairModel] = true
-    customerCount[restaurant.Name] = count + 1
-    
-    -- Spawn NPC
-    local spawnPos = getSpawnPosition(restaurant)
-    local npc = createCustomerNPC(spawnPos)
-    
-    if not npc then
-        occupiedSeats[chairModel] = nil
-        customerCount[restaurant.Name] = count
-        return false
-    end
-    
-    -- Đặt NPC vào game
-    local parentFolder = DebrisFolder or Workspace
-    npc.Parent = parentFolder
-    
-    -- Cập nhật ghế đang chiếm bởi NPC nào
-    occupiedSeats[chairModel] = npc
-    
-    -- Chạy lifecycle trong thread riêng
-    task.spawn(function()
-        handleCustomerLifecycle(npc, chairModel, restaurant, data)
-        
-        -- Sau khi customer rời, nếu RESPAWN thì force lại
-        if CONFIG.RESPAWN_AFTER_LEAVE and CONFIG.FORCE_ENABLED then
-            task.wait(CONFIG.SPAWN_INTERVAL)
-            forceCustomerToChair(chairModel, restaurant, data)
-        end
-    end)
-    
-    return true
-end
-
--- ========== FORCE ALL CUSTOMERS ==========
-
--- Force customer vào TẤT CẢ ghế trống của TẤT CẢ restaurants
 local function forceAllCustomers()
-    print("[ForceCustomer] ===== BẮT ĐẦU FORCE TẤT CẢ CUSTOMERS =====")
+    print("[ForceCustomer] ===== BẮT ĐẦU FORCE CUSTOMERS =====")
     
     local totalForced = 0
     
@@ -666,7 +653,6 @@ local function forceAllCustomers()
                 if success then
                     totalForced = totalForced + 1
                 end
-                -- Delay nhỏ giữa mỗi spawn để không lag
                 task.wait(CONFIG.SPAWN_INTERVAL)
             end
         end
@@ -675,7 +661,6 @@ local function forceAllCustomers()
     print(string.format("[ForceCustomer] Đã force %d customers!", totalForced))
 end
 
--- Dừng tất cả customers
 local function stopAllCustomers()
     print("[ForceCustomer] ===== DỪNG TẤT CẢ CUSTOMERS =====")
     
@@ -698,24 +683,58 @@ local function stopAllCustomers()
     print("[ForceCustomer] Đã dừng tất cả customers!")
 end
 
--- ========== PLAYER COMMANDS ==========
+-- ========== INSTANT COOK LOGIC ==========
 
--- Xử lý chat commands
+local function enableInstantCook()
+    CONFIG.COOK_ENABLED = true
+    print("[InstantCook] ✅ BẬT - Nấu ăn x" .. CONFIG.COOK_SPEED_MULTIPLIER .. " nhanh hơn")
+end
+
+local function disableInstantCook()
+    CONFIG.COOK_ENABLED = false
+    print("[InstantCook] ❌ TẮT - Nấu ăn tốc độ bình thường")
+end
+
+-- ========== INSTANT EAT LOGIC ==========
+
+local function enableInstantEat()
+    CONFIG.EAT_ENABLED = true
+    print("[InstantEat] ✅ BẬT - Ăn trong " .. CONFIG.EAT_DURATION .. " giây")
+end
+
+local function disableInstantEat()
+    CONFIG.EAT_ENABLED = false
+    print("[InstantEat] ❌ TẮT - Ăn tốc độ bình thường")
+end
+
+-- ========== INSTANT MONEY PAY LOGIC ==========
+
+local function enableInstantPay()
+    CONFIG.PAY_ENABLED = true
+    print("[InstantPay] ✅ BẬT - Trả tiền x" .. CONFIG.PAY_SPEED_MULTIPLIER .. " nhanh hơn")
+end
+
+local function disableInstantPay()
+    CONFIG.PAY_ENABLED = false
+    print("[InstantPay] ❌ TẮT - Trả tiền tốc độ bình thường")
+end
+
+-- ========== CHAT COMMANDS ==========
+
 local function onPlayerChatted(player, message)
     local msg = message:lower()
     
+    -- Force Customer Commands
     if msg == "/force" or msg == "/forcecustomer" or msg == "/fc" then
         CONFIG.FORCE_ENABLED = true
         CONFIG.RESPAWN_AFTER_LEAVE = true
-        -- Re-scan và force
         scanAllRestaurants()
         forceAllCustomers()
-        -- Thông báo cho player
-        CustomerStatusRemote:FireClient(player, "enabled", "Force Customer: BẬT ✅")
+        StatusRemote:FireClient(player, "enabled", "Force Customer: BẬT ✅")
         
     elseif msg == "/stopforce" or msg == "/sf" or msg == "/stop" then
         stopAllCustomers()
-        CustomerStatusRemote:FireClient(player, "disabled", "Force Customer: TẮT ❌")
+        StatusRemote:FireClient(player, "disabled", "Force Customer: TẮT ❌")
         
     elseif msg == "/rescan" then
         scanAllRestaurants()
@@ -725,7 +744,7 @@ local function onPlayerChatted(player, message)
             totalChairs = totalChairs + #data.chairs
             totalTables = totalTables + #data.tables
         end
-        CustomerStatusRemote:FireClient(player, "info", 
+        StatusRemote:FireClient(player, "info", 
             string.format("Rescan: %d ghế, %d bàn", totalChairs, totalTables))
         
     elseif msg == "/customercount" or msg == "/cc" then
@@ -733,86 +752,192 @@ local function onPlayerChatted(player, message)
         for _, count in pairs(customerCount) do
             total = total + count
         end
-        CustomerStatusRemote:FireClient(player, "info",
-            string.format("Customers hiện tại: %d", total))
-            
+        StatusRemote:FireClient(player, "info",
+            string.format("Customers: %d", total))
+    
+    -- Instant Cook Commands
+    elseif msg == "/cook" or msg == "/instantcook" or msg == "/ic" then
+        enableInstantCook()
+        StatusRemote:FireClient(player, "enabled", "Instant Cook: BẬT ✅")
+        
+    elseif msg == "/stopcook" or msg == "/sc" then
+        disableInstantCook()
+        StatusRemote:FireClient(player, "disabled", "Instant Cook: TẮT ❌")
+    
+    -- Instant Eat Commands
+    elseif msg == "/eat" or msg == "/instanteat" or msg == "/ie" then
+        enableInstantEat()
+        StatusRemote:FireClient(player, "enabled", "Instant Eat: BẬT ✅")
+        
+    elseif msg == "/stopeat" or msg == "/se" then
+        disableInstantEat()
+        StatusRemote:FireClient(player, "disabled", "Instant Eat: TẮT ❌")
+    
+    -- Instant Pay Commands
+    elseif msg == "/pay" or msg == "/instantpay" or msg == "/ip" then
+        enableInstantPay()
+        StatusRemote:FireClient(player, "enabled", "Instant Pay: BẬT ✅")
+        
+    elseif msg == "/stoppay" or msg == "/sp" then
+        disableInstantPay()
+        StatusRemote:FireClient(player, "disabled", "Instant Pay: TẮT ❌")
+    
+    -- All Systems
+    elseif msg == "/all" or msg == "/enableall" then
+        CONFIG.FORCE_ENABLED = true
+        CONFIG.RESPAWN_AFTER_LEAVE = true
+        CONFIG.COOK_ENABLED = true
+        CONFIG.EAT_ENABLED = true
+        CONFIG.PAY_ENABLED = true
+        scanAllRestaurants()
+        forceAllCustomers()
+        StatusRemote:FireClient(player, "enabled", "TẤT CẢ HỆ THỐNG: BẬT ✅")
+        
+    elseif msg == "/stopall" or msg == "/disableall" then
+        stopAllCustomers()
+        CONFIG.COOK_ENABLED = false
+        CONFIG.EAT_ENABLED = false
+        CONFIG.PAY_ENABLED = false
+        StatusRemote:FireClient(player, "disabled", "TẤT CẢ HỆ THỐNG: TẮT ❌")
+    
+    -- Config Commands
     elseif msg:find("/setspawn") then
-        -- /setspawn 0.5 -> set spawn interval = 0.5 giây
         local num = tonumber(msg:match("/setspawn%s+(%S+)"))
         if num and num > 0 then
             CONFIG.SPAWN_INTERVAL = num
-            CustomerStatusRemote:FireClient(player, "info",
-                string.format("Spawn interval: %.1f giây", num))
+            StatusRemote:FireClient(player, "info",
+                string.format("Spawn interval: %.1fs", num))
         end
         
     elseif msg:find("/setmax") then
-        -- /setmax 30 -> set max customers = 30
         local num = tonumber(msg:match("/setmax%s+(%S+)"))
         if num and num > 0 then
             CONFIG.MAX_CUSTOMERS_PER_RESTAURANT = math.floor(num)
-            CustomerStatusRemote:FireClient(player, "info",
-                string.format("Max customers/restaurant: %d", math.floor(num)))
+            StatusRemote:FireClient(player, "info",
+                string.format("Max customers: %d", math.floor(num)))
         end
         
-    elseif msg:find("/seteat") then
-        -- /seteat 5 -> set eating time = 5 giây
-        local num = tonumber(msg:match("/seteat%s+(%S+)"))
+    elseif msg:find("/setcookspeed") then
+        local num = tonumber(msg:match("/setcookspeed%s+(%S+)"))
         if num and num > 0 then
-            CONFIG.EATING_TIME = num
-            CustomerStatusRemote:FireClient(player, "info",
-                string.format("Eating time: %.1f giây", num))
+            CONFIG.COOK_SPEED_MULTIPLIER = num
+            StatusRemote:FireClient(player, "info",
+                string.format("Cook speed: x%.1f", num))
         end
         
-    elseif msg == "/forcehelp" or msg == "/fh" then
-        CustomerStatusRemote:FireClient(player, "help", table.concat({
-            "=== FORCE CUSTOMER COMMANDS ===",
-            "/force hoặc /fc - Bật force customer",
-            "/stop hoặc /sf - Tắt force customer",
+    elseif msg:find("/seteattime") then
+        local num = tonumber(msg:match("/seteattime%s+(%S+)"))
+        if num and num > 0 then
+            CONFIG.EAT_DURATION = num
+            StatusRemote:FireClient(player, "info",
+                string.format("Eat time: %.1fs", num))
+        end
+        
+    elseif msg:find("/setpayspeed") then
+        local num = tonumber(msg:match("/setpayspeed%s+(%S+)"))
+        if num and num > 0 then
+            CONFIG.PAY_SPEED_MULTIPLIER = num
+            StatusRemote:FireClient(player, "info",
+                string.format("Pay speed: x%.1f", num))
+        end
+        
+    elseif msg == "/help" or msg == "/h" then
+        StatusRemote:FireClient(player, "help", table.concat({
+            "=== RESTAURANT AUTOMATION COMMANDS ===",
+            "",
+            "FORCE CUSTOMER:",
+            "/force, /fc - Bật force customer",
+            "/stop, /sf - Tắt force customer",
             "/rescan - Scan lại restaurants",
-            "/cc - Đếm customers hiện tại",
+            "/cc - Đếm customers",
+            "",
+            "INSTANT COOK:",
+            "/cook, /ic - Bật instant cook",
+            "/stopcook, /sc - Tắt instant cook",
+            "",
+            "INSTANT EAT:",
+            "/eat, /ie - Bật instant eat",
+            "/stopeat, /se - Tắt instant eat",
+            "",
+            "INSTANT PAY:",
+            "/pay, /ip - Bật instant pay",
+            "/stoppay, /sp - Tắt instant pay",
+            "",
+            "ALL SYSTEMS:",
+            "/all - Bật tất cả",
+            "/stopall - Tắt tất cả",
+            "",
+            "CONFIG:",
             "/setspawn [số] - Set spawn interval",
             "/setmax [số] - Set max customers",
-            "/seteat [số] - Set eating time",
-            "/forcehelp - Hiện help",
+            "/setcookspeed [số] - Set cook speed",
+            "/seteattime [số] - Set eat time",
+            "/setpayspeed [số] - Set pay speed",
         }, "\n"))
     end
 end
 
--- ========== REMOTE EVENT HANDLER ==========
-ForceCustomerRemote.OnServerEvent:Connect(function(player, action, ...)
+-- ========== REMOTE EVENT HANDLERS ==========
+
+ForceCustomerRemote.OnServerEvent:Connect(function(player, action)
     if action == "toggle" then
         if CONFIG.FORCE_ENABLED then
             stopAllCustomers()
-            CustomerStatusRemote:FireClient(player, "disabled", "Force Customer: TẮT ❌")
+            StatusRemote:FireClient(player, "disabled", "Force Customer: TẮT ❌")
         else
             CONFIG.FORCE_ENABLED = true
             CONFIG.RESPAWN_AFTER_LEAVE = true
             scanAllRestaurants()
             forceAllCustomers()
-            CustomerStatusRemote:FireClient(player, "enabled", "Force Customer: BẬT ✅")
+            StatusRemote:FireClient(player, "enabled", "Force Customer: BẬT ✅")
         end
-        
-    elseif action == "forceAll" then
-        CONFIG.FORCE_ENABLED = true
-        CONFIG.RESPAWN_AFTER_LEAVE = true
-        scanAllRestaurants()
-        forceAllCustomers()
-        CustomerStatusRemote:FireClient(player, "enabled", "Force Customer: BẬT ✅")
-        
-    elseif action == "stopAll" then
-        stopAllCustomers()
-        CustomerStatusRemote:FireClient(player, "disabled", "Force Customer: TẮT ❌")
+    end
+end)
+
+InstantCookRemote.OnServerEvent:Connect(function(player, action)
+    if action == "toggle" then
+        if CONFIG.COOK_ENABLED then
+            disableInstantCook()
+            StatusRemote:FireClient(player, "disabled", "Instant Cook: TẮT ❌")
+        else
+            enableInstantCook()
+            StatusRemote:FireClient(player, "enabled", "Instant Cook: BẬT ✅")
+        end
+    end
+end)
+
+InstantEatRemote.OnServerEvent:Connect(function(player, action)
+    if action == "toggle" then
+        if CONFIG.EAT_ENABLED then
+            disableInstantEat()
+            StatusRemote:FireClient(player, "disabled", "Instant Eat: TẮT ❌")
+        else
+            enableInstantEat()
+            StatusRemote:FireClient(player, "enabled", "Instant Eat: BẬT ✅")
+        end
+    end
+end)
+
+InstantPayRemote.OnServerEvent:Connect(function(player, action)
+    if action == "toggle" then
+        if CONFIG.PAY_ENABLED then
+            disableInstantPay()
+            StatusRemote:FireClient(player, "disabled", "Instant Pay: TẮT ❌")
+        else
+            enableInstantPay()
+            StatusRemote:FireClient(player, "enabled", "Instant Pay: BẬT ✅")
+        end
     end
 end)
 
 -- ========== PLAYER CONNECTIONS ==========
+
 Players.PlayerAdded:Connect(function(player)
     player.Chatted:Connect(function(message)
         onPlayerChatted(player, message)
     end)
 end)
 
--- Kết nối cho players đã trong game
 for _, player in ipairs(Players:GetPlayers()) do
     player.Chatted:Connect(function(message)
         onPlayerChatted(player, message)
@@ -820,12 +945,13 @@ for _, player in ipairs(Players:GetPlayers()) do
 end
 
 -- ========== INITIALIZATION ==========
-print("[ForceCustomer] ============================================")
-print("[ForceCustomer]   FORCE CUSTOMER SYSTEM - Run A Restaurant  ")
-print("[ForceCustomer] ============================================")
-print("[ForceCustomer] Đang scan restaurants...")
 
-task.wait(2) -- Đợi game load
+print("[System] ============================================")
+print("[System]   RESTAURANT AUTOMATION SYSTEM")
+print("[System] ============================================")
+print("[System] Đang khởi động...")
+
+task.wait(2)
 
 scanAllRestaurants()
 
@@ -836,11 +962,14 @@ for _, data in pairs(restaurantData) do
     totalTables = totalTables + #data.tables
 end
 
-print(string.format("[ForceCustomer] Scan hoàn tất: %d ghế, %d bàn", totalChairs, totalTables))
-print("[ForceCustomer] Chat /force để bật, /stop để tắt")
-print("[ForceCustomer] Chat /forcehelp để xem tất cả commands")
+print(string.format("[System] Scan: %d ghế, %d bàn", totalChairs, totalTables))
+print("[System] Force Customer: " .. (CONFIG.FORCE_ENABLED and "BẬT ✅" or "TẮT ❌"))
+print("[System] Instant Cook: " .. (CONFIG.COOK_ENABLED and "BẬT ✅" or "TẮT ❌"))
+print("[System] Instant Eat: " .. (CONFIG.EAT_ENABLED and "BẬT ✅" or "TẮT ❌"))
+print("[System] Instant Pay: " .. (CONFIG.PAY_ENABLED and "BẬT ✅" or "TẮT ❌"))
+print("[System] Chat /help để xem commands")
+print("[System] ============================================")
 
--- Auto-force nếu config mặc định bật
 if CONFIG.FORCE_ENABLED then
     task.wait(1)
     forceAllCustomers()
