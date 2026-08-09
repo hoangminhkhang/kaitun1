@@ -68,10 +68,18 @@ local DEFAULT_CONFIG = {
     AutoMeteor = true,
     AutoTriggerMeteor = true,
     AutoQuest = true,
-    QuestNPCs = {"Black Bear", "Mother Bear"},
+    QuestNPCs = {"Black Bear", "Mother Bear", "Science Bear"},
+    QuestNPCBeeRequirements = {["Science Bear"] = 10},
     QuestCheckInterval = 3,
     QuestInteractTimeout = 12,
     QuestFarmSeconds = 8,
+    AutoClaimBadges = true,
+    BadgeClaimInterval = 1.25,
+    BadgeNames = {
+        "Pepper", "Coconut", "Playtime", "Honey", "Quest", "Battle", "Ability", "Goo",
+        "Sunflower", "Dandelion", "Mushroom", "Blue Flower", "Clover", "Spider",
+        "Bamboo", "Strawberry", "Pineapple", "Pumpkin", "Cactus", "Rose", "Pine Tree", "Stump",
+    },
     AutoFarmLeaves = true,
     AutoFarmSparkles = true,
     SpecialEffectScanInterval = 1,
@@ -99,13 +107,30 @@ local DEFAULT_CONFIG = {
     ProgressionTargetBees = 45,
     AutoBuyHiveSlots = true,
     AutoBuyBasicEggs = true,
+    AutoUnlockBlueHQ = true,
+    BlueHQRequiredDiscoveries = 4,
+    BlueBeeTypes = {
+        "Bumble", "Cool", "Bubble", "Bucko", "Frosty", "Ninja", "Diamond",
+        "Tadpole", "Buoyant", "Cobalt",
+    },
+    BlueJellyRollsPerPass = 8,
+    BlueJellyRollDelay = 0.2,
+    BlueJellyCheckInterval = 1,
     AutoBuySprinklers = true,
     AutoPlaceSprinkler = true,
     MinSprinklerBees = 25,
     DynamicField = true,
     MacroMode = true,
     SafeMaterialMode = true,
-    LowGraphics = false,
+    -- Fix lag chi an phan hien thi o client, khong Destroy token/bee/effect nen
+    -- cac bo scan progression van hoat dong binh thuong.
+    LowGraphics = true,
+    FixLagHideBees = true,
+    FixLagHideTokens = true,
+    FixLagHideDecorations = true,
+    FixLagHideWeather = true,
+    FixLagGraySky = true,
+    FixLagBrightness = 0.65,
     BlackScreen = false,
     RedeemCodes = true,
     PromoCodes = {
@@ -159,20 +184,25 @@ local DEFAULT_CONFIG = {
             {Shop = "ProShop", Item = "Compressor", Category = "Accessory", Type = "Compressor", HoneyCost = 160000},
             {Shop = "ProShop", Item = "Elite Barrel", Category = "Accessory", Type = "Elite Barrel", HoneyCost = 650000},
         }},
-        {TargetBees = 20, Items = {
+        {TargetBees = 20, EggRushAfter = true, Items = {
+            -- Sau Port-O-Hive, hoan tat dung thu tu nay roi dong bang gear phu
+            -- de danh toan bo honey cho Basic Egg/Hive Slot den 25 bee.
             {Shop = "ProShop", Item = "Port-O-Hive", Category = "Accessory", Type = "Port-O-Hive", HoneyCost = 1250000},
-        }},
-        {TargetBees = 25, Items = {
             {Shop = "ProShop", Item = "Propeller Hat", Category = "Accessory", Type = "Propeller Hat", HoneyCost = 2500000, RequiresMaterials = true, SupersededBy = {"Beekeeper's Mask", "Bubble Mask", "Diamond Mask"}},
-            {Shop = "ProShop", Item = "Electro-Magnet", Category = "Collector", Type = "Electro-Magnet", HoneyCost = 300000},
+            {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
+        }},
+        {TargetBees = 25, EggRushAfter = true, Items = {
+            -- Retry Bubble Wand trong luc hatch: neu Blue HQ vua mo sau mot lan
+            -- Royal Jelly thi mua ngay, con neu van khoa thi tiep tuc egg rush.
+            {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
         }},
         {TargetBees = 30, Items = {
+            {Shop = "ProShop", Item = "Electro-Magnet", Category = "Collector", Type = "Electro-Magnet", HoneyCost = 300000},
             {Shop = "ProShop", Item = "Parachute", Category = "Parachute", Type = "Parachute", HoneyCost = 500000, SupersededBy = {"Glider"}},
             {Shop = "BlueHQ", Item = "Blue Port-O-Hive", Category = "Accessory", Type = "Blue Port-O-Hive", HoneyCost = 12500000, RequiresMaterials = true},
             {Shop = "Mountaintop", Item = "Beekeeper's Mask", Category = "Accessory", Type = "Beekeeper's Mask", HoneyCost = 20000000, RequiresMaterials = true, SupersededBy = {"Bubble Mask", "Diamond Mask"}},
             {Shop = "Mountaintop", Item = "Mondo Belt Bag", Category = "Accessory", Type = "Mondo Belt Bag", HoneyCost = 12400000, RequiresMaterials = true, SupersededBy = {"Honeycomb Belt", "Petal Belt", "Coconut Belt"}},
             {Shop = "Mountaintop", Item = "Beekeeper's Boots", Category = "Accessory", Type = "Beekeeper's Boots", HoneyCost = 15000000, RequiresMaterials = true, SupersededBy = {"Coconut Clogs", "Gummy Boots"}},
-            {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
             -- Guide: macro thi bo Golden Rake va giu Bubble Wand.
             {Shop = "Mountaintop", Item = "Golden Rake", Category = "Collector", Type = "Golden Rake", HoneyCost = 20000000, NonMacroOnly = true, Optional = true},
         }},
@@ -246,7 +276,8 @@ local function merge(target, source)
     for key, value in pairs(source) do
         local replaceTable = key == "PromoCodes" or key == "BoostCodes" or key == "FieldByBees"
             or key == "ProgressionMilestones" or key == "SprinklerSequence"
-            or key == "QuestNPCs" or key == "BestColorFields" or key == "LockedBlackBearFallbacks"
+            or key == "QuestNPCs" or key == "BadgeNames" or key == "BlueBeeTypes"
+            or key == "BestColorFields" or key == "LockedBlackBearFallbacks"
         if type(value) == "table" and type(target[key]) == "table" and not replaceTable then
             merge(target[key], value)
         else
@@ -427,6 +458,14 @@ local Runtime = {
     PurchaseRetryAt = {},
     LastDeferredRetry = -math.huge,
     LastQuestCheck = -math.huge,
+    LastBadgeClaim = -math.huge,
+    BadgeClaimCursor = 1,
+    BadgeChecks = 0,
+    LastBadgeName = "",
+    BlueJellyBusy = false,
+    BlueJellyCell = nil,
+    BlueJellyRolls = 0,
+    LastBlueJellyCheck = -math.huge,
     LastSpecialEffectScan = -math.huge,
     LastSpecialEffectFarm = os.clock(),
     CurrentQuest = "",
@@ -449,6 +488,7 @@ local Runtime = {
     LastNectarCondenserAction = -math.huge,
     NectarCondenserObject = nil,
     MaterialRequirements = {},
+    LowGraphicsBound = false,
     UI = {},
 }
 
@@ -567,6 +607,23 @@ local function remoteCall(name, ...)
         return ok, err
     end
     return false, "invalid remote class " .. remote.ClassName
+end
+
+function Runtime.ClaimNextBadge()
+    local interval = math.max(0.5, tonumber(Config.BadgeClaimInterval) or 1.25)
+    if not Config.AutoClaimBadges
+        or os.clock() - Runtime.LastBadgeClaim < interval then return false end
+    local badges = Config.BadgeNames or {}
+    if #badges <= 0 then return false end
+    local cursor = math.clamp(tonumber(Runtime.BadgeClaimCursor) or 1, 1, #badges)
+    local badgeName = badges[cursor]
+    Runtime.LastBadgeClaim = os.clock()
+    Runtime.LastBadgeName = badgeName
+    Runtime.BadgeChecks += 1
+    Runtime.BadgeClaimCursor = cursor >= #badges and 1 or cursor + 1
+    local ok = remoteCall("BadgeEvent", "Collect", badgeName)
+    if Runtime.BadgeClaimCursor == 1 then task.defer(function() getStats(true) end) end
+    return ok
 end
 
 function MaterialSystem.Stats(force)
@@ -2148,7 +2205,10 @@ local function maintainBearQuests()
     if not Config.AutoQuest or os.clock() - Runtime.LastQuestCheck < Config.QuestCheckInterval then return false end
     Runtime.LastQuestCheck = os.clock()
     local active = activeBearQuests(true)
+    local currentBees = beeCount()
     for _, npcName in ipairs(Config.QuestNPCs) do
+        local requiredBees = tonumber((Config.QuestNPCBeeRequirements or {})[npcName]) or 0
+        if currentBees < requiredBees then continue end
         local hasQuest, allDone = false, true
         for _, quest in ipairs(active) do
             if quest.NPC == npcName then
@@ -3130,18 +3190,158 @@ end
 
 local function applyLowGraphics(enabled)
     Config.LowGraphics = enabled
-    Lighting.GlobalShadows = not enabled
-    if sethiddenproperty then pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Compatibility) end
-    for _, object in ipairs(workspace:GetDescendants()) do
-        if object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Beam") then
-            if not object:IsDescendantOf(workspace:FindFirstChild("Collectibles") or workspace) then
-                object.Enabled = not enabled
-            end
-        elseif object:IsA("BasePart") and enabled then
+    if not enabled then return end
+
+    local beeRoots = {"Bees", "NPCBees"}
+    local tokenRoots = {"Collectibles"}
+    local decorationRoots = {"Decorations", "Decor", "Decoratives"}
+    local weatherRoots = {"Particles", "Effects", "Clouds", "Weather"}
+    local maintenanceRoots = {
+        -- Decorations are static and were already handled by the initial scan plus
+        -- DescendantAdded. Avoid walking that large tree every maintenance pass.
+        "Bees", "NPCBees", "Collectibles", "Particles", "Effects", "Clouds", "Weather",
+    }
+    local grayEffect
+
+    local function underNamedRoot(object, rootNames)
+        for _, rootName in ipairs(rootNames) do
+            local root = workspace:FindFirstChild(rootName)
+            if root and (object == root or object:IsDescendantOf(root)) then return true end
+        end
+        return false
+    end
+
+    local function hiddenVisual(object)
+        return (Config.FixLagHideBees and underNamedRoot(object, beeRoots))
+            or (Config.FixLagHideTokens and underNamedRoot(object, tokenRoots))
+            or (Config.FixLagHideDecorations and underNamedRoot(object, decorationRoots))
+            or (Config.FixLagHideWeather and underNamedRoot(object, weatherRoots))
+    end
+
+    local function optimizeObject(object)
+        if not object or not object.Parent then return end
+        local hidden = hiddenVisual(object)
+        if object:IsA("BasePart") then
             object.CastShadow = false
+            object.Reflectance = 0
             if object.Material == Enum.Material.Grass then object.Material = Enum.Material.SmoothPlastic end
+            if hidden then object.LocalTransparencyModifier = 1 end
+            if object:IsA("MeshPart") then
+                pcall(function() object.RenderFidelity = Enum.RenderFidelity.Performance end)
+                if hidden then pcall(function() object.TextureID = "" end) end
+            end
+        elseif object:IsA("Decal") or object:IsA("Texture") then
+            if hidden then object.Transparency = 1 end
+        elseif object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Beam")
+            or object:IsA("Smoke") or object:IsA("Fire") or object:IsA("Sparkles") then
+            object.Enabled = false
+        elseif object:IsA("Explosion") then
+            pcall(function()
+                object.Visible = false
+                object.BlastPressure = 0
+                object.BlastRadius = 0
+            end)
+        elseif object:IsA("BillboardGui") or object:IsA("SurfaceGui") then
+            if hidden then object.Enabled = false end
+        elseif object:IsA("Highlight") then
+            if hidden then object.Enabled = false end
+        elseif object:IsA("Clouds") then
+            object.Enabled = false
+        elseif object:IsA("Sky") and Config.FixLagGraySky then
+            pcall(function()
+                object.SkyboxBk, object.SkyboxDn, object.SkyboxFt = "", "", ""
+                object.SkyboxLf, object.SkyboxRt, object.SkyboxUp = "", "", ""
+                object.CelestialBodiesShown = false
+                object.StarCount = 0
+            end)
+        elseif object:IsA("Atmosphere") and Config.FixLagGraySky then
+            pcall(function()
+                object.Color = Color3.fromRGB(120, 120, 120)
+                object.Decay = Color3.fromRGB(90, 90, 90)
+                object.Density = 0.25
+                object.Glare = 0
+                object.Haze = 0
+            end)
+        elseif object:IsA("BloomEffect") or object:IsA("BlurEffect")
+            or object:IsA("DepthOfFieldEffect") or object:IsA("SunRaysEffect") then
+            object.Enabled = false
+        elseif object:IsA("ColorCorrectionEffect") and object.Name ~= "BSSKaitunGray" then
+            object.Enabled = false
         end
     end
+
+    local function applyLightingSettings()
+        pcall(function()
+            Lighting.GlobalShadows = false
+            Lighting.Brightness = math.clamp(tonumber(Config.FixLagBrightness) or 0.65, 0, 3)
+            Lighting.ExposureCompensation = -0.35
+            Lighting.EnvironmentDiffuseScale = 0
+            Lighting.EnvironmentSpecularScale = 0
+            Lighting.Ambient = Color3.fromRGB(85, 85, 85)
+            Lighting.OutdoorAmbient = Color3.fromRGB(75, 75, 75)
+            Lighting.FogColor = Color3.fromRGB(105, 105, 105)
+        end)
+        if sethiddenproperty then
+            pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Compatibility)
+        else
+            pcall(function() Lighting.Technology = Enum.Technology.Compatibility end)
+        end
+        if Config.FixLagGraySky then
+            grayEffect = Lighting:FindFirstChild("BSSKaitunGray")
+            if not grayEffect then
+                grayEffect = Instance.new("ColorCorrectionEffect")
+                grayEffect.Name = "BSSKaitunGray"
+                grayEffect.Parent = Lighting
+            end
+            pcall(function()
+                grayEffect.Enabled = true
+                grayEffect.Saturation = -1
+                grayEffect.Brightness = -0.12
+                grayEffect.Contrast = -0.05
+                grayEffect.TintColor = Color3.fromRGB(190, 190, 190)
+            end)
+        end
+    end
+
+    applyLightingSettings()
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        pcall(function()
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+            terrain.WaterReflectance = 0
+            terrain.WaterTransparency = 1
+            terrain.Decoration = false
+        end)
+        if sethiddenproperty then pcall(sethiddenproperty, terrain, "Decoration", false) end
+        for _, object in ipairs(terrain:GetChildren()) do pcall(optimizeObject, object) end
+    end
+    for _, object in ipairs(workspace:GetDescendants()) do pcall(optimizeObject, object) end
+    for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
+
+    if Runtime.LowGraphicsBound then return end
+    Runtime.LowGraphicsBound = true
+    connect(workspace.DescendantAdded, function(object)
+        if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
+    end)
+    connect(Lighting.DescendantAdded, function(object)
+        if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
+    end)
+    task.spawn(function()
+        while Runtime.Running and Config.LowGraphics do
+            applyLightingSettings()
+            for _, rootName in ipairs(maintenanceRoots) do
+                local root = workspace:FindFirstChild(rootName)
+                if root then
+                    pcall(optimizeObject, root)
+                    for _, object in ipairs(root:GetDescendants()) do pcall(optimizeObject, object) end
+                end
+            end
+            for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
+            task.wait(4)
+        end
+    end)
 end
 
 -- UI -------------------------------------------------------------------------
@@ -3272,6 +3472,15 @@ connect(Player.Idled, function()
     end)
 end)
 
+-- BadgeEvent is a RemoteEvent, so claim one badge per pass. This avoids the
+-- invocation-queue spam caused by firing every badge in the same frame.
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoClaimBadges then Runtime.ClaimNextBadge() end
+        task.wait(math.max(0.25, (tonumber(Config.BadgeClaimInterval) or 1.25) * 0.5))
+    end
+end)
+
 -- Dig loop: remote nay chinh la remote duoc LocalCollect cua game goi.
 task.spawn(function()
     while Runtime.Running do
@@ -3281,6 +3490,146 @@ task.spawn(function()
         task.wait(math.max(0.08, Config.DigInterval))
     end
 end)
+
+function Runtime.IsBlueBeeType(value)
+    local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
+    for _, beeName in ipairs(Config.BlueBeeTypes or {}) do
+        local wanted = string.lower(tostring(beeName)):gsub("[^%w]", ""):gsub("bee$", "")
+        if normalized == wanted then return true end
+    end
+    return false
+end
+
+function Runtime.BlueDiscoveryCount(refresh)
+    local stats = getStats(refresh == true)
+    local discovered = type(stats) == "table" and stats.DiscoveredBees or nil
+    if type(discovered) ~= "table" then return 0, {} end
+    local found, visited = {}, {}
+    local function normalize(value)
+        return string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
+    end
+    local function mark(value)
+        if Runtime.IsBlueBeeType(value) then found[normalize(value)] = true end
+    end
+    local function scan(key, value)
+        if type(key) == "string" and value ~= false and value ~= 0 then mark(key) end
+        if type(value) == "string" then
+            mark(value)
+        elseif type(value) == "table" and not visited[value] then
+            visited[value] = true
+            mark(value.Type or value.BeeType or value.Name)
+            for childKey, child in pairs(value) do scan(childKey, child) end
+        end
+    end
+    scan(nil, discovered)
+    local count = 0
+    for _ in pairs(found) do count += 1 end
+    return count, found
+end
+
+function Runtime.FindSafeBasicBeeCell()
+    local reference = Player:FindFirstChild("Honeycomb")
+    local hive = reference and reference:IsA("ObjectValue") and reference.Value
+    local cells = hive and hive:FindFirstChild("Cells")
+    if not cells then return nil end
+    for _, cell in ipairs(cells:GetChildren()) do
+        local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+        local locked = cell:FindFirstChild("CellLocked")
+        local x, y = cell.Name:match("^C(%d+),(%d+)$")
+        if x and y and cellType and cellType:IsA("ValueBase")
+            and tostring(cellType.Value) == "BasicBee" and not cell:FindFirstChild("GiftedCell")
+            and (not locked or not locked:IsA("ValueBase") or locked.Value == false) then
+            return cell, tonumber(x), tonumber(y)
+        end
+    end
+    return nil
+end
+
+function Runtime.UnlockBlueHQ()
+    local required = math.max(1, tonumber(Config.BlueHQRequiredDiscoveries) or 4)
+    if not Config.AutoUnlockBlueHQ then return false, "disabled" end
+    if Runtime.BlueDiscoveryCount(false) >= required then
+        Runtime.BlueJellyCell = nil
+        return true, "unlocked"
+    end
+    local interval = math.max(0.5, tonumber(Config.BlueJellyCheckInterval) or 1)
+    if Runtime.BlueJellyBusy or os.clock() - Runtime.LastBlueJellyCheck < interval then
+        return false, "cooldown"
+    end
+    Runtime.LastBlueJellyCheck = os.clock()
+    Runtime.BlueJellyBusy = true
+    local completed, unlocked, reason = xpcall(function()
+        local cell = Runtime.BlueJellyCell
+        local x, y
+        if cell and cell.Parent then
+            x, y = cell.Name:match("^C(%d+),(%d+)$")
+            x, y = tonumber(x), tonumber(y)
+        end
+        if not cell or not cell.Parent or not x or not y then
+            cell, x, y = Runtime.FindSafeBasicBeeCell()
+            Runtime.BlueJellyCell = cell
+        end
+        if not cell then
+            setStatus("Unlock Blue HQ", "Cho Basic Bee an toan de dung Royal Jelly")
+            return false, "no_basic"
+        end
+        local locked = cell:FindFirstChild("CellLocked")
+        if cell:FindFirstChild("GiftedCell")
+            or (locked and locked:IsA("ValueBase") and locked.Value == true) then
+            Runtime.BlueJellyCell = nil
+            return false, "protected_cell"
+        end
+        local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+        if cellType and Runtime.IsBlueBeeType(cellType.Value) then
+            Runtime.BlueJellyCell = nil
+            return true, "blue_found"
+        end
+
+        local stats = MaterialSystem.Stats(true)
+        local jelly = math.floor(MaterialSystem.Amount("RoyalJelly", stats))
+        if jelly <= 0 then
+            setStatus("Unlock Blue HQ", "Het Royal Jelly - cho token/quest reward")
+            return false, "no_jelly"
+        end
+        local beforeBlue = Runtime.BlueDiscoveryCount(false)
+        local maxRolls = math.min(jelly, math.max(1, tonumber(Config.BlueJellyRollsPerPass) or 8))
+        for roll = 1, maxRolls do
+            if not Runtime.Running or not cell.Parent then return false, "stopped" end
+            if cell:FindFirstChild("GiftedCell") then
+                Runtime.BlueJellyCell = nil
+                return false, "gifted_protected"
+            end
+            cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+            local oldType = cellType and tostring(cellType.Value) or ""
+            setStatus("Unlock Blue HQ", string.format("Blue discovered %d/%d | RJ roll %d/%d",
+                beforeBlue, required, roll, maxRolls))
+            local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
+                "ConstructHiveCellFromEgg", x, y, "RoyalJelly", 1, false
+            )
+            if not ok then return false, "remote_failed" end
+            applyHatchResponse("RoyalJelly", remaining, success, honeycomb, discoveredBees, eggUses)
+            Runtime.BlueJellyRolls += 1
+            task.wait(math.max(0.08, tonumber(Config.BlueJellyRollDelay) or 0.2))
+            cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+            local currentType = cellType and tostring(cellType.Value) or ""
+            local blueCount = Runtime.BlueDiscoveryCount(false)
+            if Runtime.IsBlueBeeType(currentType) or blueCount > beforeBlue or blueCount >= required then
+                Runtime.BlueJellyCell = nil
+                task.defer(function() getStats(true) end)
+                return true, "blue_found"
+            end
+            if success ~= true and currentType == oldType then return false, "server_rejected" end
+        end
+        task.defer(function() getStats(true) end)
+        return false, "pass_complete"
+    end, debug.traceback)
+    Runtime.BlueJellyBusy = false
+    if not completed then
+        reportError("BlueHQJelly", unlocked)
+        return false, "error"
+    end
+    return unlocked, reason
+end
 
 local function entryEnabled(entry)
     if entry.NonMacroOnly and Config.MacroMode then return false end
@@ -3400,6 +3749,10 @@ local function processMilestone(milestone, fastRetry)
             if playerHas(entry, false) then
                 Runtime.DeferredItems[entry.Type] = nil
             else
+                if entry.Type == "Bubble Wand" and Config.AutoUnlockBlueHQ
+                    and Runtime.BlueDiscoveryCount(false) < (tonumber(Config.BlueHQRequiredDiscoveries) or 4) then
+                    Runtime.UnlockBlueHQ()
+                end
                 if Config.AutoMaterials and entry.RequiresMaterials then
                     local stats = MaterialSystem.Stats(os.clock() - Runtime.LastMaterialStats >= Config.MaterialStatsInterval)
                     local deficits = MaterialSystem.Deficits(entry, stats)
@@ -3563,9 +3916,15 @@ local function progression()
         if ready then
             -- Current mandatory gear always wins. Parallel guide goals (guards and
             -- sprinklers) are retried only after that order has been satisfied.
-            retryDeferredItems()
-            upgradeSprinkler()
             local before = beeCount()
+            local eggRush = milestone and milestone.EggRushAfter and before < 25
+            if eggRush then
+                Runtime.ProgressStage = string.format("Egg rush %d -> 25 bees | skip side gear", before)
+                setStatus("Focus Basic Egg", "Tam dung gear phu, uu tien mo hive den 25 bee")
+            else
+                retryDeferredItems()
+                upgradeSprinkler()
+            end
             if growHiveOneBee() then
                 local after = beeCount()
                 Runtime.ProgressStage = string.format("Hive %d/%d bees", after, Config.ProgressionTargetBees)
