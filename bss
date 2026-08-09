@@ -147,9 +147,17 @@ local DEFAULT_CONFIG = {
     LowGraphics = true,
     FixLagHideBees = true,
     FixLagHideTokens = true,
+    FixLagHideFlowers = true,
+    FixLagHideParticles = true,
     FixLagHideDecorations = true,
+    FixLagDeleteDecorations = true,
     FixLagHideWeather = true,
-    FixLagGraySky = true,
+    FixLagRemoveTextures = true,
+    FixLagPlasticMaterials = true,
+    FixLagDisableLights = true,
+    FixLagStopBeeAnimations = true,
+    FixLagScanBatch = 350,
+    FixLagHideSky = true,
     FixLagBrightness = 0.65,
     BlackScreen = false,
     RedeemCodes = true,
@@ -525,6 +533,7 @@ local Runtime = {
     NectarCondenserObject = nil,
     MaterialRequirements = {},
     LowGraphicsBound = false,
+    LowGraphicsWatched = setmetatable({}, {__mode = "k"}),
     UI = {},
 }
 
@@ -3733,49 +3742,135 @@ local function applyLowGraphics(enabled)
     Config.LowGraphics = enabled
     if not enabled then return end
 
-    local beeRoots = {"Bees", "NPCBees"}
-    local tokenRoots = {"Collectibles"}
-    local decorationRoots = {"Decorations", "Decor", "Decoratives"}
-    local weatherRoots = {"Particles", "Effects", "Clouds", "Weather"}
-    local maintenanceRoots = {
-        -- Decorations are static and were already handled by the initial scan plus
-        -- DescendantAdded. Avoid walking that large tree every maintenance pass.
-        "Bees", "NPCBees", "Collectibles", "Particles", "Effects", "Clouds", "Weather",
-    }
-    local grayEffect
+    local beeRoots = {Bees = true, NPCBees = true}
+    local tokenRoots = {Collectibles = true}
+    local flowerRoots = {Flowers = true}
+    local decorationRoots = {Decorations = true, Decor = true, Decoratives = true}
+    local decorationPropNames = {pineapple = true, ["giant pineapple"] = true, ["pineapple decoration"] = true}
+    local weatherRoots = {Particles = true, Effects = true, Clouds = true, Weather = true}
 
-    local function underNamedRoot(object, rootNames)
-        for _, rootName in ipairs(rootNames) do
-            local root = workspace:FindFirstChild(rootName)
-            if root and (object == root or object:IsDescendantOf(root)) then return true end
+    local function visualGroups(object)
+        local beeVisual, tokenVisual, flowerVisual, decorationVisual, weatherVisual = false, false, false, false, false
+        local cursor = object
+        while cursor and cursor ~= workspace do
+            local name = cursor.Name
+            if beeRoots[name] then beeVisual = true
+            elseif tokenRoots[name] then tokenVisual = true
+            elseif flowerRoots[name] then flowerVisual = true
+            elseif decorationRoots[name] then decorationVisual = true
+            elseif weatherRoots[name] then weatherVisual = true end
+            cursor = cursor.Parent
         end
-        return false
+        return beeVisual, tokenVisual, flowerVisual, decorationVisual, weatherVisual
     end
 
-    local function hiddenVisual(object)
-        return (Config.FixLagHideBees and underNamedRoot(object, beeRoots))
-            or (Config.FixLagHideTokens and underNamedRoot(object, tokenRoots))
-            or (Config.FixLagHideDecorations and underNamedRoot(object, decorationRoots))
-            or (Config.FixLagHideWeather and underNamedRoot(object, weatherRoots))
+    local function disposableDecoration(object)
+        if not Config.FixLagDeleteDecorations then return nil end
+        local cursor = object
+        local insideDecorations = false
+        local namedProp
+        while cursor and cursor ~= workspace do
+            local parent = cursor.Parent
+            if cursor.Name == "Decorations" then insideDecorations = true end
+            if parent and parent.Name == "Decorations" then insideDecorations = true end
+            if cursor.Name == "Misc" and parent and parent.Name == "Decorations" then return cursor end
+            if cursor.Name == "Decor" or cursor.Name == "Decoratives" then return cursor end
+            if decorationPropNames[string.lower(cursor.Name)] then namedProp = cursor end
+            cursor = parent
+        end
+        return insideDecorations and namedProp or nil
+    end
+
+    local function keepDisabled(object)
+        if Runtime.LowGraphicsWatched[object] then return end
+        Runtime.LowGraphicsWatched[object] = true
+        connect(object:GetPropertyChangedSignal("Enabled"), function()
+            if Runtime.Running and Config.LowGraphics and object.Parent and object.Enabled then
+                object.Enabled = false
+            end
+        end)
     end
 
     local function optimizeObject(object)
         if not object or not object.Parent then return end
-        local hidden = hiddenVisual(object)
+        local disposable = disposableDecoration(object)
+        if disposable and disposable.Parent then
+            -- Xoa local-only nhom decor da xac dinh; khong cham vao 30BeeZone,
+            -- gate, field, shop, NPC, toy, hive hay cac folder gameplay khac.
+            disposable:Destroy()
+            return
+        end
+        local underBees, underTokens, underFlowers, underDecorations, weatherVisual = visualGroups(object)
+        local beeVisual = Config.FixLagHideBees and underBees
+        local hidden = beeVisual or (Config.FixLagHideTokens and underTokens)
+            or (Config.FixLagHideFlowers and underFlowers)
+            or (Config.FixLagHideDecorations and underDecorations)
+            or (Config.FixLagHideWeather and weatherVisual)
+        local character = Player.Character
+        local playerVisual = character and (object == character or object:IsDescendantOf(character))
         if object:IsA("BasePart") then
-            object.CastShadow = false
-            object.Reflectance = 0
-            if object.Material == Enum.Material.Grass then object.Material = Enum.Material.SmoothPlastic end
-            if hidden then object.LocalTransparencyModifier = 1 end
+            pcall(function()
+                object.CastShadow = false
+                object.Reflectance = 0
+                -- Giu nguyen material cua meteor marker de detector fallback van
+                -- nhan ra Neon part; cung khong lam nhan vat local bi xam/plastic.
+                if Config.FixLagPlasticMaterials and not weatherVisual and not playerVisual then
+                    object.Material = Enum.Material.Plastic
+                end
+                if hidden then
+                    -- Transparency la thay doi client-side; instance van ton tai de
+                    -- token/flower/meteor scanner doc Position va attribute binh thuong.
+                    object.LocalTransparencyModifier = 1
+                    object.Transparency = 1
+                end
+            end)
             if object:IsA("MeshPart") then
                 pcall(function() object.RenderFidelity = Enum.RenderFidelity.Performance end)
-                if hidden then pcall(function() object.TextureID = "" end) end
+                if hidden or (Config.FixLagRemoveTextures and not playerVisual) then
+                    pcall(function() object.TextureID = "" end)
+                end
             end
         elseif object:IsA("Decal") or object:IsA("Texture") then
-            if hidden then object.Transparency = 1 end
-        elseif object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Beam")
-            or object:IsA("Smoke") or object:IsA("Fire") or object:IsA("Sparkles") then
-            object.Enabled = false
+            if hidden or (Config.FixLagRemoveTextures and not playerVisual) then object.Transparency = 1 end
+        elseif object:IsA("ParticleEmitter") then
+            if Config.FixLagHideParticles then
+                pcall(function()
+                    object.Enabled = false
+                    object.Rate = 0
+                    object.Lifetime = NumberRange.new(0)
+                    object:Clear()
+                end)
+                keepDisabled(object)
+            end
+        elseif object:IsA("Trail") then
+            if Config.FixLagHideParticles then
+                pcall(function()
+                    object.Enabled = false
+                    object.Lifetime = 0
+                    object:Clear()
+                end)
+                keepDisabled(object)
+            end
+        elseif object:IsA("Beam") or object:IsA("Smoke") or object:IsA("Fire") or object:IsA("Sparkles") then
+            if Config.FixLagHideParticles then
+                object.Enabled = false
+                keepDisabled(object)
+            end
+        elseif object:IsA("PointLight") or object:IsA("SpotLight") or object:IsA("SurfaceLight") then
+            if Config.FixLagDisableLights then
+                object.Enabled = false
+                keepDisabled(object)
+            end
+        elseif object:IsA("Animator") and beeVisual and Config.FixLagStopBeeAnimations then
+            pcall(function()
+                for _, track in ipairs(object:GetPlayingAnimationTracks()) do track:Stop(0) end
+            end)
+            if not Runtime.LowGraphicsWatched[object] then
+                Runtime.LowGraphicsWatched[object] = true
+                connect(object.AnimationPlayed, function(track)
+                    if Runtime.Running and Config.LowGraphics then pcall(track.Stop, track, 0) end
+                end)
+            end
         elseif object:IsA("Explosion") then
             pcall(function()
                 object.Visible = false
@@ -3786,27 +3881,34 @@ local function applyLowGraphics(enabled)
             if hidden then object.Enabled = false end
         elseif object:IsA("Highlight") then
             if hidden then object.Enabled = false end
+        elseif object:IsA("Sound") and hidden then
+            pcall(function()
+                object.Volume = 0
+                object:Stop()
+            end)
         elseif object:IsA("Clouds") then
             object.Enabled = false
-        elseif object:IsA("Sky") and Config.FixLagGraySky then
+        elseif object:IsA("Sky") and Config.FixLagHideSky then
             pcall(function()
                 object.SkyboxBk, object.SkyboxDn, object.SkyboxFt = "", "", ""
                 object.SkyboxLf, object.SkyboxRt, object.SkyboxUp = "", "", ""
                 object.CelestialBodiesShown = false
                 object.StarCount = 0
             end)
-        elseif object:IsA("Atmosphere") and Config.FixLagGraySky then
+        elseif object:IsA("Atmosphere") and Config.FixLagHideSky then
             pcall(function()
                 object.Color = Color3.fromRGB(120, 120, 120)
                 object.Decay = Color3.fromRGB(90, 90, 90)
-                object.Density = 0.25
+                object.Density = 0
                 object.Glare = 0
                 object.Haze = 0
             end)
         elseif object:IsA("BloomEffect") or object:IsA("BlurEffect")
             or object:IsA("DepthOfFieldEffect") or object:IsA("SunRaysEffect") then
             object.Enabled = false
-        elseif object:IsA("ColorCorrectionEffect") and object.Name ~= "BSSKaitunGray" then
+        elseif object:IsA("ColorCorrectionEffect") then
+            -- Khong dung post-processing xam: no phu mau len toan viewport va co
+            -- the lam nguoi dung tuong PlayerGui cung bi an/xam.
             object.Enabled = false
         end
     end
@@ -3821,25 +3923,30 @@ local function applyLowGraphics(enabled)
             Lighting.Ambient = Color3.fromRGB(85, 85, 85)
             Lighting.OutdoorAmbient = Color3.fromRGB(75, 75, 75)
             Lighting.FogColor = Color3.fromRGB(105, 105, 105)
+            Lighting.FogStart = 0
+            Lighting.FogEnd = 100000
+            Lighting.ColorShift_Top = Color3.new(0, 0, 0)
+            Lighting.ColorShift_Bottom = Color3.new(0, 0, 0)
         end)
         if sethiddenproperty then
             pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Compatibility)
         else
             pcall(function() Lighting.Technology = Enum.Technology.Compatibility end)
         end
-        if Config.FixLagGraySky then
-            grayEffect = Lighting:FindFirstChild("BSSKaitunGray")
-            if not grayEffect then
-                grayEffect = Instance.new("ColorCorrectionEffect")
-                grayEffect.Name = "BSSKaitunGray"
-                grayEffect.Parent = Lighting
+        if Config.FixLagHideSky then
+            local oldGray = Lighting:FindFirstChild("BSSKaitunGray")
+            if oldGray and oldGray:IsA("ColorCorrectionEffect") then oldGray.Enabled = false end
+            local flatSky = Lighting:FindFirstChild("BSSKaitunSky")
+            if not flatSky then
+                flatSky = Instance.new("Sky")
+                flatSky.Name = "BSSKaitunSky"
+                flatSky.Parent = Lighting
             end
             pcall(function()
-                grayEffect.Enabled = true
-                grayEffect.Saturation = -1
-                grayEffect.Brightness = -0.12
-                grayEffect.Contrast = -0.05
-                grayEffect.TintColor = Color3.fromRGB(190, 190, 190)
+                flatSky.SkyboxBk, flatSky.SkyboxDn, flatSky.SkyboxFt = "", "", ""
+                flatSky.SkyboxLf, flatSky.SkyboxRt, flatSky.SkyboxUp = "", "", ""
+                flatSky.CelestialBodiesShown = false
+                flatSky.StarCount = 0
             end)
         end
     end
@@ -3858,7 +3965,11 @@ local function applyLowGraphics(enabled)
         if sethiddenproperty then pcall(sethiddenproperty, terrain, "Decoration", false) end
         for _, object in ipairs(terrain:GetChildren()) do pcall(optimizeObject, object) end
     end
-    for _, object in ipairs(workspace:GetDescendants()) do pcall(optimizeObject, object) end
+    local scanBatch = math.max(50, tonumber(Config.FixLagScanBatch) or 350)
+    for index, object in ipairs(workspace:GetDescendants()) do
+        pcall(optimizeObject, object)
+        if index % scanBatch == 0 then task.wait() end
+    end
     for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
 
     if Runtime.LowGraphicsBound then return end
@@ -3872,15 +3983,10 @@ local function applyLowGraphics(enabled)
     task.spawn(function()
         while Runtime.Running and Config.LowGraphics do
             applyLightingSettings()
-            for _, rootName in ipairs(maintenanceRoots) do
-                local root = workspace:FindFirstChild(rootName)
-                if root then
-                    pcall(optimizeObject, root)
-                    for _, object in ipairs(root:GetDescendants()) do pcall(optimizeObject, object) end
-                end
-            end
-            for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
-            task.wait(4)
+            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+            -- Object moi da duoc xu ly bang DescendantAdded; khong quet lai ca
+            -- workspace dinh ky vi chinh vong quet do tao spike tren mobile.
+            task.wait(12)
         end
     end)
 end
