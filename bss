@@ -75,6 +75,10 @@ local DEFAULT_CONFIG = {
     QuestFarmSeconds = 8,
     AutoClaimBadges = true,
     BadgeClaimInterval = 1.25,
+    AutoWealthClock = true,
+    WealthClockInterval = 3600,
+    WealthClockCheckInterval = 15,
+    WealthClockRetryInterval = 60,
     BadgeNames = {
         "Pepper", "Coconut", "Playtime", "Honey", "Quest", "Battle", "Ability", "Goo",
         "Sunflower", "Dandelion", "Mushroom", "Blue Flower", "Clover", "Spider",
@@ -431,6 +435,8 @@ local Runtime = {
     TweenRootWasAnchored = false,
     TweenGeneration = 0,
     MeteorQueue = {},
+    MeteorPriorityActive = false,
+    MeteorHandling = false,
     RedeemedThisRun = {},
     CompletedGear = {},
     ProgressStage = "Bootstrap",
@@ -462,6 +468,10 @@ local Runtime = {
     BadgeClaimCursor = 1,
     BadgeChecks = 0,
     LastBadgeName = "",
+    LastWealthClockAttempt = -math.huge,
+    NextWealthClockCheck = 0,
+    WealthClockClaims = 0,
+    ServerNowFunction = nil,
     BlueJellyBusy = false,
     BlueJellyCell = nil,
     BlueJellyRolls = 0,
@@ -501,6 +511,7 @@ local function connect(signal, callback)
 end
 
 local function setStatus(state, detail)
+    if Runtime.MeteorPriorityActive and Runtime.MeteorHandling and state ~= "Auto meteor" then return end
     Runtime.State = state or Runtime.State
     Runtime.Detail = detail or ""
 end
@@ -793,6 +804,15 @@ local function tweenTo(target, speed, owner)
     end
     if not targetCFrame then return false, "invalid target" end
 
+    -- Meteor owns the shared mover as soon as it is detected. This prevents a
+    -- farm/quest/shop loop that was already running from immediately replacing
+    -- the emergency move with its own destination.
+    local movementOwner = tostring(owner or "SmartMove")
+    local meteorOwner = string.find(movementOwner, "Meteor", 1, true) == 1
+    if Config.AutoMeteor and Runtime.MeteorPriorityActive and not meteorOwner then
+        return false, "meteor priority"
+    end
+
     local _, humanoid, root = getCharacter()
     if not root then return false, "character unavailable" end
 
@@ -803,7 +823,7 @@ local function tweenTo(target, speed, owner)
     Runtime.ActiveTween = nil
     restoreFieldMoveSpeed()
     releaseTweenRoot()
-    Runtime.MovementOwner = owner or "SmartMove"
+    Runtime.MovementOwner = movementOwner
 
     local moveSpeed = math.max(tonumber(speed) or Config.TweenSpeed, 1)
     local distance = (root.Position - position).Magnitude
@@ -1134,6 +1154,7 @@ local function moveToShopItem(entry)
 end
 
 local function purchaseAndEquip(entry, fastRetry)
+    if Runtime.MeteorPriorityActive then return false, "meteor" end
     if Runtime.CompletedGear[entry.Type] then return true, "owned" end
     if playerHas(entry, false) then
         if entry.Category ~= "Eggs" then
@@ -1166,6 +1187,10 @@ local function purchaseAndEquip(entry, fastRetry)
         -- Shop model may be renamed/streamed out while the purchase remote is still
         -- valid. Attempt once instead of freezing progression at the missing model.
         setStatus("Mua do", "Remote fallback: " .. entry.Item)
+    end
+    if Runtime.MeteorPriorityActive then
+        Runtime.PurchaseRetryAt[purchaseKey] = nil
+        return false, "meteor"
     end
     local honeyBefore = liveCoreValue("Honey")
     local ok, purchased = remoteCall("ItemPackageEvent", "Purchase", getPackage(entry))
@@ -1266,6 +1291,7 @@ local function claimHive()
     setStatus("Khoi tao", "Dang claim hive")
     for attempt = 1, 12 do
         if not Runtime.Running then return false end
+        while Runtime.Running and Runtime.MeteorPriorityActive do task.wait(0.05) end
         local hive, platform, hiveId = findFreeHive()
         if hiveId ~= nil then
             local target = platform and (platform:FindFirstChild("Platform") or platform) or hive
@@ -1287,6 +1313,7 @@ local function redeemCodes()
     local function redeemList(codes, label)
         for index, code in ipairs(codes) do
             if not Runtime.Running then return end
+            while Runtime.Running and Runtime.MeteorPriorityActive do task.wait(0.05) end
             if type(code) == "string" and code ~= "" and not Runtime.RedeemedThisRun[code] then
                 setStatus("Redeem code", string.format("%s %d/%d - %s", label, index, #codes, code))
                 remoteCall("PromoCodeEvent", code)
@@ -1331,6 +1358,7 @@ local function consumeBasicEgg()
 end
 
 local function buyBasicEgg()
+    if Runtime.MeteorPriorityActive then return false end
     if eggCount("Basic") > 0 then
         Runtime.WaitingForEggFunds = false
         return true
@@ -1360,6 +1388,10 @@ local function buyBasicEgg()
     local before = eggCount("Basic")
     local beforeRaw = rawEggCount("Basic")
     local honeyBefore = liveCoreValue("Honey")
+    if Runtime.MeteorPriorityActive then
+        Runtime.PurchaseRetryAt[purchaseKey] = nil
+        return false
+    end
     local ok, result = remoteCall("ItemPackageEvent", "Purchase", getPackage(Config.BasicEgg))
     local remoteConfirmed = ok and result == true
     if remoteConfirmed then
@@ -1491,6 +1523,7 @@ local function markBeeHatched(x, y)
 end
 
 local function hatchOneBasicEgg()
+    if Runtime.MeteorPriorityActive then return false end
     local beforeBees = beeCount()
     setStatus("No Basic Egg", string.format("Hive %d/%d bee", beforeBees, hiveCapacity()))
 
@@ -1498,6 +1531,7 @@ local function hatchOneBasicEgg()
     -- the center cell first before walking to the dispenser or spending honey.
     if eggCount("Basic") <= 0 and beforeBees <= 0 then
         local beforeEggs = eggCount("Basic")
+        if Runtime.MeteorPriorityActive then return false end
         local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall("ConstructHiveCellFromEgg", 3, 3, "Basic", 1)
         applyHatchResponse("Basic", remaining, success, honeycomb, discoveredBees, eggUses)
         local accepted = hatchResponseAccepted(ok, beforeEggs, remaining, success)
@@ -1519,6 +1553,7 @@ local function hatchOneBasicEgg()
     end
     local seen = {}
     for _, cell in ipairs(order) do
+        if Runtime.MeteorPriorityActive then return false end
         local key = cell[1] .. ":" .. cell[2]
         if not seen[key] and not hiveCellOccupied(cell[1], cell[2]) then
             seen[key] = true
@@ -1543,6 +1578,7 @@ local HIVE_SLOT = {Shop = "Mountaintop", Item = "Hive Slot", Category = "HiveSlo
 
 local function buyHiveSlot()
     if not Config.AutoBuyHiveSlots then return false end
+    if Runtime.MeteorPriorityActive then return false end
     local before = hiveCapacity()
     local purchaseKey = "HiveSlot:Hive Slot"
     if (Runtime.PurchaseRetryAt[purchaseKey] or 0) > os.clock() then return false end
@@ -1563,6 +1599,10 @@ local function buyHiveSlot()
     setStatus("Mo hive slot", string.format("Suc chua hive: %d", before))
     local moved = fallbackProbe or moveToShopItem(HIVE_SLOT)
     if not moved then setStatus("Mo hive slot", "Remote fallback") end
+    if Runtime.MeteorPriorityActive then
+        Runtime.PurchaseRetryAt[purchaseKey] = nil
+        return false
+    end
     local ok, result = remoteCall("ItemPackageEvent", "Purchase", getPackage(HIVE_SLOT))
     local remoteConfirmed = ok and result == true
     if remoteConfirmed then
@@ -1585,10 +1625,64 @@ local function buyHiveSlot()
 end
 
 local function growHiveOneBee()
+    if Runtime.MeteorPriorityActive then return false end
     local count = beeCount()
     if count >= Config.ProgressionTargetBees then return true end
     if count >= hiveCapacity() and not buyHiveSlot() then return false end
     return hatchOneBasicEgg()
+end
+
+-- Wealth Clock is a ToyEvent instant. Prefer the game's replicated ToyTimes and
+-- Cooldown values so re-executing the kaitun does not reset its one-hour timer.
+function Runtime.ClaimWealthClock()
+    if not Config.AutoWealthClock or not Config.Enabled or Runtime.MeteorPriorityActive then return false end
+    local now = os.clock()
+    if now < (Runtime.NextWealthClockCheck or 0) then return false end
+
+    local interval = math.max(60, tonumber(Config.WealthClockInterval) or 3600)
+    local toy = workspace:FindFirstChild("Toys")
+    toy = toy and toy:FindFirstChild("Wealth Clock")
+    local cooldown = toy and toy:FindFirstChild("Cooldown")
+    if cooldown and cooldown:IsA("ValueBase") then interval = math.max(60, tonumber(cooldown.Value) or interval) end
+
+    local serverNow = os.time()
+    if type(Runtime.ServerNowFunction) ~= "function" then
+        local module = ReplicatedStorage:FindFirstChild("OsTime")
+        if module and module:IsA("ModuleScript") then
+            local ok, value = pcall(require, module)
+            if ok and type(value) == "function" then Runtime.ServerNowFunction = value end
+        end
+    end
+    if type(Runtime.ServerNowFunction) == "function" then
+        local ok, value = pcall(Runtime.ServerNowFunction)
+        if ok and tonumber(value) then serverNow = tonumber(value) end
+    end
+
+    local stats = getStats(false)
+    local toyTimes = type(stats) == "table" and stats.ToyTimes or nil
+    local lastActivation = type(toyTimes) == "table" and tonumber(toyTimes["Wealth Clock"]) or nil
+    if lastActivation then
+        local remaining = interval - (serverNow - lastActivation)
+        if remaining > 0 then
+            Runtime.NextWealthClockCheck = now + math.max(1, math.min(remaining, tonumber(Config.WealthClockCheckInterval) or 15))
+            return false
+        end
+    elseif now - Runtime.LastWealthClockAttempt < interval then
+        Runtime.NextWealthClockCheck = Runtime.LastWealthClockAttempt + interval
+        return false
+    end
+
+    Runtime.LastWealthClockAttempt = now
+    setStatus("Wealth Clock", "Auto claim thuong moi 1 gio")
+    local ok = remoteCall("ToyEvent", "Wealth Clock")
+    if ok then
+        Runtime.WealthClockClaims += 1
+        Runtime.NextWealthClockCheck = now + interval
+        task.defer(function() getStats(true) end)
+        return true
+    end
+    Runtime.NextWealthClockCheck = now + math.max(5, tonumber(Config.WealthClockRetryInterval) or 60)
+    return false
 end
 
 local FIELD_REQUIREMENTS = {
@@ -1883,7 +1977,9 @@ local function sweepTokens(duration, owner)
     if not Config.AutoTokens then return 0 end
     local deadline = os.clock() + math.max(0, duration or Config.TokenSweepDuration)
     local collected, attempts = 0, 0
+    local meteorOwner = string.find(tostring(owner or ""), "Meteor", 1, true) == 1
     while Runtime.Running and Config.Enabled and os.clock() < deadline
+        and (not Runtime.MeteorPriorityActive or meteorOwner)
         and collected < Config.TokenMaxPerSweep and attempts < Config.TokenMaxPerSweep * 2 do
         local token = findBestTokenInStandingField()
         if not token then break end
@@ -1908,6 +2004,7 @@ local function placeSprinklerIfNeeded(field)
 end
 
 local function farmStep(seconds, overrideField, state, detail)
+    if Runtime.MeteorPriorityActive then return false end
     local field = overrideField or getField()
     if not field then
         setStatus("Farm", "Khong tim thay field: " .. tostring(selectedFieldName()))
@@ -1926,8 +2023,9 @@ local function farmStep(seconds, overrideField, state, detail)
         local openingPoint = fieldPoint(field)
         if openingPoint then tweenTo(CFrame.new(openingPoint), Config.TweenSpeed, "Farm") end
     end
+    if Runtime.MeteorPriorityActive then Runtime.Digging = false return false end
     placeSprinklerIfNeeded(field)
-    while Runtime.Running and Config.Enabled and os.clock() < deadline do
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local ratio = pollenRatio()
         if Config.AutoConvert and ratio >= Config.ConvertPercent then Runtime.Digging = false return true end
         if Config.AutoTokens then
@@ -2153,6 +2251,7 @@ local function interactQuestNPC(name)
     setStatus("Den NPC", name)
     if not tweenTo(CFrame.new(platform.Position + Vector3.new(0, 5, 0)), Config.TweenSpeed, "QuestNPC") then return false end
     task.wait(1)
+    if Runtime.MeteorPriorityActive then return false end
     local _, _, root = getCharacter(1)
     local distance = root and (root.Position - platform.Position).Magnitude or math.huge
     if distance > 25 then
@@ -2171,6 +2270,7 @@ local function interactQuestNPC(name)
 
     local opened = false
     for attempt = 1, 3 do
+        if Runtime.MeteorPriorityActive then return false end
         setStatus("Nhan/tra quest", string.format("%s | lan %d/3", name, attempt))
         local oldIdentity
         if type(GetThreadIdentity) == "function" then pcall(function() oldIdentity = GetThreadIdentity() end) end
@@ -2183,13 +2283,13 @@ local function interactQuestNPC(name)
             opened = npcDialogueVisible()
             if opened then break end
             task.wait(0.05)
-        until os.clock() >= deadline or not Runtime.Running
+        until os.clock() >= deadline or not Runtime.Running or Runtime.MeteorPriorityActive
         if opened then break end
     end
     if not opened then return false end
 
     local deadline = os.clock() + Config.QuestInteractTimeout
-    while Runtime.Running and os.clock() < deadline do
+    while Runtime.Running and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local visible = npcDialogueVisible()
         if not visible then break end
         incrementNPCDialogue()
@@ -2339,7 +2439,8 @@ end
 
 task.spawn(function()
     while Runtime.Running do
-        if Config.AvoidMob and Runtime.Digging and not Runtime.MaterialCombat and Runtime.CurrentField ~= "" then
+        if Config.AvoidMob and Runtime.Digging and not Runtime.MeteorPriorityActive
+            and not Runtime.MaterialCombat and Runtime.CurrentField ~= "" then
             local field = findField(Runtime.CurrentField)
             local mob = nearbyLiveMob(field)
             Runtime.AvoidingMob = mob ~= nil
@@ -2369,6 +2470,7 @@ end
 
 local function convertPollen()
     if not Config.AutoConvert then return false end
+    if Runtime.MeteorPriorityActive then return false end
     local hive, platform = findOwnedHive()
     if not hive then return false end
     local target = platform and (platform:FindFirstChild("Platform") or platform) or hive
@@ -2376,8 +2478,9 @@ local function convertPollen()
     if not position then return false end
 
     setStatus("Convert honey", "Tween ve hive")
-    tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Convert")
+    if not tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Convert") then return false end
     task.wait(0.25)
+    if Runtime.MeteorPriorityActive then return false end
     if hivePhase(hive) == "Idle" or hivePhase(hive) == "" then
         remoteCall("PlayerHiveCommand", "ToggleHoneyMaking")
     end
@@ -2385,7 +2488,7 @@ local function convertPollen()
     local deadline = os.clock() + Config.ConvertTimeout
     local lastPollen = math.huge
     local lastProgress = os.clock()
-    while Runtime.Running and Config.Enabled and os.clock() < deadline do
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local ratio, pollen = pollenRatio()
         setStatus("Convert honey", formatNumber(pollen) .. " pollen con lai")
         if ratio <= Config.ConvertFinishPercent or pollen <= 0 then break end
@@ -2557,10 +2660,12 @@ end
 
 function MaterialSystem.StartBlender(action)
     if not Config.AutoBlender or not action or action.Kind ~= "craft" then return false end
+    if Runtime.MeteorPriorityActive then return false end
     local state = MaterialSystem.BlenderStatus(true)
     if state ~= "idle" then return false end
     MaterialSystem.MoveToBlender()
     task.wait(0.35)
+    if Runtime.MeteorPriorityActive then return false end
     setStatus("Blender", string.format("Craft x%d %s", action.Count, MaterialSystem.Display(action.Material)))
     local ok, result = remoteCall("BlenderCommand", "PlaceOrder", {
         Recipe = action.Recipe,
@@ -2578,10 +2683,12 @@ function MaterialSystem.StartBlender(action)
 end
 
 function MaterialSystem.ClaimBlender()
+    if Runtime.MeteorPriorityActive then return false end
     local state, blender = MaterialSystem.BlenderStatus(true)
     if state ~= "done" then return false end
     MaterialSystem.MoveToBlender()
     task.wait(0.35)
+    if Runtime.MeteorPriorityActive then return false end
     setStatus("Blender", "Nhan " .. tostring(blender and blender.Recipe or Runtime.BlenderRecipe))
     local ok, result = remoteCall("BlenderCommand", "StopOrder")
     if ok and result ~= false then
@@ -2697,6 +2804,7 @@ end
 
 function MaterialSystem.FarmVicious()
     if not Config.AutoFarmVicious then return false end
+    if Runtime.MeteorPriorityActive then return false end
     local target, thorn = MaterialSystem.FindVicious()
     local position = objectPosition(target)
     local field = position and flowerFieldAtPosition(position, 18) or nil
@@ -2712,11 +2820,11 @@ function MaterialSystem.FarmVicious()
         repeat
             task.wait(0.2)
             target, thorn = MaterialSystem.FindVicious()
-        until not Runtime.Running or not thorn or os.clock() >= spawnDeadline
+        until not Runtime.Running or Runtime.MeteorPriorityActive or not thorn or os.clock() >= spawnDeadline
     end
 
     local deadline = os.clock() + Config.MaterialCombatSeconds
-    while Runtime.Running and Config.Enabled and os.clock() < deadline do
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local mob = select(1, MaterialSystem.FindVicious())
         if not mob or not string.find(string.lower(mob.Name), "vicious", 1, true) then break end
         local mobPosition = objectPosition(mob)
@@ -2937,6 +3045,7 @@ function MaterialSystem.TryCondenser(material)
 end
 
 function MaterialSystem.FarmSource(action, entry)
+    if Runtime.MeteorPriorityActive then return false end
     local material = MaterialSystem.Canonical(action.Material)
     Runtime.MaterialName = material
     Runtime.MaterialTarget = entry and entry.Type or ""
@@ -2988,6 +3097,7 @@ end
 
 function MaterialSystem.Work(entry)
     if not Config.AutoMaterials or not entry or not entry.RequiresMaterials then return false end
+    if Runtime.MeteorPriorityActive then return false end
     local force = os.clock() - Runtime.LastBlenderCheck >= Config.BlenderCheckInterval
     if force then Runtime.LastBlenderCheck = os.clock() end
     local stats = MaterialSystem.Stats(force)
@@ -3070,6 +3180,10 @@ local function enqueueMeteor(data)
                 queued.Source = data.Source
             end
             queued.Marker = data.Marker or queued.Marker
+            if Config.AutoMeteor then
+                Runtime.MeteorPriorityActive = true
+                if not Runtime.MeteorHandling then cancelMovement() end
+            end
             return true
         end
     end
@@ -3083,6 +3197,10 @@ local function enqueueMeteor(data)
     })
     table.sort(Runtime.MeteorQueue, function(a, b) return a.ReadyAt < b.ReadyAt end)
     while #Runtime.MeteorQueue > 30 do table.remove(Runtime.MeteorQueue) end
+    if Config.AutoMeteor then
+        Runtime.MeteorPriorityActive = true
+        if not Runtime.MeteorHandling then cancelMovement() end
+    end
     return true
 end
 
@@ -3136,17 +3254,26 @@ local function triggerMeteorIfReady()
 end
 
 local function handleMeteor()
+    if Runtime.MeteorHandling then return false end
+    Runtime.MeteorHandling = true
+    Runtime.MeteorPriorityActive = true
+    local function finish(result)
+        Runtime.MeteorHandling = false
+        Runtime.MeteorPriorityActive = Config.AutoMeteor and #Runtime.MeteorQueue > 0
+        return result
+    end
+
     local now = os.clock()
     while #Runtime.MeteorQueue > 0 and Runtime.MeteorQueue[1].ExpireAt <= now do
         table.remove(Runtime.MeteorQueue, 1)
     end
     local meteor = Runtime.MeteorQueue[1]
-    if not meteor then return false end
+    if not meteor then return finish(false) end
 
     local field = flowerFieldAtPosition(meteor.Position, 10)
     if not field or not fieldUnlocked(field.Name) then
         table.remove(Runtime.MeteorQueue, 1)
-        return false
+        return finish(false)
     end
     Runtime.CurrentField = field.Name
     Runtime.Digging = true
@@ -3156,7 +3283,7 @@ local function handleMeteor()
     if not moved then
         Runtime.Digging = false
         table.remove(Runtime.MeteorQueue, 1)
-        return false
+        return finish(false)
     end
 
     -- Match the source timing: be on the impact point from 60% of Delay+Dur
@@ -3176,7 +3303,7 @@ local function handleMeteor()
     -- Never let token cleanup make us miss another queued impact.
     if #Runtime.MeteorQueue > 0 then
         Runtime.Digging = false
-        return true
+        return finish(true)
     end
     local tokenDeadline = os.clock() + Config.MeteorStayTime
     while Runtime.Running and Config.Enabled and Config.AutoMeteor and os.clock() < tokenDeadline do
@@ -3185,8 +3312,34 @@ local function handleMeteor()
         if sweepTokens(math.min(Config.TokenSweepDuration, remaining), "MeteorToken") <= 0 then break end
     end
     Runtime.Digging = false
-    return true
+    return finish(true)
 end
+
+-- Event-driven priority supervisor. The normal progression loop may be inside a
+-- long quest/material/convert operation, so polling only at the end of that loop
+-- can miss an impact. This worker cancels the current mover immediately and is
+-- the only worker allowed to acquire MeteorHandling.
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoMeteor and #Runtime.MeteorQueue > 0 then
+            Runtime.MeteorPriorityActive = true
+            if not Runtime.MeteorHandling then
+                cancelMovement()
+                local ok, err = xpcall(handleMeteor, debug.traceback)
+                if not ok then
+                    Runtime.MeteorHandling = false
+                    Runtime.MeteorPriorityActive = #Runtime.MeteorQueue > 0
+                    Runtime.Digging = false
+                    cancelMovement()
+                    reportError("MeteorPriority", err)
+                end
+            end
+        elseif not Config.AutoMeteor or #Runtime.MeteorQueue == 0 then
+            Runtime.MeteorPriorityActive = false
+        end
+        task.wait(0.03)
+    end
+end)
 
 local function applyLowGraphics(enabled)
     Config.LowGraphics = enabled
@@ -3481,6 +3634,21 @@ task.spawn(function()
     end
 end)
 
+-- Low-priority hourly reward: it never takes the mover and always yields to the
+-- event-driven Meteor supervisor.
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoWealthClock and not Runtime.MeteorPriorityActive then
+            local ok, err = xpcall(Runtime.ClaimWealthClock, debug.traceback)
+            if not ok then
+                Runtime.NextWealthClockCheck = os.clock() + math.max(5, tonumber(Config.WealthClockRetryInterval) or 60)
+                reportError("WealthClock", err)
+            end
+        end
+        task.wait(math.max(1, math.min(15, tonumber(Config.WealthClockCheckInterval) or 15)))
+    end
+end)
+
 -- Dig loop: remote nay chinh la remote duoc LocalCollect cua game goi.
 task.spawn(function()
     while Runtime.Running do
@@ -3595,6 +3763,7 @@ function Runtime.UnlockBlueHQ()
         local maxRolls = math.min(jelly, math.max(1, tonumber(Config.BlueJellyRollsPerPass) or 8))
         for roll = 1, maxRolls do
             if not Runtime.Running or not cell.Parent then return false, "stopped" end
+            if Runtime.MeteorPriorityActive then return false, "meteor" end
             if cell:FindFirstChild("GiftedCell") then
                 Runtime.BlueJellyCell = nil
                 return false, "gifted_protected"
@@ -3657,6 +3826,7 @@ end
 
 local function upgradeSprinkler()
     if not Config.AutoBuySprinklers then return false end
+    if Runtime.MeteorPriorityActive then return false end
     if beeCount() < Config.MinSprinklerBees then return false end
     local upgraded = false
     for _, entry in ipairs(Config.SprinklerSequence) do
@@ -3707,6 +3877,7 @@ local function nextMilestone(count)
 end
 
 local function retryDeferredItems()
+    if Runtime.MeteorPriorityActive then return end
     if os.clock() - Runtime.LastDeferredRetry < Config.DeferredRetryInterval then return end
     Runtime.LastDeferredRetry = os.clock()
     local purchaseAttempts = 0
@@ -3741,6 +3912,7 @@ local function retryDeferredItems()
 end
 
 local function processMilestone(milestone, fastRetry)
+    if Runtime.MeteorPriorityActive then return false, nil, "meteor", 0.05 end
     local count = beeCount()
     local target = tonumber(milestone.TargetBees) or count + 1
     Runtime.ProgressStage = string.format("%d -> %d bees | gear order", count, target)
@@ -3807,6 +3979,11 @@ local function progressionWork(reason, allowSideJobs)
         task.wait(0.5)
         return
     end
+    -- A detected meteor outranks conversion, quests, purchases and farming.
+    if Config.AutoMeteor and (Runtime.MeteorPriorityActive or #Runtime.MeteorQueue > 0) then
+        task.wait(0.05)
+        return
+    end
     local ratio = pollenRatio()
     if Config.AutoConvert and ratio >= Config.ConvertPercent then
         convertPollen()
@@ -3814,14 +3991,13 @@ local function progressionWork(reason, allowSideJobs)
     end
     if allowSideJobs == nil then allowSideJobs = Runtime.BootstrapComplete end
     if allowSideJobs then
-        -- Nhan/tra quest la tac vu ngan, phai duoc kiem tra truoc meteor,
-        -- sparkles va farm de cac job xuat hien lien tuc khong lam quest bi doi.
-        if Config.AutoQuest and maintainBearQuests() then return end
         triggerMeteorIfReady()
-        if Config.AutoMeteor and #Runtime.MeteorQueue > 0 then
-            handleMeteor()
+        if Config.AutoMeteor and (Runtime.MeteorPriorityActive or #Runtime.MeteorQueue > 0) then
+            -- The dedicated supervisor owns the mover and handles the queue.
+            task.wait(0.05)
             return
         end
+        if Config.AutoQuest and maintainBearQuests() then return end
         if os.clock() - Runtime.LastSpecialEffectFarm >= Config.SpecialEffectPriorityInterval and farmFlowerEffect() then
             Runtime.LastSpecialEffectFarm = os.clock()
             return
@@ -3861,8 +4037,8 @@ local function progression()
         end
     end
 
-    -- Opening order is strict: first real bee, then starter gear. Quest/meteor/
-    -- leaves stay disabled until this pass finishes, so they cannot steal movement.
+    -- Opening order is strict: first real bee, then starter gear. Routine side
+    -- jobs stay disabled here; an actually detected meteor still preempts it.
     if Runtime.Running and Config.AutoProgression then
         local starterMilestone = Config.ProgressionMilestones[1]
         while Runtime.Running and starterMilestone do
@@ -3890,6 +4066,10 @@ local function progression()
     end
 
     while Runtime.Running do
+        if Config.AutoMeteor and (Runtime.MeteorPriorityActive or #Runtime.MeteorQueue > 0) then
+            task.wait(0.05)
+            continue
+        end
         local count = beeCount()
         if count >= Config.ProgressionTargetBees and not nextMilestone(count) then break end
         if not Config.AutoProgression then
@@ -3953,7 +4133,7 @@ while Runtime.Running do
     if okProgression then break end
     reportError("Progression", progressionError)
     setStatus("Recovery progression", "Thu khoi dong lai sau loi")
-    cancelMovement()
+    if not Runtime.MeteorHandling then cancelMovement() end
     task.wait(Config.RetryDelay)
 end
 
@@ -3972,6 +4152,14 @@ task.spawn(function()
                 return
             end
 
+            -- Absolute runtime priority: do not start maintenance, materials,
+            -- quests or conversion while a meteor is queued/in progress.
+            triggerMeteorIfReady()
+            if Config.AutoMeteor and (Runtime.MeteorPriorityActive or #Runtime.MeteorQueue > 0) then
+                task.wait(0.05)
+                return
+            end
+
             if Config.AutoProgression and os.clock() - Runtime.LastProgressMaintenance >= 30 then
                 Runtime.LastProgressMaintenance = os.clock()
                 retryDeferredItems()
@@ -3985,14 +4173,10 @@ task.spawn(function()
                     return
                 end
             end
-
             if Config.AutoQuest and maintainBearQuests() then return end
-            triggerMeteorIfReady()
             local ratio = pollenRatio()
             if Config.AutoConvert and ratio >= Config.ConvertPercent then
                 convertPollen()
-            elseif Config.AutoMeteor and #Runtime.MeteorQueue > 0 then
-                handleMeteor()
             elseif os.clock() - Runtime.LastSpecialEffectFarm >= Config.SpecialEffectPriorityInterval and farmFlowerEffect() then
                 Runtime.LastSpecialEffectFarm = os.clock()
             elseif Config.AutoQuest and questWork(Config.QuestFarmSeconds) then
@@ -4007,7 +4191,7 @@ task.spawn(function()
         if not ok then
             reportError("MainLoop", err)
             setStatus("Tu phuc hoi", Runtime.LastError)
-            cancelMovement()
+            if not Runtime.MeteorHandling then cancelMovement() end
             task.wait(1)
         end
     end
