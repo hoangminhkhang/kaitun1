@@ -111,6 +111,13 @@ local DEFAULT_CONFIG = {
     AutoMaterials = true,
     AutoBlender = true,
     AutoFarmFireflies = true,
+    FireflyScanInterval = 0.25,
+    FireflyLandingVelocity = 0.15,
+    FireflyMaxFieldHeight = 4,
+    FireflyFarmBudget = 9,
+    FireflyTouchTimeout = 2.5,
+    FireflyTokenWindow = 3,
+    FireflyRetryCooldown = 1.25,
     AutoFarmSprouts = true,
     AutoFarmVicious = true,
     AutoMaterialPlanters = true,
@@ -142,12 +149,14 @@ local DEFAULT_CONFIG = {
     DynamicField = true,
     MacroMode = true,
     SafeMaterialMode = true,
-    -- Fix lag chi an phan hien thi o client, khong Destroy token/bee/effect nen
-    -- cac bo scan progression van hoat dong binh thuong.
+    -- Fix lag khong Destroy token/bee/field logic; Atlas chi xoa visual-only
+    -- SurfaceAppearance va decoration da loc, nen scanner van hoat dong.
     LowGraphics = true,
+    FixLagAtlasMode = true,
     FixLagHideBees = true,
     FixLagHideTokens = true,
     FixLagHideFlowers = true,
+    FixLagHideHives = true,
     FixLagHideParticles = true,
     FixLagHideDecorations = true,
     FixLagDeleteDecorations = true,
@@ -315,6 +324,22 @@ local Config = merge(deepCopy(DEFAULT_CONFIG), ENV.BSS_KAITUN_CONFIG or {})
 -- de script khong tu nhan hoac farm Mother Bear sau khi cap nhat.
 Config.QuestNPCs = {"Black Bear", "Science Bear"}
 Config.QuestFarmPriority = {"Black Bear", "Science Bear"}
+if Config.FixLagAtlasMode then
+    -- Preset Atlas: config cu khong the vo tinh bat lai cac visual nang.
+    Config.LowGraphics = true
+    Config.FixLagHideBees = true
+    Config.FixLagHideTokens = true
+    Config.FixLagHideFlowers = true
+    Config.FixLagHideHives = true
+    Config.FixLagHideParticles = true
+    Config.FixLagHideDecorations = true
+    Config.FixLagDeleteDecorations = true
+    Config.FixLagHideWeather = true
+    Config.FixLagRemoveTextures = true
+    Config.FixLagPlasticMaterials = true
+    Config.FixLagDisableLights = true
+    Config.FixLagStopBeeAnimations = true
+end
 
 -- Requirements are kept in one table so the purchase scheduler, material UI and
 -- Blender planner all use the same target. Keys match PlayerStats.Eggs and the
@@ -532,6 +557,11 @@ local Runtime = {
     LastNectarCondenserAction = -math.huge,
     NectarCondenserObject = nil,
     MaterialRequirements = {},
+    FireflyPending = false,
+    FireflyBusy = false,
+    FireflyCooldowns = setmetatable({}, {__mode = "k"}),
+    FirefliesCollected = 0,
+    LastFireflySeen = -math.huge,
     LowGraphicsBound = false,
     LowGraphicsWatched = setmetatable({}, {__mode = "k"}),
     UI = {},
@@ -980,6 +1010,8 @@ local function cancelMovement()
     Runtime.MobLastHumanoid = nil
     Runtime.MobLastHealth = nil
     Runtime.MobLastDamageAt = -math.huge
+    Runtime.FireflyBusy = false
+    Runtime.FireflyPending = false
     restoreFieldMoveSpeed()
     releaseTweenRoot()
 end
@@ -2071,6 +2103,10 @@ local function farmStep(seconds, overrideField, state, detail)
     if Runtime.MeteorPriorityActive then Runtime.Digging = false return false end
     placeSprinklerIfNeeded(field)
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
+        if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then
+            Runtime.Digging = false
+            return true
+        end
         local ratio = pollenRatio()
         if Config.AutoConvert and ratio >= Config.ConvertPercent then Runtime.Digging = false return true end
         if Config.AutoTokens then
@@ -3105,17 +3141,51 @@ function MaterialSystem.FindFirefly()
     local folder = workspace:FindFirstChild("NPCBees")
     local _, _, root = getCharacter(1)
     if not folder or not root then return nil end
-    local best, bestDistance
+    local best, bestField, bestDistance
+    local now = os.clock()
+    local landingSpeed = math.max(0, tonumber(Config.FireflyLandingVelocity) or 0.15)
+    local maxHeight = math.max(1, tonumber(Config.FireflyMaxFieldHeight) or 4)
     for _, firefly in ipairs(folder:GetChildren()) do
-        if firefly.Name == "Firefly" then
-            local velocity = firefly:FindFirstChild("BodyVelocity")
+        if firefly.Name == "Firefly" and (Runtime.FireflyCooldowns[firefly] or 0) <= now then
+            local velocity = firefly:FindFirstChild("BodyVelocity", true)
+            local linearVelocity = firefly:FindFirstChildWhichIsA("LinearVelocity", true)
             local position = objectPosition(firefly)
-            if position and (not velocity or velocity.Velocity.Magnitude <= 0.1) then
+            local speed = velocity and velocity.Velocity.Magnitude
+                or (linearVelocity and linearVelocity.VectorVelocity.Magnitude)
+            -- Fireflies chi co the duoc kich hoat khi da dap xuong field. Khong
+            -- chase con dang bay vi no se doi field truoc khi nhan vat cham toi.
+            if position and speed and speed <= landingSpeed then
                 local field = flowerFieldAtPosition(position, 6)
+                local surfaceHeight = field and fieldSurfaceOffset(field, position) or nil
                 local distance = (root.Position - position).Magnitude
-                if field and fieldUnlocked(field.Name) and (not bestDistance or distance < bestDistance) then
-                    best, bestDistance = firefly, distance
+                if field and fieldUnlocked(field.Name) and surfaceHeight
+                    and surfaceHeight >= -2 and surfaceHeight <= maxHeight
+                    and (not bestDistance or distance < bestDistance) then
+                    best, bestField, bestDistance = firefly, field, distance
                 end
+            end
+        end
+    end
+    return best, bestField
+end
+
+function MaterialSystem.FindMoonCharmToken(field, origin, radius)
+    local collectibles = workspace:FindFirstChild("Collectibles")
+    local _, _, root = getCharacter(1)
+    if not collectibles or not root then return nil end
+    local best, bestDistance
+    for _, token in ipairs(collectibles:GetChildren()) do
+        local position = objectPosition(token)
+        if position and tokenAllowed(token) and (not field or fieldContainsPosition(field, position, 4))
+            and (not field or tokenNearFieldSurface(field, position))
+            and (not origin or (position - origin).Magnitude <= (radius or 40)) then
+            local descriptor = tokenDescriptor(token)
+            local decal = token:FindFirstChild("FrontDecal", true) or token:FindFirstChildWhichIsA("Decal", true)
+            local texture = decal and tostring(decal.Texture) or ""
+            local moonCharm = descriptor:find("moon", 1, true) or texture:find("2306224708", 1, true)
+            if moonCharm then
+                local distance = (root.Position - position).Magnitude
+                if not bestDistance or distance < bestDistance then best, bestDistance = token, distance end
             end
         end
     end
@@ -3123,23 +3193,98 @@ function MaterialSystem.FindFirefly()
 end
 
 function MaterialSystem.FarmFirefly()
-    if not Config.AutoFarmFireflies then return false end
-    local firefly = MaterialSystem.FindFirefly()
-    local position = objectPosition(firefly)
-    local field = position and flowerFieldAtPosition(position, 6) or nil
-    if not firefly or not position or not field then return false end
-    Runtime.CurrentField = field.Name
-    Runtime.Digging = true
-    setStatus("Farm material", "Moon Charm | Firefly @ " .. field.Name)
-    local moved = tweenTo(CFrame.new(position + Vector3.new(0, 2, 0)), Config.TokenTweenSpeed, "Firefly")
-    if moved then
-        task.wait(0.75)
-        remoteCall("ToolCollect")
-        sweepTokens(2.5, "FireflyToken")
+    if not Config.AutoFarmFireflies or Runtime.FireflyBusy or Runtime.MeteorPriorityActive then return false end
+    local currentField = standingField()
+    local looseMoonCharm = currentField and MaterialSystem.FindMoonCharmToken(currentField, nil, nil) or nil
+    if looseMoonCharm then
+        Runtime.FireflyBusy = true
+        setStatus("Auto Fireflies", "Nhat Moon Charm | " .. currentField.Name)
+        local collected = collectToken(looseMoonCharm, "FireflyMoonCharm")
+        Runtime.FireflyBusy = false
+        Runtime.FireflyPending = false
+        return collected
+    end
+    local firefly, field = MaterialSystem.FindFirefly()
+    if not firefly or not field then Runtime.FireflyPending = false return false end
+
+    Runtime.FireflyBusy = true
+    local handled = false
+    local budgetDeadline = os.clock() + math.max(3, tonumber(Config.FireflyFarmBudget) or 9)
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+        and firefly and field and os.clock() < budgetDeadline do
+        local position = objectPosition(firefly)
+        if not position or not fieldUnlocked(field.Name) then break end
+        Runtime.CurrentField = field.Name
+        Runtime.Digging = true
+        setStatus("Auto Fireflies", "Cho Firefly dap | " .. field.Name)
+        local moved = tweenTo(CFrame.new(position + Vector3.new(0, 1.5, 0)), Config.TokenTweenSpeed, "Firefly")
+        Runtime.FireflyCooldowns[firefly] = os.clock()
+            + math.max(0.5, tonumber(Config.FireflyRetryCooldown) or 1.25)
+        if moved then
+            handled = true
+            Runtime.FirefliesCollected += 1
+            -- Dung tren Firefly den khi no bat dau bay lai; day la dau hieu
+            -- touch da kich hoat va Moon Charm co the vua spawn.
+            local touchDeadline = os.clock() + math.max(0.5, tonumber(Config.FireflyTouchTimeout) or 2.5)
+            while firefly.Parent and not Runtime.MeteorPriorityActive and os.clock() < touchDeadline do
+                local velocity = firefly:FindFirstChild("BodyVelocity", true)
+                local speed = velocity and velocity.Velocity.Magnitude or math.huge
+                if speed > math.max(0, tonumber(Config.FireflyLandingVelocity) or 0.15) then break end
+                local _, humanoid = getCharacter(1)
+                if humanoid then humanoid:MoveTo(position) end
+                task.wait(0.08)
+            end
+            remoteCall("ToolCollect")
+
+            local tokenDeadline = math.min(budgetDeadline,
+                os.clock() + math.max(1, tonumber(Config.FireflyTokenWindow) or 3))
+            local moonCollected = false
+            repeat
+                local token = MaterialSystem.FindMoonCharmToken(field, position, 45)
+                if token then
+                    moonCollected = collectToken(token, "FireflyMoonCharm") or moonCollected
+                else
+                    task.wait(0.1)
+                end
+            until not Runtime.Running or Runtime.MeteorPriorityActive or os.clock() >= tokenDeadline
+            if not moonCollected and Config.AutoTokens then sweepTokens(1, "FireflyDrop") end
+        end
+        if Runtime.MeteorPriorityActive then break end
+        firefly, field = MaterialSystem.FindFirefly()
     end
     Runtime.Digging = false
-    return moved
+    Runtime.FireflyBusy = false
+    Runtime.FireflyPending = false
+    return handled
 end
+
+Runtime.ScanFirefly = MaterialSystem.FindFirefly
+Runtime.FarmFirefly = MaterialSystem.FarmFirefly
+
+-- Scanner nay chi doc NPCBees, khong chiem movement. Scheduler chinh se tam
+-- dung farmStep va xu ly Firefly o diem yield gan nhat, nen khong co hai tween
+-- cung tranh HumanoidRootPart.
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoFarmFireflies and not Runtime.FireflyBusy and not Runtime.MeteorPriorityActive then
+            local npcBees = workspace:FindFirstChild("NPCBees")
+            local exists = npcBees and npcBees:FindFirstChild("Firefly")
+            if exists then Runtime.LastFireflySeen = os.clock() end
+            if exists or os.clock() - Runtime.LastFireflySeen <= 5 then
+                local currentField = standingField()
+                local moonCharm = currentField and MaterialSystem.FindMoonCharmToken(currentField, nil, nil) or nil
+                local firefly = moonCharm and nil or MaterialSystem.FindFirefly()
+                Runtime.FireflyPending = moonCharm or firefly or false
+            else
+                -- Ban ngay khong scan toan bo Collectibles moi 0.25 giay.
+                Runtime.FireflyPending = false
+            end
+        elseif not Runtime.FireflyBusy then
+            Runtime.FireflyPending = false
+        end
+        task.wait(math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25))
+    end
+end)
 
 function MaterialSystem.FindVicious()
     local monsters = workspace:FindFirstChild("Monsters")
@@ -3454,6 +3599,7 @@ end
 function MaterialSystem.Work(entry)
     if not Config.AutoMaterials or not entry or not entry.RequiresMaterials then return false end
     if Runtime.MeteorPriorityActive then return false end
+    if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return true end
     local force = os.clock() - Runtime.LastBlenderCheck >= Config.BlenderCheckInterval
     if force then Runtime.LastBlenderCheck = os.clock() end
     local stats = MaterialSystem.Stats(force)
@@ -3745,23 +3891,26 @@ local function applyLowGraphics(enabled)
     local beeRoots = {Bees = true, NPCBees = true}
     local tokenRoots = {Collectibles = true}
     local flowerRoots = {Flowers = true}
+    local hiveRoots = {Honeycombs = true, HivePlatforms = true}
     local decorationRoots = {Decorations = true, Decor = true, Decoratives = true}
     local decorationPropNames = {pineapple = true, ["giant pineapple"] = true, ["pineapple decoration"] = true}
     local weatherRoots = {Particles = true, Effects = true, Clouds = true, Weather = true}
 
     local function visualGroups(object)
-        local beeVisual, tokenVisual, flowerVisual, decorationVisual, weatherVisual = false, false, false, false, false
+        local beeVisual, tokenVisual, flowerVisual, hiveVisual = false, false, false, false
+        local decorationVisual, weatherVisual = false, false
         local cursor = object
         while cursor and cursor ~= workspace do
             local name = cursor.Name
             if beeRoots[name] then beeVisual = true
             elseif tokenRoots[name] then tokenVisual = true
             elseif flowerRoots[name] then flowerVisual = true
+            elseif hiveRoots[name] then hiveVisual = true
             elseif decorationRoots[name] then decorationVisual = true
             elseif weatherRoots[name] then weatherVisual = true end
             cursor = cursor.Parent
         end
-        return beeVisual, tokenVisual, flowerVisual, decorationVisual, weatherVisual
+        return beeVisual, tokenVisual, flowerVisual, hiveVisual, decorationVisual, weatherVisual
     end
 
     local function disposableDecoration(object)
@@ -3800,18 +3949,22 @@ local function applyLowGraphics(enabled)
             disposable:Destroy()
             return
         end
-        local underBees, underTokens, underFlowers, underDecorations, weatherVisual = visualGroups(object)
+        local underBees, underTokens, underFlowers, underHives, underDecorations, weatherVisual = visualGroups(object)
         local beeVisual = Config.FixLagHideBees and underBees
         local hidden = beeVisual or (Config.FixLagHideTokens and underTokens)
             or (Config.FixLagHideFlowers and underFlowers)
+            or (Config.FixLagHideHives and underHives)
             or (Config.FixLagHideDecorations and underDecorations)
             or (Config.FixLagHideWeather and weatherVisual)
         local character = Player.Character
         local playerVisual = character and (object == character or object:IsDescendantOf(character))
-        if object:IsA("BasePart") then
+        if object:IsA("Model") then
+            if not playerVisual then pcall(function() object.LevelOfDetail = Enum.ModelLevelOfDetail.StreamingMesh end) end
+        elseif object:IsA("BasePart") then
             pcall(function()
                 object.CastShadow = false
                 object.Reflectance = 0
+                object.MaterialVariant = ""
                 -- Giu nguyen material cua meteor marker de detector fallback van
                 -- nhan ra Neon part; cung khong lam nhan vat local bi xam/plastic.
                 if Config.FixLagPlasticMaterials and not weatherVisual and not playerVisual then
@@ -3823,13 +3976,23 @@ local function applyLowGraphics(enabled)
                     object.LocalTransparencyModifier = 1
                     object.Transparency = 1
                 end
+                if object:IsA("Part") then
+                    object.TopSurface = Enum.SurfaceType.Smooth
+                    object.BottomSurface = Enum.SurfaceType.Smooth
+                end
             end)
             if object:IsA("MeshPart") then
                 pcall(function() object.RenderFidelity = Enum.RenderFidelity.Performance end)
                 if hidden or (Config.FixLagRemoveTextures and not playerVisual) then
                     pcall(function() object.TextureID = "" end)
                 end
+            elseif object:IsA("PartOperation") then
+                pcall(function() object.RenderFidelity = Enum.RenderFidelity.Performance end)
             end
+        elseif object:IsA("SpecialMesh") then
+            if Config.FixLagRemoveTextures and not playerVisual then object.TextureId = "" end
+        elseif object:IsA("SurfaceAppearance") then
+            if Config.FixLagRemoveTextures and not playerVisual then object:Destroy() end
         elseif object:IsA("Decal") or object:IsA("Texture") then
             if hidden or (Config.FixLagRemoveTextures and not playerVisual) then object.Transparency = 1 end
         elseif object:IsA("ParticleEmitter") then
@@ -4514,11 +4677,6 @@ local function progressionWork(reason, allowSideJobs)
         task.wait(0.05)
         return
     end
-    local ratio = pollenRatio()
-    if Config.AutoConvert and ratio >= Config.ConvertPercent then
-        convertPollen()
-        return
-    end
     if allowSideJobs == nil then allowSideJobs = Runtime.BootstrapComplete end
     if allowSideJobs then
         triggerMeteorIfReady()
@@ -4527,6 +4685,14 @@ local function progressionWork(reason, allowSideJobs)
             task.wait(0.05)
             return
         end
+        if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return end
+    end
+    local ratio = pollenRatio()
+    if Config.AutoConvert and ratio >= Config.ConvertPercent then
+        convertPollen()
+        return
+    end
+    if allowSideJobs then
         if Config.AutoQuest and maintainBearQuests() then return end
         if os.clock() - Runtime.LastSpecialEffectFarm >= Config.SpecialEffectPriorityInterval and farmFlowerEffect() then
             Runtime.LastSpecialEffectFarm = os.clock()
@@ -4689,6 +4855,8 @@ task.spawn(function()
                 task.wait(0.05)
                 return
             end
+
+            if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return end
 
             if Config.AutoProgression and os.clock() - Runtime.LastProgressMaintenance >= 30 then
                 Runtime.LastProgressMaintenance = os.clock()
