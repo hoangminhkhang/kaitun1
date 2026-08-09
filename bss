@@ -67,12 +67,22 @@ local DEFAULT_CONFIG = {
     AutoTokens = true,
     AutoMeteor = true,
     AutoTriggerMeteor = true,
+    MeteorPartFallback = false,
+    MeteorRequiredMythicTypes = 3,
+    MeteorSummonerCooldown = 79200,
+    MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
     AutoQuest = true,
     QuestNPCs = {"Black Bear", "Mother Bear", "Science Bear"},
     QuestNPCBeeRequirements = {["Science Bear"] = 10},
     QuestCheckInterval = 3,
     QuestInteractTimeout = 12,
     QuestFarmSeconds = 8,
+    ScienceQuestConfirmTimeout = 6,
+    AutoQuestMobs = true,
+    QuestMobFightTimeout = 24,
+    QuestMobSpawnWait = 12,
+    QuestMobSpawnGrace = 15,
+    QuestMobRecheckInterval = 20,
     AutoClaimBadges = true,
     BadgeClaimInterval = 1.25,
     AutoWealthClock = true,
@@ -257,7 +267,7 @@ local DEFAULT_CONFIG = {
     MeteorStayTime = 9,
     MeteorImpactLeadFraction = 0.6,
     MeteorFallbackLifetime = 5,
-    MeteorTriggerInterval = 900,
+    MeteorTriggerInterval = 60,
     SprinklerPlaceInterval = 8,
     MaxDeferredPurchasesPerPass = 1,
 }
@@ -280,7 +290,7 @@ local function merge(target, source)
     for key, value in pairs(source) do
         local replaceTable = key == "PromoCodes" or key == "BoostCodes" or key == "FieldByBees"
             or key == "ProgressionMilestones" or key == "SprinklerSequence"
-            or key == "QuestNPCs" or key == "BadgeNames" or key == "BlueBeeTypes"
+            or key == "QuestNPCs" or key == "BadgeNames" or key == "BlueBeeTypes" or key == "MythicBeeTypes"
             or key == "BestColorFields" or key == "LockedBlackBearFallbacks"
         if type(value) == "table" and type(target[key]) == "table" and not replaceTable then
             merge(target[key], value)
@@ -447,6 +457,7 @@ local Runtime = {
     LastSprinklerField = "",
     LastProgressMaintenance = -math.huge,
     LastMeteorTrigger = -math.huge,
+    NextMeteorTriggerCheck = 0,
     LastError = "",
     StatsRefreshInFlight = false,
     LastStats = nil,
@@ -481,6 +492,9 @@ local Runtime = {
     CurrentQuest = "",
     QuestFarming = false,
     QuestCurrentField = "",
+    CurrentQuestMob = "",
+    QuestMobRetryAt = {},
+    MonsterTypes = nil,
     NPCModuleError = "",
     FlowerEffectCooldown = setmetatable({}, {__mode = "k"}),
     Digging = false,
@@ -2119,6 +2133,31 @@ local function incompleteQuestObjectives(refresh)
     return objectives
 end
 
+Runtime.WaitForScienceQuest = function(previousQuest)
+    local deadline = os.clock() + math.max(2, tonumber(Config.ScienceQuestConfirmTimeout) or 6)
+    repeat
+        local scienceQuest
+        for _, quest in ipairs(activeBearQuests(true)) do
+            if quest.NPC == "Science Bear" then
+                scienceQuest = quest
+                if not previousQuest or quest.Name ~= previousQuest then break end
+            end
+        end
+        if scienceQuest and (not previousQuest or scienceQuest.Name ~= previousQuest) then
+            Runtime.CurrentQuest = scienceQuest.Name
+            local objectives = incompleteQuestObjectives(false)
+            local count = 0
+            for _, objective in ipairs(objectives) do
+                if objective.NPC == "Science Bear" and objective.Quest == scienceQuest.Name then count += 1 end
+            end
+            setStatus("Science quest", string.format("%s | scan %d objective", scienceQuest.Name, count))
+            return scienceQuest
+        end
+        task.wait(0.25)
+    until not Runtime.Running or Runtime.MeteorPriorityActive or os.clock() >= deadline
+    return nil
+end
+
 local function bestUnlockedColorField(color)
     local wanted = tostring(color)
     local configured = Config.BestColorFields[wanted] or {}
@@ -2133,12 +2172,195 @@ local function bestUnlockedColorField(color)
     return nil
 end
 
-local MONSTER_FIELDS = {
-    ["Ladybug"] = "Strawberry Field", ["Rhino Beetle"] = "Bamboo Field",
-    ["Spider"] = "Spider Field", ["Mantis"] = "Pine Tree Forest",
-    ["Scorpion"] = "Rose Field", ["Werewolf"] = "Cactus Field",
-    ["King Beetle"] = "Clover Field", ["Stump Snail"] = "Stump Field",
+-- Spawner names come from Workspace.MonsterSpawners (same source used by the
+-- game's timer UI). Cooldowns are fallbacks only; MonsterTypes is authoritative.
+Runtime.MobRoutes = {
+    ["Ladybug"] = {
+        Fields = {"Mushroom Field", "Clover Field", "Strawberry Field"},
+        Spawners = {"MushroomBush", "Ladybug Bush", "Ladybug Bush 2", "Ladybug Bush 3"}, Cooldown = 300,
+    },
+    ["Rhino Beetle"] = {
+        Fields = {"Blue Flower Field", "Clover Field", "Bamboo Field", "Pineapple Patch"},
+        Spawners = {"Rhino Bush", "Rhino Cave 1", "Rhino Cave 2", "Rhino Cave 3", "PineappleBeetle"}, Cooldown = 300,
+    },
+    ["Spider"] = {Fields = {"Spider Field"}, Spawners = {"Spider Cave"}, Cooldown = 1800},
+    ["Mantis"] = {
+        Fields = {"Pineapple Patch", "Pine Tree Forest"},
+        Spawners = {"ForestMantis1", "ForestMantis2", "PineappleMantis1"}, Cooldown = 1200,
+    },
+    ["Scorpion"] = {Fields = {"Rose Field"}, Spawners = {"RoseBush", "RoseBush2"}, Cooldown = 1200},
+    ["Werewolf"] = {
+        Fields = {"Cactus Field", "Pumpkin Patch", "Pine Tree Forest"},
+        Spawners = {"WerewolfCave"}, Cooldown = 3600,
+    },
+    ["King Beetle"] = {Fields = {"Clover Field"}, Spawners = {"King Beetle Cave"}, Cooldown = 86400},
+    ["Tunnel Bear"] = {Fields = {}, Spawners = {"TunnelBear"}, Cooldown = 172800, AllowNoField = true},
+    ["Stump Snail"] = {Fields = {"Stump Field"}, Spawners = {"StumpSnail"}, Cooldown = 345600},
 }
+
+Runtime.NormalizeMobType = function(value)
+    local normalized = string.lower(tostring(value or "")):gsub("[^%w]", "")
+    normalized = normalized:gsub("ladybugs$", "ladybug"):gsub("spiders$", "spider")
+        :gsub("mantises$", "mantis"):gsub("scorpions$", "scorpion")
+        :gsub("werewolves$", "werewolf"):gsub("rhinobeetles$", "rhinobeetle")
+    return normalized
+end
+
+Runtime.QuestMobRoute = function(value)
+    local wanted = Runtime.NormalizeMobType(value)
+    for name, route in pairs(Runtime.MobRoutes) do
+        if Runtime.NormalizeMobType(name) == wanted then return name, route end
+    end
+    return nil
+end
+
+Runtime.FindLiveQuestMob = function(mobType)
+    local canonical = Runtime.QuestMobRoute(mobType)
+    local monsters = workspace:FindFirstChild("Monsters")
+    if not canonical or not monsters then return nil end
+    local wanted = Runtime.NormalizeMobType(canonical)
+    for _, mob in ipairs(monsters:GetChildren()) do
+        local humanoid = mob:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Health > 0 and objectPosition(mob)
+            and string.find(Runtime.NormalizeMobType(mob.Name), wanted, 1, true) then return mob end
+    end
+    return nil
+end
+
+Runtime.NearestMobField = function(position, route)
+    local best, bestDistance
+    for _, fieldName in ipairs(route.Fields or {}) do
+        if fieldUnlocked(fieldName) then
+            local field = findField(fieldName)
+            local point = field and objectPosition(field)
+            local distance = position and point and (point - position).Magnitude or math.huge
+            if field and (not best or distance < bestDistance) then
+                best, bestDistance = field, distance
+            end
+        end
+    end
+    return best
+end
+
+Runtime.QuestMobSpawnerReady = function(spawner, route, stats)
+    if not spawner then return false, math.huge end
+    local attachment = spawner:FindFirstChild("Attachment") or spawner:FindFirstChild("TimerAttachment")
+    local timerGui = attachment and attachment:FindFirstChild("TimerGui")
+    local timerLabel = timerGui and timerGui:FindFirstChild("TimerLabel")
+    if timerLabel and timerLabel:IsA("GuiObject") and timerLabel.Visible == false then return true, 0 end
+
+    if Runtime.MonsterTypes == nil then
+        local module = ReplicatedStorage:FindFirstChild("MonsterTypes")
+        local ok, value = false, nil
+        if module then ok, value = pcall(require, module) end
+        if ok and type(value) == "table" then Runtime.MonsterTypes = value else Runtime.MonsterTypes = false end
+    end
+    local cooldown = tonumber(route.Cooldown) or 300
+    local typeValue = spawner:FindFirstChild("MonsterType")
+    if type(Runtime.MonsterTypes) == "table" and type(Runtime.MonsterTypes.Get) == "function" and typeValue then
+        local ok, definition = pcall(Runtime.MonsterTypes.Get, typeValue.Value)
+        local moduleCooldown = ok and type(definition) == "table" and definition.Stats
+            and tonumber(definition.Stats.RespawnCooldown) or nil
+        if moduleCooldown then cooldown = moduleCooldown end
+    end
+    local reduction = 0
+    pcall(function() reduction = tonumber(stats.ModifierCaches.Value.MonsterCooldownReduction._) or 0 end)
+    cooldown *= math.clamp(1 - reduction, 0.05, 1)
+    local monsterTimes = type(stats) == "table" and stats.MonsterTimes or nil
+    local lastKill = type(monsterTimes) == "table" and tonumber(monsterTimes[spawner.Name]) or nil
+    if not lastKill then return timerLabel == nil or not timerLabel.Visible, 0 end
+    local remaining = cooldown + math.max(0, tonumber(Config.QuestMobSpawnGrace) or 15) - (os.time() - lastKill)
+    return remaining <= 0, math.max(0, remaining)
+end
+
+Runtime.FindQuestMobJob = function(mobType)
+    if not Config.AutoQuestMobs or Runtime.MeteorPriorityActive then return nil end
+    local canonical, route = Runtime.QuestMobRoute(mobType)
+    if not canonical then
+        -- Some quest definitions use a generic "Monsters" target. In that case,
+        -- pick the first currently available route instead of farming a random field.
+        local generic = Runtime.NormalizeMobType(mobType)
+        if generic ~= "" and generic ~= "monster" and generic ~= "monsters" and generic ~= "any" then return nil end
+        for routeName in pairs(Runtime.MobRoutes) do
+            local job = Runtime.FindQuestMobJob(routeName)
+            if job then return job end
+        end
+        return nil
+    end
+    local live = Runtime.FindLiveQuestMob(canonical)
+    local livePosition = live and objectPosition(live)
+    if live then
+        local field = Runtime.NearestMobField(livePosition, route)
+        if field or route.AllowNoField then return {Name = canonical, Route = route, Live = live, Field = field} end
+    end
+    if (Runtime.QuestMobRetryAt[canonical] or 0) > os.clock() then return nil end
+
+    local spawners = workspace:FindFirstChild("MonsterSpawners")
+    local stats = getStats(false) or {}
+    local shortest = math.huge
+    for _, spawnerName in ipairs(route.Spawners or {}) do
+        local spawner = spawners and spawners:FindFirstChild(spawnerName)
+        if spawner then
+            local ready, remaining = Runtime.QuestMobSpawnerReady(spawner, route, stats)
+            shortest = math.min(shortest, remaining or math.huge)
+            if ready then
+                local field = Runtime.NearestMobField(objectPosition(spawner), route)
+                if field or route.AllowNoField then
+                    return {Name = canonical, Route = route, Spawner = spawner, Field = field}
+                end
+            end
+        end
+    end
+    local retry = shortest < math.huge and shortest or (tonumber(Config.QuestMobRecheckInterval) or 20)
+    Runtime.QuestMobRetryAt[canonical] = os.clock() + math.clamp(retry, 3, 60)
+    return nil
+end
+
+Runtime.FarmQuestMob = function(objective, seconds)
+    local taskData = objective and objective.Task or nil
+    local job = taskData and Runtime.FindQuestMobJob(taskData.MonsterType) or nil
+    if not job then return false, false end
+    Runtime.CurrentQuest = objective.Quest
+    Runtime.CurrentQuestMob = job.Name
+    Runtime.CurrentField = job.Field and job.Field.Name or ""
+    Runtime.QuestCurrentField = Runtime.CurrentField
+    Runtime.QuestFarming = true
+    Runtime.Digging = true
+    setStatus("Kill quest mob", string.format("%s | %s", objective.Quest, job.Name))
+
+    local destination = job.Field and fieldPoint(job.Field) or objectPosition(job.Spawner or job.Live)
+    if destination and not tweenTo(CFrame.new(destination + Vector3.new(0, 3, 0)), Config.TweenSpeed, "QuestMob") then
+        Runtime.Digging, Runtime.QuestFarming = false, false
+        return false, true
+    end
+    local deadline = os.clock() + math.max(6, tonumber(seconds) or tonumber(Config.QuestMobFightTimeout) or 24)
+    local spawnDeadline = os.clock() + math.max(2, tonumber(Config.QuestMobSpawnWait) or 12)
+    local sawLive = false
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
+        local live = Runtime.FindLiveQuestMob(job.Name)
+        if live then
+            sawLive = true
+            local position = objectPosition(live)
+            local _, humanoid, root = getCharacter(1)
+            if position and humanoid and root and (root.Position - position).Magnitude > Config.MobScanRadius then
+                tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "QuestMob")
+            elseif humanoid and humanoid.FloorMaterial ~= Enum.Material.Air then
+                humanoid.Jump = true
+            end
+            remoteCall("ToolCollect")
+        elseif sawLive or os.clock() >= spawnDeadline then
+            break
+        end
+        task.wait(0.2)
+    end
+    Runtime.Digging = false
+    Runtime.QuestFarming = false
+    Runtime.CurrentQuestMob = ""
+    Runtime.QuestMobRetryAt[job.Name] = os.clock() + (sawLive and 2 or math.max(5, tonumber(Config.QuestMobRecheckInterval) or 20))
+    if sawLive and Config.AutoTokens then sweepTokens(2, "QuestMobDrop") end
+    task.defer(function() getStats(true) end)
+    return sawLive, true
+end
 
 local function lockedBlackBearFallback(objective)
     if not objective or objective.NPC ~= "Black Bear" then return nil end
@@ -2162,8 +2384,8 @@ local function objectiveField(objective)
     if color and Config.BestColorFields[tostring(color)] then return bestUnlockedColorField(color), false, false end
     local kind = tostring(taskData.Type or "")
     if kind == "Defeat Monsters" then
-        local name = MONSTER_FIELDS[taskData.MonsterType]
-        return fieldUnlocked(name) and name or nil, true, false
+        -- Kill objectives are handled by the cooldown-aware mob scheduler only.
+        return nil, true, false
     end
     if kind == "Collect Pollen" or kind == "Collect Goo" then
         return bestUnlockedColorField("White") or selectedFieldName(), false, false
@@ -2179,7 +2401,7 @@ local function fieldAdvancesObjective(fieldName, objective)
     end
     local color = taskData.Color or taskData.Tag
     if color and Config.BestColorFields[tostring(color)] then return FIELD_COLORS[fieldName] == tostring(color) end
-    if taskData.Type == "Defeat Monsters" then return MONSTER_FIELDS[taskData.MonsterType] == fieldName end
+    if taskData.Type == "Defeat Monsters" then return false end
     return taskData.Type == "Collect Pollen" or taskData.Type == "Collect Goo"
 end
 
@@ -2309,10 +2531,11 @@ local function maintainBearQuests()
     for _, npcName in ipairs(Config.QuestNPCs) do
         local requiredBees = tonumber((Config.QuestNPCBeeRequirements or {})[npcName]) or 0
         if currentBees < requiredBees then continue end
-        local hasQuest, allDone = false, true
+        local hasQuest, allDone, previousQuest = false, true, nil
         for _, quest in ipairs(active) do
             if quest.NPC == npcName then
                 hasQuest = true
+                previousQuest = previousQuest or quest.Name
                 if next(quest.Progress) == nil and #(quest.Info.Tasks or {}) > 0 then allDone = false end
                 for _, progress in pairs(quest.Progress) do
                     if (tonumber(progress[1]) or 0) < 1 then allDone = false break end
@@ -2321,7 +2544,16 @@ local function maintainBearQuests()
         end
         if not hasQuest or allDone then
             local ok = interactQuestNPC(npcName)
-            if not ok then setStatus("Quest NPC loi", npcName .. " | " .. Runtime.NPCModuleError) end
+            if not ok then
+                setStatus("Quest NPC loi", npcName .. " | " .. Runtime.NPCModuleError)
+            elseif npcName == "Science Bear" then
+                local confirmed = Runtime.WaitForScienceQuest(previousQuest)
+                if not confirmed then
+                    Runtime.LastQuestCheck = -math.huge
+                    Runtime.NPCModuleError = "Science quest chua replicate - se scan lai"
+                    setStatus("Cho Science quest", Runtime.NPCModuleError)
+                end
+            end
             return true
         end
     end
@@ -2333,6 +2565,12 @@ local function questWork(seconds)
     if maintainBearQuests() then return true end
     local objectives = incompleteQuestObjectives(true)
     Runtime.CurrentQuest = objectives[1] and objectives[1].Quest or ""
+    for _, objective in ipairs(objectives) do
+        if objective.Task and tostring(objective.Task.Type) == "Defeat Monsters" then
+            local _, attempted = Runtime.FarmQuestMob(objective, Config.QuestMobFightTimeout)
+            if attempted then return true end
+        end
+    end
     local plan = chooseQuestField(objectives)
     if not plan then return false end
     local field = findField(plan.Name)
@@ -3221,14 +3459,15 @@ if localFX and localFX:IsA("RemoteEvent") then
 end
 
 local function isMeteorMarker(object)
-    return object and object:IsA("BasePart") and object.Name == "Part"
+    local particlesFolder = workspace:FindFirstChild("Particles")
+    return object and object.Parent == particlesFolder and object:IsA("BasePart") and object.Name == "Part"
         and object.BrickColor == BrickColor.new("Institutional white")
         and object.Material == Enum.Material.Neon
 end
 
 local function trackMeteorMarker(object)
     task.defer(function()
-        if not object or not object.Parent or not isMeteorMarker(object) then return end
+        if not Config.MeteorPartFallback or not object or not object.Parent or not isMeteorMarker(object) then return end
         enqueueMeteor({
             Position = object.Position,
             ReadyAt = os.clock(),
@@ -3240,16 +3479,49 @@ local function trackMeteorMarker(object)
 end
 
 local particles = workspace:FindFirstChild("Particles")
-if particles then
-    for _, object in ipairs(particles:GetChildren()) do trackMeteorMarker(object) end
+if Config.MeteorPartFallback and particles then
+    -- Do not scan old white Neon parts at startup: several unrelated effects use
+    -- the same generic Part signature and used to create fake meteor jobs.
     connect(particles.ChildAdded, trackMeteorMarker)
 end
 
 local function triggerMeteorIfReady()
     if not Config.AutoTriggerMeteor then return end
-    if os.clock() - Runtime.LastMeteorTrigger < Config.MeteorTriggerInterval then return end
-    Runtime.LastMeteorTrigger = os.clock()
-    setStatus("Auto meteor", "Thu kich hoat Mythic Meteor Shower")
+    local now = os.clock()
+    if now < (Runtime.NextMeteorTriggerCheck or 0) then return end
+    local checkInterval = math.max(30, tonumber(Config.MeteorTriggerInterval) or 60)
+    Runtime.NextMeteorTriggerCheck = now + checkInterval
+
+    -- The machine is locked until 3 distinct Mythic bee types are discovered.
+    -- Listening to server-wide showers remains enabled for every account.
+    local required = math.max(1, tonumber(Config.MeteorRequiredMythicTypes) or 3)
+    if type(Runtime.MythicDiscoveryCount) ~= "function"
+        or Runtime.MythicDiscoveryCount(false) < required then return end
+
+    local cooldown = math.max(60, tonumber(Config.MeteorSummonerCooldown) or 79200)
+    local toy = workspace:FindFirstChild("Toys")
+    toy = toy and toy:FindFirstChild("Mythic Meteor Shower")
+    local cooldownValue = toy and toy:FindFirstChild("Cooldown")
+    if cooldownValue and cooldownValue:IsA("ValueBase") then
+        cooldown = math.max(60, tonumber(cooldownValue.Value) or cooldown)
+    end
+    local stats = getStats(false)
+    local toyTimes = type(stats) == "table" and stats.ToyTimes or nil
+    local lastUse = type(toyTimes) == "table" and tonumber(toyTimes["Mythic Meteor Shower"]) or nil
+    if lastUse then
+        local remaining = cooldown - (os.time() - lastUse)
+        if remaining > 0 then
+            Runtime.NextMeteorTriggerCheck = now + math.max(30, math.min(remaining, checkInterval))
+            return
+        end
+    elseif now - Runtime.LastMeteorTrigger < cooldown then
+        return
+    end
+
+    Runtime.LastMeteorTrigger = now
+    Runtime.NextMeteorTriggerCheck = now + cooldown
+    -- Trying the summoner is not proof that a shower exists. Only the actual
+    -- MythicMeteor LocalFX event is allowed to change status/claim movement.
     remoteCall("ToyEvent", "Mythic Meteor Shower")
 end
 
@@ -3264,8 +3536,15 @@ local function handleMeteor()
     end
 
     local now = os.clock()
-    while #Runtime.MeteorQueue > 0 and Runtime.MeteorQueue[1].ExpireAt <= now do
-        table.remove(Runtime.MeteorQueue, 1)
+    while #Runtime.MeteorQueue > 0 do
+        local queued = Runtime.MeteorQueue[1]
+        local invalidFallback = queued.Source == "NeonPart"
+            and (not queued.Marker or not queued.Marker.Parent or not isMeteorMarker(queued.Marker))
+        if queued.ExpireAt <= now or invalidFallback then
+            table.remove(Runtime.MeteorQueue, 1)
+        else
+            break
+        end
     end
     local meteor = Runtime.MeteorQueue[1]
     if not meteor then return finish(false) end
@@ -3678,6 +3957,42 @@ function Runtime.BlueDiscoveryCount(refresh)
     end
     local function mark(value)
         if Runtime.IsBlueBeeType(value) then found[normalize(value)] = true end
+    end
+    local function scan(key, value)
+        if type(key) == "string" and value ~= false and value ~= 0 then mark(key) end
+        if type(value) == "string" then
+            mark(value)
+        elseif type(value) == "table" and not visited[value] then
+            visited[value] = true
+            mark(value.Type or value.BeeType or value.Name)
+            for childKey, child in pairs(value) do scan(childKey, child) end
+        end
+    end
+    scan(nil, discovered)
+    local count = 0
+    for _ in pairs(found) do count += 1 end
+    return count, found
+end
+
+function Runtime.IsMythicBeeType(value)
+    local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
+    for _, beeName in ipairs(Config.MythicBeeTypes or {}) do
+        local wanted = string.lower(tostring(beeName)):gsub("[^%w]", ""):gsub("bee$", "")
+        if normalized == wanted then return true end
+    end
+    return false
+end
+
+function Runtime.MythicDiscoveryCount(refresh)
+    local stats = getStats(refresh == true)
+    local discovered = type(stats) == "table" and stats.DiscoveredBees or nil
+    if type(discovered) ~= "table" then return 0, {} end
+    local found, visited = {}, {}
+    local function normalize(value)
+        return string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
+    end
+    local function mark(value)
+        if Runtime.IsMythicBeeType(value) then found[normalize(value)] = true end
     end
     local function scan(key, value)
         if type(key) == "string" and value ~= false and value ~= 0 then mark(key) end
