@@ -72,7 +72,8 @@ local DEFAULT_CONFIG = {
     MeteorSummonerCooldown = 79200,
     MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
     AutoQuest = true,
-    QuestNPCs = {"Black Bear", "Mother Bear", "Science Bear"},
+    QuestNPCs = {"Black Bear", "Science Bear"},
+    QuestFarmPriority = {"Black Bear", "Science Bear"},
     QuestNPCBeeRequirements = {["Science Bear"] = 10},
     QuestCheckInterval = 3,
     QuestInteractTimeout = 12,
@@ -102,6 +103,11 @@ local DEFAULT_CONFIG = {
     AvoidMob = true,
     MobScanRadius = 55,
     MobJumpInterval = 0.12,
+    AvoidMobDamageThreshold = 0.5,
+    AvoidMobRelocateCooldown = 2.5,
+    AvoidMobRelocateDistance = 14,
+    AvoidMobArrivalDistance = 5,
+    AvoidMobRelocateTimeout = 4,
     AutoMaterials = true,
     AutoBlender = true,
     AutoFarmFireflies = true,
@@ -170,11 +176,6 @@ local DEFAULT_CONFIG = {
         White = {"Pumpkin Patch", "Cactus Field", "Clover Field", "Spider Field", "Dandelion Field", "Sunflower Field"},
         Red = {"Rose Field", "Strawberry Field", "Mushroom Field"},
         Blue = {"Pine Tree Forest", "Bamboo Field", "Blue Flower Field"},
-    },
-    LockedBlackBearFallbacks = {
-        {MinBees = 1, MaxBees = 5, Field = "Sunflower Field"},
-        {MinBees = 5, MaxBees = 15, Field = "Bamboo Field"},
-        {MinBees = 15, MaxBees = 25, Field = "Pine Tree Forest"},
     },
     ProgressionMilestones = {
         {TargetBees = 5, Items = {
@@ -290,8 +291,8 @@ local function merge(target, source)
     for key, value in pairs(source) do
         local replaceTable = key == "PromoCodes" or key == "BoostCodes" or key == "FieldByBees"
             or key == "ProgressionMilestones" or key == "SprinklerSequence"
-            or key == "QuestNPCs" or key == "BadgeNames" or key == "BlueBeeTypes" or key == "MythicBeeTypes"
-            or key == "BestColorFields" or key == "LockedBlackBearFallbacks"
+            or key == "QuestNPCs" or key == "QuestFarmPriority" or key == "BadgeNames"
+            or key == "BlueBeeTypes" or key == "MythicBeeTypes" or key == "BestColorFields"
         if type(value) == "table" and type(target[key]) == "table" and not replaceTable then
             merge(target[key], value)
         else
@@ -302,6 +303,10 @@ local function merge(target, source)
 end
 
 local Config = merge(deepCopy(DEFAULT_CONFIG), ENV.BSS_KAITUN_CONFIG or {})
+-- Mother Bear da bi loai khoi kaitun. Ghi de danh sach cu trong getgenv/config
+-- de script khong tu nhan hoac farm Mother Bear sau khi cap nhat.
+Config.QuestNPCs = {"Black Bear", "Science Bear"}
+Config.QuestFarmPriority = {"Black Bear", "Science Bear"}
 
 -- Requirements are kept in one table so the purchase scheduler, material UI and
 -- Blender planner all use the same target. Keys match PlayerStats.Eggs and the
@@ -499,6 +504,13 @@ local Runtime = {
     FlowerEffectCooldown = setmetatable({}, {__mode = "k"}),
     Digging = false,
     AvoidingMob = false,
+    MobHoldPosition = false,
+    MobRelocating = false,
+    MobRelocateTarget = false,
+    MobRelocateUntil = 0,
+    MobLastHumanoid = false,
+    MobLastHealth = false,
+    MobLastDamageAt = -math.huge,
     MaterialCombat = false,
     MaterialTarget = "",
     MaterialName = "",
@@ -864,8 +876,12 @@ local function tweenTo(target, speed, owner)
             if walkingInsideField and Runtime.AvoidingMob then
                 -- Thoi gian dung nhay ne mob khong duoc tinh vao timeout MoveTo.
                 walkDeadline += now - lastWalkTick
-                if not mobPaused then
-                    mobPaused = true
+                mobPaused = true
+                if Runtime.MobRelocating and typeof(Runtime.MobRelocateTarget) == "Vector3" then
+                    -- Avoid-Mob worker va Smart Move cung ra lenh ve mot dich, tranh
+                    -- MoveTo cua route token/field keo nguoi choi nguoc lai vi tri nguy hiem.
+                    humanoid:MoveTo(Runtime.MobRelocateTarget)
+                else
                     Runtime.MobHoldPosition = Runtime.MobHoldPosition or root.Position
                     humanoid:Move(Vector3.zero, false)
                     humanoid:MoveTo(Runtime.MobHoldPosition)
@@ -949,6 +965,12 @@ local function cancelMovement()
     Runtime.AvoidingMob = false
     Runtime.MaterialCombat = false
     Runtime.MobHoldPosition = nil
+    Runtime.MobRelocating = false
+    Runtime.MobRelocateTarget = nil
+    Runtime.MobRelocateUntil = 0
+    Runtime.MobLastHumanoid = nil
+    Runtime.MobLastHealth = nil
+    Runtime.MobLastDamageAt = -math.huge
     restoreFieldMoveSpeed()
     releaseTweenRoot()
 end
@@ -2362,42 +2384,31 @@ Runtime.FarmQuestMob = function(objective, seconds)
     return sawLive, true
 end
 
-local function lockedBlackBearFallback(objective)
-    if not objective or objective.NPC ~= "Black Bear" then return nil end
-    local count = beeCount()
-    for _, rule in ipairs(Config.LockedBlackBearFallbacks or {}) do
-        local minimum = tonumber(rule.MinBees) or 0
-        local maximum = tonumber(rule.MaxBees) or math.huge
-        if count >= minimum and count < maximum and fieldUnlocked(rule.Field) then return rule.Field end
-    end
-    return nil
-end
-
 local function objectiveField(objective)
     local taskData = objective.Task
     if taskData.Zone then
-        if fieldUnlocked(taskData.Zone) then return taskData.Zone, true, false end
-        local fallback = lockedBlackBearFallback(objective)
-        return fallback, false, fallback ~= nil
+        if fieldUnlocked(taskData.Zone) then return taskData.Zone, true end
+        -- Farm o field thay the khong lam tang objective yeu cau dung Zone.
+        -- Bo qua objective bi khoa de planner co the chuyen sang Science Bear.
+        return nil, true
     end
     local color = taskData.Color or taskData.Tag
-    if color and Config.BestColorFields[tostring(color)] then return bestUnlockedColorField(color), false, false end
+    if color and Config.BestColorFields[tostring(color)] then return bestUnlockedColorField(color), false end
     local kind = tostring(taskData.Type or "")
     if kind == "Defeat Monsters" then
         -- Kill objectives are handled by the cooldown-aware mob scheduler only.
-        return nil, true, false
+        return nil, true
     end
     if kind == "Collect Pollen" or kind == "Collect Goo" then
-        return bestUnlockedColorField("White") or selectedFieldName(), false, false
+        return bestUnlockedColorField("White") or selectedFieldName(), false
     end
-    return nil, false, false
+    return nil, false
 end
 
 local function fieldAdvancesObjective(fieldName, objective)
     local taskData = objective.Task
     if taskData.Zone then
-        if taskData.Zone == fieldName then return true end
-        return not fieldUnlocked(taskData.Zone) and lockedBlackBearFallback(objective) == fieldName
+        return taskData.Zone == fieldName and fieldUnlocked(taskData.Zone)
     end
     local color = taskData.Color or taskData.Tag
     if color and Config.BestColorFields[tostring(color)] then return FIELD_COLORS[fieldName] == tostring(color) end
@@ -2407,15 +2418,18 @@ end
 
 local function chooseQuestField(objectives)
     local candidates = {}
+    local npcRanks = {}
+    for index, npcName in ipairs(Config.QuestFarmPriority or Config.QuestNPCs or {}) do
+        npcRanks[npcName] = index
+    end
     for _, objective in ipairs(objectives) do
-        local name, explicit, fallback = objectiveField(objective)
+        local name, explicit = objectiveField(objective)
         if name and fieldUnlocked(name) then
             candidates[name] = candidates[name] or {
-                Name = name, Score = 0, Objectives = {}, Explicit = false, Fallback = false, FallbackFor = nil,
+                Name = name, Score = 0, Objectives = {}, Explicit = false,
+                NPCRank = math.huge, PrimaryObjective = nil,
             }
             candidates[name].Explicit = candidates[name].Explicit or explicit
-            candidates[name].Fallback = candidates[name].Fallback or fallback
-            if fallback and not candidates[name].FallbackFor then candidates[name].FallbackFor = objective.Task.Zone end
         end
     end
     for _, candidate in pairs(candidates) do
@@ -2423,6 +2437,11 @@ local function chooseQuestField(objectives)
             if fieldAdvancesObjective(candidate.Name, objective) then
                 table.insert(candidate.Objectives, objective)
                 candidate.Score += 10 + (objective.Task.Zone and 5 or 0)
+                local rank = npcRanks[objective.NPC] or 999
+                if rank < candidate.NPCRank then
+                    candidate.NPCRank = rank
+                    candidate.PrimaryObjective = objective
+                end
             end
         end
     end
@@ -2430,7 +2449,10 @@ local function chooseQuestField(objectives)
     local best
     for _, candidate in pairs(candidates) do
         if current and current.Name == candidate.Name then candidate.Score += 8 end
-        if not best or candidate.Score > best.Score then best = candidate end
+        if not best or candidate.NPCRank < best.NPCRank
+            or (candidate.NPCRank == best.NPCRank and candidate.Score > best.Score) then
+            best = candidate
+        end
     end
     return best
 end
@@ -2564,27 +2586,32 @@ local function questWork(seconds)
     if not Config.AutoQuest then return false end
     if maintainBearQuests() then return true end
     local objectives = incompleteQuestObjectives(true)
-    Runtime.CurrentQuest = objectives[1] and objectives[1].Quest or ""
-    for _, objective in ipairs(objectives) do
-        if objective.Task and tostring(objective.Task.Type) == "Defeat Monsters" then
-            local _, attempted = Runtime.FarmQuestMob(objective, Config.QuestMobFightTimeout)
-            if attempted then return true end
+    -- Khong hien objective dau danh sach neu no dang bi khoa; UI chi hien quest
+    -- ma scheduler thuc su dang lam.
+    Runtime.CurrentQuest = ""
+    Runtime.QuestCurrentField = ""
+    local plan = chooseQuestField(objectives)
+    local planRank = plan and plan.NPCRank or math.huge
+    -- Mob objective cung phai ton trong thu tu NPC. Vi du Science dang co
+    -- objective Science farm duoc thi cac job ngoai thu tu khong duoc chen ngang.
+    for rank, npcName in ipairs(Config.QuestFarmPriority or Config.QuestNPCs or {}) do
+        if rank > planRank then break end
+        for _, objective in ipairs(objectives) do
+            if objective.NPC == npcName and objective.Task
+                and tostring(objective.Task.Type) == "Defeat Monsters" then
+                local _, attempted = Runtime.FarmQuestMob(objective, Config.QuestMobFightTimeout)
+                if attempted then return true end
+            end
         end
     end
-    local plan = chooseQuestField(objectives)
     if not plan then return false end
     local field = findField(plan.Name)
     if not field or not fieldUnlocked(plan.Name) then return false end
-    local first = plan.Objectives[1]
+    local first = plan.PrimaryObjective or plan.Objectives[1]
     Runtime.CurrentQuest = first and first.Quest or Runtime.CurrentQuest
     Runtime.QuestCurrentField = plan.Name
     Runtime.QuestFarming = true
-    local detail
-    if plan.Fallback then
-        detail = string.format("%s | fallback %s | field khoa: %s", Runtime.CurrentQuest, plan.Name, tostring(plan.FallbackFor))
-    else
-        detail = string.format("%s | %s | %d objective", Runtime.CurrentQuest, plan.Name, #plan.Objectives)
-    end
+    local detail = string.format("%s | %s | %d objective", Runtime.CurrentQuest, plan.Name, #plan.Objectives)
     local ok = farmStep(seconds or Config.QuestFarmSeconds, field, "Farm quest", detail)
     Runtime.QuestFarming = false
     return ok
@@ -2675,16 +2702,90 @@ Runtime.ScanMob = function()
     return nearbyLiveMob(field)
 end
 
+-- Khi bi danh, uu tien rut ve tam field. Neu nhan vat da o gan tam thi
+-- chon mot diem khac van nam trong FlowerZone va xa mob hon de khong nhay
+-- mai tren dung hitbox nguy hiem.
+Runtime.FindMobEscapePosition = function(field, rootPosition, mob)
+    if not field or not rootPosition then return nil end
+    local center = objectPosition(field)
+    if field:IsA("BasePart") then
+        center = (field.CFrame * CFrame.new(0, field.Size.Y / 2 + 3, 0)).Position
+    end
+    if not center then return nil end
+
+    local arrival = math.max(2, tonumber(Config.AvoidMobArrivalDistance) or 5)
+    if (rootPosition - center).Magnitude > arrival then return center end
+
+    local mobPosition = objectPosition(mob)
+    local desiredTravel = math.max(arrival + 1, tonumber(Config.AvoidMobRelocateDistance) or 14)
+    local best, bestScore
+    for _ = 1, 7 do
+        local candidate = fieldPoint(field)
+        if candidate then
+            local travel = (candidate - rootPosition).Magnitude
+            local separation = mobPosition and (candidate - mobPosition).Magnitude or 0
+            local score = separation + math.min(travel, desiredTravel * 2) * 0.35
+            if travel >= math.min(desiredTravel * 0.6, 6) and (not bestScore or score > bestScore) then
+                best, bestScore = candidate, score
+            end
+        end
+    end
+    return best or center
+end
+
 task.spawn(function()
     while Runtime.Running do
         if Config.AvoidMob and Runtime.Digging and not Runtime.MeteorPriorityActive
             and not Runtime.MaterialCombat and Runtime.CurrentField ~= "" then
             local field = findField(Runtime.CurrentField)
             local mob = nearbyLiveMob(field)
+            local _, humanoid, root = getCharacter(1)
+            local damaged = false
+            if humanoid then
+                if Runtime.MobLastHumanoid ~= humanoid then
+                    Runtime.MobLastHumanoid = humanoid
+                    Runtime.MobLastHealth = humanoid.Health
+                else
+                    local previousHealth = tonumber(Runtime.MobLastHealth) or humanoid.Health
+                    damaged = previousHealth - humanoid.Health
+                        >= math.max(0.1, tonumber(Config.AvoidMobDamageThreshold) or 0.5)
+                    Runtime.MobLastHealth = humanoid.Health
+                end
+            end
             Runtime.AvoidingMob = mob ~= nil
-            if mob then
-                local _, humanoid, root = getCharacter(1)
-                if humanoid and root and not root.Anchored then
+            if mob and humanoid and root and not root.Anchored then
+                local now = os.clock()
+                local relocateCooldown = math.max(0.5, tonumber(Config.AvoidMobRelocateCooldown) or 2.5)
+                if damaged and now - Runtime.MobLastDamageAt >= relocateCooldown then
+                    local escape = Runtime.FindMobEscapePosition(field, root.Position, mob)
+                    if escape and (escape - root.Position).Magnitude > 2 then
+                        Runtime.MobLastDamageAt = now
+                        Runtime.MobRelocating = true
+                        Runtime.MobRelocateTarget = escape
+                        Runtime.MobRelocateUntil = now
+                            + math.max(1.5, tonumber(Config.AvoidMobRelocateTimeout) or 4)
+                        Runtime.MobHoldPosition = nil
+                        humanoid:MoveTo(escape)
+                        setStatus("Avoid mob", "Bi damage - doi vi tri trong " .. field.Name)
+                    end
+                end
+
+                if Runtime.MobRelocating and typeof(Runtime.MobRelocateTarget) == "Vector3" then
+                    local arrived = (root.Position - Runtime.MobRelocateTarget).Magnitude
+                        <= math.max(2, tonumber(Config.AvoidMobArrivalDistance) or 5)
+                    if arrived or now >= Runtime.MobRelocateUntil then
+                        Runtime.MobRelocating = false
+                        Runtime.MobRelocateTarget = nil
+                        Runtime.MobRelocateUntil = 0
+                        Runtime.MobHoldPosition = root.Position
+                        humanoid:Move(Vector3.zero, false)
+                        humanoid:MoveTo(Runtime.MobHoldPosition)
+                        if humanoid.FloorMaterial ~= Enum.Material.Air then humanoid.Jump = true end
+                    else
+                        -- Dang rut khoi diem bi danh: chi di bo, den diem an toan moi nhay tiep.
+                        humanoid:MoveTo(Runtime.MobRelocateTarget)
+                    end
+                else
                     Runtime.MobHoldPosition = Runtime.MobHoldPosition or root.Position
                     humanoid:Move(Vector3.zero, false)
                     humanoid:MoveTo(Runtime.MobHoldPosition)
@@ -2692,10 +2793,18 @@ task.spawn(function()
                 end
             else
                 Runtime.MobHoldPosition = nil
+                Runtime.MobRelocating = false
+                Runtime.MobRelocateTarget = nil
+                Runtime.MobRelocateUntil = 0
             end
         else
             Runtime.AvoidingMob = false
             Runtime.MobHoldPosition = nil
+            Runtime.MobRelocating = false
+            Runtime.MobRelocateTarget = nil
+            Runtime.MobRelocateUntil = 0
+            Runtime.MobLastHumanoid = nil
+            Runtime.MobLastHealth = nil
         end
         task.wait(math.max(0.08, Config.MobJumpInterval))
     end
