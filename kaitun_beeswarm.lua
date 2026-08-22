@@ -75,9 +75,27 @@ local DEFAULT_CONFIG = {
     MeteorSummonerCooldown = 79200,
     MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
     AutoQuest = true,
-    QuestNPCs = {"Black Bear", "Science Bear"},
-    QuestFarmPriority = {"Black Bear", "Science Bear"},
+    QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear"},
+    QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear"},
     QuestNPCBeeRequirements = {["Science Bear"] = 10},
+    AutoQuestFeedTasks = true,
+    AutoQuestJellyTasks = true,
+    QuestTreatBatchSize = 10,
+    -- Auto treat: mua treat bang 10% so honey kiem duoc, feed bee level thap
+    -- nhat den khi toan bo hive cung level.
+    AutoTreatBees = true,
+    TreatBudgetPercent = 10,
+    TreatCycleHours = 1,
+    TreatHoneyCost = 10,
+    TreatFeedBatch = 20,
+    TreatWorkerInterval = 5,
+    -- Auto amulet: so sanh TUNG STAT voi amulet cung loai dang de. Chi replace
+    -- khi khong stat nao kem hon va co it nhat 1 stat tot hon (thang tuyet doi);
+    -- con lai (lech hoac giong hec) -> keep. Khong dung trong so gia dinh.
+    AutoCompareAmulets = true,
+    QuestJellyBatchMax = 5,
+    -- Jelly quest chi dung len common bee khong gifted de khong pha event/mythic.
+    CommonBeeTypes = {"Basic", "Bumble", "Cool", "Hasty", "Rascal", "Stubborn"},
     QuestCheckInterval = 3,
     QuestInteractTimeout = 12,
     QuestFarmSeconds = 8,
@@ -222,6 +240,11 @@ local DEFAULT_CONFIG = {
     SafeMaterialMode = true,
     -- Fix lag khong Destroy token/bee/field logic; Atlas chi xoa visual-only
     -- SurfaceAppearance va decoration da loc, nen scanner van hoat dong.
+    -- CPU saver: fps cap la cai tiet kiem CPU lon nhat cho kaitun AFK.
+    CPUSaver = true,
+    CPUSaverFPSCap = 30,
+    -- Black screen UI: false = vao game khong co man den (van co the bam F7 bat lai).
+    BlackScreen = true,
     LowGraphics = true,
     FixLagAtlasMode = true,
     FixLagHideBees = true,
@@ -239,7 +262,6 @@ local DEFAULT_CONFIG = {
     FixLagScanBatch = 350,
     FixLagHideSky = true,
     FixLagBrightness = 0.65,
-    BlackScreen = false,
     RedeemCodes = true,
     PromoCodes = {
         -- Material codes duoc progression guide khuyen dung luc moi bat dau.
@@ -293,23 +315,26 @@ local DEFAULT_CONFIG = {
             {Shop = "ProShop", Item = "Port-O-Hive", Category = "Accessory", Type = "Port-O-Hive", HoneyCost = 1250000},
             {Shop = "ProShop", Item = "Propeller Hat", Category = "Accessory", Type = "Propeller Hat", HoneyCost = 2500000, RequiresMaterials = true, SupersededBy = {"Beekeeper's Mask", "Bubble Mask", "Diamond Mask"}},
             {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
+            -- Guard Pro Shop (gia theo wiki BSS): Looker 300K + 25 Sunflower Seed,
+            -- Brave 300K + 3 Stinger.
+            {Shop = "ProShop", Item = "Looker Guard", Category = "Accessory", Type = "Looker Guard", HoneyCost = 300000, RequiresMaterials = true,
+                SupersededBy = {"Elite Blue Guard", "Elite Red Guard", "Cobalt Guard", "Crimson Guard"}},
+            {Shop = "ProShop", Item = "Brave Guard", Category = "Accessory", Type = "Brave Guard", HoneyCost = 300000, RequiresMaterials = true,
+                SupersededBy = {"Elite Blue Guard", "Elite Red Guard", "Cobalt Guard", "Crimson Guard"}},
         }},
         {TargetBees = 25, EggRushAfter = true, Items = {
             -- Retry Bubble Wand trong luc hatch: neu Blue HQ vua mo sau mot lan
             -- Royal Jelly thi mua ngay, con neu van khoa thi tiep tuc egg rush.
             {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
+            -- Elite Guards chuyen tu moc 33 bee len 25 bee theo yeu cau.
+            {Shop = "BlueHQ", Item = "Elite Blue Guard", Category = "Accessory", Type = "Elite Blue Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Cobalt Guard"}},
+            {Shop = "RedHQ", Item = "Elite Red Guard", Category = "Accessory", Type = "Elite Red Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Crimson Guard"}},
         }},
         {TargetBees = 30, Items = {
             {Shop = "BlueHQ", Item = "Blue Port-O-Hive", Category = "Accessory", Type = "Blue Port-O-Hive", HoneyCost = 12500000, RequiresMaterials = true},
             {Shop = "Mountaintop", Item = "Beekeeper's Mask", Category = "Accessory", Type = "Beekeeper's Mask", HoneyCost = 20000000, RequiresMaterials = true, SupersededBy = {"Bubble Mask", "Diamond Mask"}},
             {Shop = "Mountaintop", Item = "Mondo Belt Bag", Category = "Accessory", Type = "Mondo Belt Bag", HoneyCost = 12400000, RequiresMaterials = true, SupersededBy = {"Honeycomb Belt", "Petal Belt", "Coconut Belt"}},
             {Shop = "Mountaintop", Item = "Beekeeper's Boots", Category = "Accessory", Type = "Beekeeper's Boots", HoneyCost = 15000000, RequiresMaterials = true, SupersededBy = {"Coconut Clogs", "Gummy Boots"}},
-            -- Guide: macro thi bo Golden Rake va giu Bubble Wand.
-            {Shop = "Mountaintop", Item = "Golden Rake", Category = "Collector", Type = "Golden Rake", HoneyCost = 20000000, NonMacroOnly = true, Optional = true},
-        }},
-        {TargetBees = 33, Items = {
-            {Shop = "BlueHQ", Item = "Elite Blue Guard", Category = "Accessory", Type = "Elite Blue Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Cobalt Guard"}},
-            {Shop = "RedHQ", Item = "Elite Red Guard", Category = "Accessory", Type = "Elite Red Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Crimson Guard"}},
         }},
         {TargetBees = 34, Items = {
             {Shop = "Mountaintop", Item = "Porcelain Dipper", Category = "Collector", Type = "Porcelain Dipper", HoneyCost = 150000000},
@@ -379,7 +404,7 @@ local function merge(target, source)
             or key == "ProgressionMilestones" or key == "SprinklerSequence"
             or key == "QuestNPCs" or key == "QuestFarmPriority" or key == "BadgeNames"
             or key == "BlueBeeTypes" or key == "MythicBeeTypes" or key == "BestColorFields"
-            or key == "EventBeeSequence" or key == "TeleRewardSpots"
+            or key == "EventBeeSequence" or key == "TeleRewardSpots" or key == "CommonBeeTypes"
         if type(value) == "table" and type(target[key]) == "table" and not replaceTable then
             merge(target[key], value)
         else
@@ -390,10 +415,10 @@ local function merge(target, source)
 end
 
 local Config = merge(deepCopy(DEFAULT_CONFIG), ENV.BSS_KAITUN_CONFIG or {})
--- Mother Bear da bi loai khoi kaitun. Ghi de danh sach cu trong getgenv/config
--- de script khong tu nhan hoac farm Mother Bear sau khi cap nhat.
-Config.QuestNPCs = {"Black Bear", "Science Bear"}
-Config.QuestFarmPriority = {"Black Bear", "Science Bear"}
+-- Mother Bear quay lai kaitun: task "Feed Treats" va "Use Royal Jelly" da co
+-- handler tu dong, con task pollen/mob di qua quest router nhu cac bear khac.
+Config.QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear"}
+Config.QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear"}
 if Config.FixLagAtlasMode then
     -- Preset Atlas: config cu khong the vo tinh bat lai cac visual nang.
     Config.LowGraphics = true
@@ -427,6 +452,8 @@ MaterialSystem.Gear = {
     ["Beekeeper's Boots"] = {Oil = 5, BlueExtract = 3, RedExtract = 3},
     ["Elite Blue Guard"] = {BlueExtract = 3, Blueberry = 50, RoyalJelly = 5, MoonCharm = 15},
     ["Elite Red Guard"] = {RedExtract = 3, Strawberry = 50, RoyalJelly = 5, Stinger = 5},
+    ["Looker Guard"] = {SunflowerSeed = 25},
+    ["Brave Guard"] = {Stinger = 3},
     ["Porcelain Port-O-Hive"] = {Glitter = 3, SoftWax = 3, MoonCharm = 10},
     ["Bubble Mask"] = {Blueberry = 500, BlueExtract = 50, Oil = 25, Glitter = 15},
     ["Cobalt Guard"] = {BlueExtract = 100, Stinger = 100, Enzymes = 50, Glitter = 25},
@@ -649,6 +676,15 @@ local Runtime = {
     SproutsFarmed = 0,
     LowGraphicsBound = false,
     LowGraphicsWatched = setmetatable({}, {__mode = "k"}),
+    HoneyRateSamples = {},
+    HoneyRateTotal = 0,
+    TreatCycleStart = nil,
+    TreatCycleBase = 0,
+    TreatCycleBudget = 0,
+    TreatCycleBoughtHoney = 0,
+    TreatFocusKey = nil,
+    TreatFocusLevel = nil,
+    TreatBusy = false,
     UI = {},
 }
 
@@ -698,6 +734,32 @@ local function coreValue(name, fallback)
     local value = liveCoreValue(name)
     if value ~= nil then return value end
     return fallback or 0
+end
+
+-- Do honey/h theo cua so truot 10 phut: chi tinh phan Honey tang len (mua do
+-- lam Honey giam khong bi tinh am). Tu sample moi 10s, giu toi da 10 phut.
+function Runtime.UpdateHoneyRate()
+    local now = os.clock()
+    local samples = Runtime.HoneyRateSamples
+    if samples[#samples] and now - samples[#samples][1] < 10 then return end
+    local honey = liveCoreValue("Honey")
+    if honey == nil then return end
+    if Runtime.HoneyRateLast ~= nil and honey > Runtime.HoneyRateLast then
+        Runtime.HoneyRateTotal += honey - Runtime.HoneyRateLast
+    end
+    Runtime.HoneyRateLast = honey
+    table.insert(samples, {now, Runtime.HoneyRateTotal})
+    while #samples > 1 and now - samples[1][1] > 600 do table.remove(samples, 1) end
+end
+
+function Runtime.HoneyPerHour()
+    Runtime.UpdateHoneyRate()
+    local samples = Runtime.HoneyRateSamples
+    if #samples < 2 then return 0 end
+    local first, last = samples[1], samples[#samples]
+    local window = last[1] - first[1]
+    if window < 30 then return 0 end
+    return (last[2] - first[2]) / window * 3600
 end
 
 local function getStats(refresh)
@@ -2989,6 +3051,445 @@ local function maintainBearQuests()
     return false
 end
 
+-- Mother Bear quest engine: tu dong lam task "Feed X Treats" va "Use X Royal
+-- Jelly". Ca hai deu dung chung remote ConstructHiveCellFromEgg (nhu Basic Egg
+-- va Unlock Blue HQ): eggType = "Treat" hoac "RoyalJelly". Jelly chi dung len
+-- common bee khong gifted de khong pha event/mythic bee.
+local function hiveBeeCells()
+    local reference = Player:FindFirstChild("Honeycomb")
+    local hive = reference and reference:IsA("ObjectValue") and reference.Value
+    local cells = hive and hive:FindFirstChild("Cells")
+    if not cells then return {} end
+    local result = {}
+    for _, cell in ipairs(cells:GetChildren()) do
+        local x, y = cell.Name:match("^C(%d+),(%d+)$")
+        local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+        if x and y and cellType and cellType:IsA("ValueBase") then
+            local locked = cell:FindFirstChild("CellLocked")
+            table.insert(result, {
+                Instance = cell,
+                X = tonumber(x),
+                Y = tonumber(y),
+                Type = tostring(cellType.Value),
+                Gifted = cell:FindFirstChild("GiftedCell") ~= nil,
+                Locked = locked and locked:IsA("ValueBase") and locked.Value == true or false,
+            })
+        end
+    end
+    return result
+end
+
+function Runtime.IsCommonBeeType(value)
+    local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
+    for _, beeName in ipairs(Config.CommonBeeTypes or {}) do
+        local wanted = string.lower(tostring(beeName)):gsub("[^%w]", ""):gsub("bee$", "")
+        if normalized == wanted then return true end
+    end
+    return false
+end
+
+-- Bee an toan lam muc tieu: common khong gifted la tuyet doi an toan; neu khong
+-- commonOnly thi fallback sang bee dau tien khong bi khoa (chi dung cho feed).
+function Runtime.FindQuestTargetBee(commonOnly)
+    local fallback
+    for _, entry in ipairs(hiveBeeCells()) do
+        if beeTypePresent(entry.Type) and not entry.Locked then
+            if Runtime.IsCommonBeeType(entry.Type) and not entry.Gifted then
+                return entry
+            end
+            fallback = fallback or entry
+        end
+    end
+    if commonOnly then return nil end
+    return fallback
+end
+
+-- Phan loai task theo Type + Description: "jelly" = use royal jelly,
+-- "treat" = feed treat, nil = task khac. Match chu phong thuc de chiu duoc
+-- su khac nhau giua cac phien ban quest module.
+function Runtime.QuestTaskKind(objective)
+    local taskData = type(objective) == "table" and objective.Task or {}
+    local text = string.lower(tostring(taskData.Type or "") .. " " .. tostring(objective and objective.Description or ""))
+    if text:find("collect", 1, true) then return nil end
+    local jelly = text:find("jelly", 1, true) ~= nil
+    local treat = text:find("treat", 1, true) ~= nil
+    local feed = text:find("feed", 1, true) ~= nil
+    local use = text:find("use", 1, true) ~= nil
+    if jelly and (use or feed) then return "jelly" end
+    if treat and (feed or use) then return "treat" end
+    return nil
+end
+
+function Runtime.QuestTaskStillIncomplete(objective)
+    for _, other in ipairs(incompleteQuestObjectives(true)) do
+        if other.Quest == objective.Quest
+            and (other.Task == objective.Task
+                or tostring(other.Description) == tostring(objective.Description)) then
+            return true
+        end
+    end
+    return false
+end
+
+function Runtime.FeedQuestTreats(objective)
+    if not Config.AutoQuestFeedTasks or Runtime.MeteorPriorityActive then return false end
+    local stats = MaterialSystem.Stats(true)
+    local treats = math.floor(MaterialSystem.Amount("Treat", stats))
+    if treats <= 0 then
+        setStatus("Quest feed", "Het treat - cho reward/quest khac bo tro")
+        return false
+    end
+    local bee = Runtime.FindQuestTargetBee(false)
+    if not bee then
+        setStatus("Quest feed", "Khong tim thay bee de feed")
+        return false
+    end
+    local batch = math.min(treats, math.max(1, math.floor(tonumber(Config.QuestTreatBatchSize) or 10)))
+    Runtime.CurrentQuest = objective.Quest
+    setStatus("Quest feed", string.format("Feed %d treat | %s (%d,%d)", batch, bee.Type, bee.X, bee.Y))
+    local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
+        "ConstructHiveCellFromEgg", bee.X, bee.Y, "Treat", batch)
+    applyHatchResponse("Treat", remaining, success, honeycomb, discoveredBees, eggUses)
+    task.wait(0.4)
+    task.defer(function() MaterialSystem.Stats(true) end)
+    return ok
+end
+
+function Runtime.UseQuestRoyalJelly(objective)
+    if not Config.AutoQuestJellyTasks or Runtime.MeteorPriorityActive then return false end
+    local used = 0
+    local maxUses = math.max(1, math.floor(tonumber(Config.QuestJellyBatchMax) or 5))
+    while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
+        local stats = MaterialSystem.Stats(used == 0)
+        if math.floor(MaterialSystem.Amount("RoyalJelly", stats)) <= 0 then
+            setStatus("Quest jelly", "Het Royal Jelly - cho reward/blender bo tro")
+            break
+        end
+        local bee = Runtime.FindQuestTargetBee(true)
+        if not bee then
+            setStatus("Quest jelly", "Khong con common bee (khong gifted) de dung jelly")
+            break
+        end
+        Runtime.CurrentQuest = objective.Quest
+        setStatus("Quest jelly", string.format("Dung Royal Jelly len %s (%d,%d)", bee.Type, bee.X, bee.Y))
+        local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
+            "ConstructHiveCellFromEgg", bee.X, bee.Y, "RoyalJelly", 1)
+        applyHatchResponse("RoyalJelly", remaining, success, honeycomb, discoveredBees, eggUses)
+        used += 1
+        task.wait(0.3)
+        if not Runtime.QuestTaskStillIncomplete(objective) then break end
+    end
+    if used > 0 then task.defer(function() MaterialSystem.Stats(true) end) end
+    return used > 0
+end
+
+-- Auto treat (doc lap voi quest): theo CHU KY GIO. Moi 1h, lay 10% so honey
+-- kiem duoc trong gio vua roi de mua treat, roi feed HET treat trong kho vao
+-- bee level thap nhat den khi ca hive bang level. Het budget thi cho den
+-- chu ky gio ke tiep moi mua tiep.
+function Runtime.HiveBeeLevel(entry)
+    local cell = entry.Instance
+    if not cell then return nil end
+    for _, name in ipairs({"Level", "BeeLevel", "CellLevel"}) do
+        local value = cell:FindFirstChild(name)
+        if value and value:IsA("ValueBase") and tonumber(value.Value) then
+            return tonumber(value.Value)
+        end
+    end
+    local bee = cell:FindFirstChild("Bee")
+    if bee and bee:IsA("ObjectValue") and bee.Value then
+        for _, name in ipairs({"Level", "BeeLevel"}) do
+            local value = bee.Value:FindFirstChild(name)
+            if value and value:IsA("ValueBase") and tonumber(value.Value) then
+                return tonumber(value.Value)
+            end
+        end
+    end
+    local data = hiveCellData(entry.X, entry.Y)
+    if type(data) == "table" then
+        local level = tonumber(data.Level or data.BeeLevel or data.CellLevel)
+        if level then return level end
+    end
+    return nil
+end
+
+function Runtime.TreatCycleRollover()
+    local now = os.clock()
+    local cycleSeconds = math.max(60, (tonumber(Config.TreatCycleHours) or 1) * 3600)
+    if Runtime.TreatCycleStart == nil then
+        -- Gio dau tien chua co budget: bat dau do honey tu luc khoi dong script.
+        Runtime.TreatCycleStart = now
+        Runtime.TreatCycleBase = Runtime.HoneyRateTotal
+        return
+    end
+    if now - Runtime.TreatCycleStart < cycleSeconds then return end
+    local earned = math.max(0, Runtime.HoneyRateTotal - (Runtime.TreatCycleBase or 0))
+    local percent = math.clamp(tonumber(Config.TreatBudgetPercent) or 10, 0, 100)
+    Runtime.TreatCycleBudget = earned * percent / 100
+    Runtime.TreatCycleBoughtHoney = 0
+    Runtime.TreatCycleBase = Runtime.HoneyRateTotal
+    Runtime.TreatCycleStart = now
+    setStatus("Treat bee", string.format("Chu ky moi: budget %s honey (%d%% so honey kiem duoc)",
+        formatNumber(Runtime.TreatCycleBudget), percent))
+end
+
+function Runtime.BuyTreatsForCycle()
+    local unitCost = math.max(1, tonumber(Config.TreatHoneyCost) or 10)
+    local budget = Runtime.TreatCycleBudget or 0
+    local boughtHoney = Runtime.TreatCycleBoughtHoney or 0
+    local remainingHoney = budget - boughtHoney
+    if remainingHoney < unitCost then
+        setStatus("Treat bee", string.format("Het budget gio nay (%s/%s honey) - cho gio sau",
+            formatNumber(boughtHoney), formatNumber(budget)))
+        return 0
+    end
+    local purchaseKey = "Eggs:Treat"
+    if (Runtime.PurchaseRetryAt[purchaseKey] or 0) > os.clock() then return 0 end
+    Runtime.PurchaseRetryAt[purchaseKey] = os.clock() + 10
+    -- Mua nho lo (toi da 10/lan) cho den khi het budget cua gio.
+    local wanted = math.min(10, math.floor(remainingHoney / unitCost))
+    setStatus("Treat bee", string.format("Mua %d treat | budget %s/%s honey",
+        wanted, formatNumber(boughtHoney), formatNumber(budget)))
+    local bought = 0
+    for _ = 1, wanted do
+        local ok, result = remoteCall("ItemPackageEvent", "Purchase",
+            {Category = "Eggs", Type = "Treat", Amount = 1})
+        if ok and result ~= false then
+            bought += 1
+            Runtime.TreatCycleBoughtHoney = boughtHoney + bought * unitCost
+        else
+            break
+        end
+    end
+    if bought > 0 then
+        Runtime.PurchaseRetryAt[purchaseKey] = nil
+        task.defer(function() MaterialSystem.Stats(true) end)
+    end
+    return bought
+end
+
+function Runtime.TreatLowestBee()
+    if Runtime.TreatBusy or Runtime.MeteorPriorityActive then return false end
+    Runtime.UpdateHoneyRate()
+    Runtime.TreatCycleRollover()
+
+    -- Quet hive: thu level tung bee, sap xep tang dan level.
+    local cells = {}
+    for _, entry in ipairs(hiveBeeCells()) do
+        if beeTypePresent(entry.Type) and not entry.Locked then
+            local level = Runtime.HiveBeeLevel(entry)
+            if level then table.insert(cells, {Cell = entry, Level = level}) end
+        end
+    end
+    if #cells < 2 then return false end
+    table.sort(cells, function(a, b) return a.Level < b.Level end)
+    local lowest = cells[1]
+    local highest = cells[#cells]
+
+    local target, targetLevel, focusMode
+    if lowest.Level < highest.Level then
+        -- Con thap nhat dien hien: feed no (kieu cu), huy focus cu neu co.
+        Runtime.TreatFocusKey = nil
+        target, targetLevel, focusMode = lowest.Cell, lowest.Level, false
+    else
+        -- Hive da bang level het: focus 1 con bat ky va giu no den khi no LEN
+        -- LEVEL moi doi con khac - he thong khong bao gio dung im. Sau khi con
+        -- focus len level, hive lech tro lai thi pass sau equalize dan.
+        focusMode = true
+        local focus
+        if Runtime.TreatFocusKey then
+            for _, item in ipairs(cells) do
+                if hiveCellKey(item.Cell.X, item.Cell.Y) == Runtime.TreatFocusKey then
+                    focus = item
+                    break
+                end
+            end
+        end
+        if focus and focus.Level > (Runtime.TreatFocusLevel or focus.Level) then
+            -- Con focus vua len level: tra quyen lai cho che do equalize.
+            Runtime.TreatFocusKey = nil
+            return false
+        end
+        if not focus then
+            focus = cells[math.random(1, #cells)]
+            Runtime.TreatFocusKey = hiveCellKey(focus.Cell.X, focus.Cell.Y)
+            Runtime.TreatFocusLevel = focus.Level
+        end
+        target, targetLevel = focus.Cell, focus.Level
+    end
+
+    Runtime.TreatBusy = true
+    local handled = false
+    -- Feed het treat trong kho; kho rong moi mua them trong budget cua gio.
+    local treats = math.floor(MaterialSystem.Amount("Treat"))
+    if treats <= 0 then treats = Runtime.BuyTreatsForCycle() end
+    if treats > 0 then
+        local batch = math.min(treats, math.max(1, math.floor(tonumber(Config.TreatFeedBatch) or 20)))
+        setStatus("Treat bee", focusMode
+            and string.format("Focus feed %d treat | %s lv.%d | hive bang level, giu den khi len level",
+                batch, target.Type, targetLevel)
+            or string.format("Feed %d treat | %s lv.%d | thap nhat trong hive",
+                batch, target.Type, targetLevel))
+        local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
+            "ConstructHiveCellFromEgg", target.X, target.Y, "Treat", batch)
+        applyHatchResponse("Treat", remaining, success, honeycomb, discoveredBees, eggUses)
+        task.wait(0.4)
+        task.defer(function() MaterialSystem.Stats(true) end)
+        handled = ok
+    end
+    Runtime.TreatBusy = false
+    return handled
+end
+
+-- Amulet engine ---------------------------------------------------------------
+-- Server de nghi amulet moi qua LocalAmuletEvent. Chu ky Accept da duoc verify
+-- tu remote that: ClientAcceptAmulet:FireServer(type, ten, statsString) voi
+-- statsString dang "\n+48% Convert Rate\n+1% Critical Chance...". So sanh
+-- TUNG STAT voi amulet cung loai dang de (khong dung trong so gia dinh):
+-- replace chi khi thang tuyet doi - khong stat nao kem hon va co it nhat
+-- mot stat tot hon; con lai (lech hoac giong hec) -> keep.
+function Runtime.ParseAmuletStats(text)
+    local stats = {}
+    for value, percent, name in tostring(text or ""):gmatch("%+([%d%.]+)(%%?)%s*([^\n\r]+)") do
+        local label = name:gsub("^%s+", ""):gsub("%s+$", "")
+        local key = string.lower(label)
+        stats[key] = {Value = tonumber(value) or 0, Percent = percent == "%", Name = label}
+    end
+    return stats
+end
+
+-- So sanh tung stat: tra ve (soStatTotHon, soStatKemHon, ghiChu). Stat moi co
+-- ma cu khong co = tot hon; stat cu mat di o ban moi = kem hon.
+function Runtime.CompareAmuletStats(newText, oldText)
+    local newStats = Runtime.ParseAmuletStats(newText)
+    local oldStats = Runtime.ParseAmuletStats(oldText)
+    local better, worse = 0, 0
+    local notes = {}
+    for key, stat in pairs(newStats) do
+        local oldValue = oldStats[key] and oldStats[key].Value or 0
+        if stat.Value > oldValue then
+            better += 1
+            table.insert(notes, string.format("+%s%s %s (cu %s)", tostring(stat.Value),
+                stat.Percent and "%" or "", stat.Name, tostring(oldValue)))
+        elseif stat.Value < oldValue then
+            worse += 1
+            table.insert(notes, string.format("-%s%s %s (cu %s)", tostring(stat.Value),
+                stat.Percent and "%" or "", stat.Name, tostring(oldValue)))
+        end
+    end
+    for key in pairs(oldStats) do
+        if not newStats[key] then worse += 1 end
+    end
+    return better, worse, notes
+end
+
+-- Tim stats cua amulet cung loai dang de trong PlayerStats. Cau truc chua
+-- verify duoc nen scan de phong nhieu dang: Amulets[type] = {Name, Stats},
+-- entry co Type/Name chu "Amulet", hoac key amulet chua truc tiep stats text.
+function Runtime.EquippedAmuletStatsText(amuletType)
+    local stats = MaterialSystem.Stats(false)
+    local wanted = string.lower(tostring(amuletType or "")):gsub("[^%w]", "")
+    local visited = {}
+    local function scanEntry(entry)
+        if type(entry) ~= "table" then return nil end
+        local text = entry.Stats or entry.Text or entry.Description or entry.StatsText
+        if type(text) == "string" and text:find("+", 1, true) then
+            local name = tostring(entry.Name or entry.AmuletName or "")
+            local entryType = string.lower(tostring(entry.Type or entry.AmuletType or "")):gsub("[^%w]", "")
+            if wanted == "" or entryType == wanted or name:lower():find(wanted, 1, true) then
+                return text
+            end
+        end
+        return nil
+    end
+    local function scan(value)
+        if type(value) ~= "table" or visited[value] then return nil end
+        visited[value] = true
+        for key, child in pairs(value) do
+            local normalizedKey = string.lower(tostring(key)):gsub("[^%w]", "")
+            -- key trung loai amulet (vd Amulets.Ant) hoac key chua "amulet"
+            if type(child) == "table" then
+                if wanted ~= "" and (normalizedKey == wanted or tostring(key):lower():find(wanted, 1, true)) then
+                    local direct = scanEntry(child)
+                    if direct then return direct end
+                end
+                if normalizedKey:find("amulet", 1, true) then
+                    local direct = scanEntry(child)
+                    if direct then return direct end
+                end
+                local nested = scan(child)
+                if nested then return nested end
+            elseif type(child) == "string" and normalizedKey:find("amulet", 1, true)
+                and child:find("+", 1, true) then
+                return child
+            end
+        end
+        return nil
+    end
+    return scan(stats)
+end
+
+function Runtime.HandleAmuletOffer(...)
+    if not Config.AutoCompareAmulets then return end
+    local args = table.pack(...)
+
+    -- Parse de nghi: 3 string (type, ten, stats) hoac table payload.
+    local amuletType, amuletName, statsText
+    local strings = {}
+    for i = 1, args.n do
+        if type(args[i]) == "string" then table.insert(strings, args[i]) end
+    end
+    for _, text in ipairs(strings) do
+        if text:find("+", 1, true) and not statsText then statsText = text end
+    end
+    for _, text in ipairs(strings) do
+        if text ~= statsText then
+            if string.lower(text):find("amulet", 1, true) and not amuletName then
+                amuletName = text
+            elseif not amuletType then
+                amuletType = text
+            end
+        end
+    end
+    if not statsText then
+        for i = 1, args.n do
+            if type(args[i]) == "table" then
+                local payload = args[i]
+                amuletType = amuletType or payload.Type or payload.AmuletType or payload.Category
+                amuletName = amuletName or payload.Name or payload.AmuletName
+                statsText = statsText or payload.Stats or payload.Text or payload.Description
+            end
+        end
+    end
+    if not statsText then return end
+
+    local currentText = Runtime.EquippedAmuletStatsText(amuletType)
+    local accept = true
+    local detail = "chua co amulet loai nay"
+    if currentText then
+        local better, worse, notes = Runtime.CompareAmuletStats(statsText, currentText)
+        accept = worse <= 0 and better > 0
+        detail = string.format("%d stat tot hon, %d kem hon%s", better, worse,
+            #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
+    end
+    setStatus("Amulet", string.format("%s %s | %s",
+        accept and "REPLACE" or "KEEP", tostring(amuletName or "?"), detail))
+    task.wait(0.3)
+    remoteCall(accept and "ClientAcceptAmulet" or "ClientRejectAmulet",
+        amuletType, amuletName, statsText)
+    task.defer(function() MaterialSystem.Stats(true) end)
+end
+
+local amuletOfferRemote = Events:FindFirstChild("LocalAmuletEvent")
+if amuletOfferRemote and amuletOfferRemote:IsA("RemoteEvent") then
+    connect(amuletOfferRemote.OnClientEvent, function(...)
+        local ok, err = xpcall(Runtime.HandleAmuletOffer, debug.traceback, ...)
+        if not ok then reportError("Amulet", err) end
+    end)
+else
+    warn("[BSS Kaitun] Khong tim thay LocalAmuletEvent - auto amulet tam khoa")
+end
+
 local function questWork(seconds)
     if not Config.AutoQuest then return false end
     if maintainBearQuests() then return true end
@@ -2997,6 +3498,13 @@ local function questWork(seconds)
     -- ma scheduler thuc su dang lam.
     Runtime.CurrentQuest = ""
     Runtime.QuestCurrentField = ""
+    -- Feed treat / dung Royal Jelly: task instant, hoan thanh truoc cac task
+    -- phai di chuyen (mob/field).
+    for _, objective in ipairs(objectives) do
+        local kind = Runtime.QuestTaskKind(objective)
+        if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return true end
+        if kind == "treat" and Runtime.FeedQuestTreats(objective) then return true end
+    end
     local plan = chooseQuestField(objectives)
     local planRank = plan and plan.NPCRank or math.huge
     -- Mob objective cung phai ton trong thu tu NPC. Vi du Science dang co
@@ -3213,7 +3721,9 @@ task.spawn(function()
             Runtime.MobLastHumanoid = nil
             Runtime.MobLastHealth = nil
         end
-        task.wait(math.max(0.08, Config.MobJumpInterval))
+        -- CPU saver: chi nh nhanh khi dang co mob can ne; khi binh thuong
+        -- 0.25s van du kip phat hien mob moi.
+        task.wait(Runtime.AvoidingMob and math.max(0.08, Config.MobJumpInterval) or 0.25)
     end
 end)
 
@@ -4429,13 +4939,28 @@ task.spawn(function()
         elseif not Config.AutoMeteor or #Runtime.MeteorQueue == 0 then
             Runtime.MeteorPriorityActive = false
         end
-        task.wait(0.03)
+        -- CPU saver: chi can nh nhanh (0.03s) khi dang co meteor; khi queue rong
+        -- 0.2s la du vi meteor phat hien qua LocalFX event chu khong phai poll.
+        task.wait(#Runtime.MeteorQueue > 0 and 0.03 or 0.2)
     end
 end)
 
 local function applyLowGraphics(enabled)
     Config.LowGraphics = enabled
     if not enabled then return end
+
+    -- FPS cap la CPU saver manh nhat: executor render it frame hon thi CPU/GPU
+    -- giam theo. Re-assert trong vong 12s vi mot so executor reset cap.
+    local function applyFpsCap()
+        if not Config.CPUSaver then return end
+        local cap = math.max(5, math.floor(tonumber(Config.CPUSaverFPSCap) or 30))
+        local capFunction = rawget(ENV, "setfpscap")
+        if type(capFunction) ~= "function" and type(setfpscap) == "function" then
+            capFunction = setfpscap
+        end
+        if type(capFunction) == "function" then pcall(capFunction, cap) end
+    end
+    applyFpsCap()
 
     local beeRoots = {Bees = true, NPCBees = true}
     local tokenRoots = {Collectibles = true}
@@ -4695,6 +5220,7 @@ local function applyLowGraphics(enabled)
     task.spawn(function()
         while Runtime.Running and Config.LowGraphics do
             applyLightingSettings()
+            applyFpsCap()
             pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
             -- Object moi da duoc xu ly bang DescendantAdded; khong quet lai ca
             -- workspace dinh ky vi chinh vong quet do tao spike tren mobile.
@@ -4725,111 +5251,80 @@ local oldGui = guiParent:FindFirstChild("BSSKaitunUI")
 if oldGui then oldGui:Destroy() end
 
 local screen = create("ScreenGui", {Name = "BSSKaitunUI", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, guiParent)
-local panel = create("Frame", {Name = "Panel", Size = UDim2.fromOffset(380, 266), Position = UDim2.new(0, 18, 0.5, -133),
-    BackgroundColor3 = Color3.fromRGB(12, 14, 22), BorderSizePixel = 0}, screen)
-create("UICorner", {CornerRadius = UDim.new(0, 10)}, panel)
-create("UIStroke", {Color = Color3.fromRGB(65, 156, 255), Thickness = 1.2, Transparency = 0.25}, panel)
 
-local title = create("TextLabel", {Size = UDim2.new(1, -48, 0, 42), Position = UDim2.fromOffset(14, 4), BackgroundTransparency = 1,
-    Text = "BEE KAITUN", Font = Enum.Font.GothamBold, TextSize = 22, TextXAlignment = Enum.TextXAlignment.Left,
-    TextColor3 = Color3.fromRGB(70, 174, 255)}, panel)
-local minimize = create("TextButton", {Size = UDim2.fromOffset(32, 30), Position = UDim2.new(1, -39, 0, 8), BackgroundColor3 = Color3.fromRGB(28, 33, 48),
-    Text = "-", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 20, AutoButtonColor = true}, panel)
-create("UICorner", {CornerRadius = UDim.new(0, 7)}, minimize)
+-- CPU-saver UI: black screen full man hinh + chu trang toi gian (hub, player,
+-- status, uptime). Khong panel/drag/RichText; chi 2 label dong duoc cap nhat
+-- moi 0.5s de UI gan nhu khong ton CPU.
+local overlay = create("Frame", {Name = "BlackScreen", Size = UDim2.fromScale(1, 1),
+    BackgroundColor3 = Color3.new(), BorderSizePixel = 0,
+    Visible = Config.BlackScreen ~= false}, screen)
+local hubLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.34), Size = UDim2.fromOffset(600, 46), BackgroundTransparency = 1,
+    Text = "BEE KAITUN", Font = Enum.Font.GothamBold, TextSize = 32,
+    TextColor3 = Color3.new(1, 1, 1)}, overlay)
+local userLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.45), Size = UDim2.fromOffset(600, 26), BackgroundTransparency = 1,
+    Text = "Player: " .. Player.Name, Font = Enum.Font.Gotham, TextSize = 20,
+    TextColor3 = Color3.new(1, 1, 1)}, overlay)
+local statusLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.55), Size = UDim2.fromOffset(760, 60), BackgroundTransparency = 1,
+    Text = "Status: ...", Font = Enum.Font.Gotham, TextSize = 20, TextWrapped = true,
+    TextColor3 = Color3.new(1, 1, 1)}, overlay)
+local honeyRateLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.63), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
+    Text = "Honey: 0/h", Font = Enum.Font.Gotham, TextSize = 18,
+    TextColor3 = Color3.new(1, 1, 1)}, overlay)
+local uptimeLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.70), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
+    Text = "Uptime: 00:00:00", Font = Enum.Font.Gotham, TextSize = 18,
+    TextColor3 = Color3.new(1, 1, 1)}, overlay)
 
-local info = create("TextLabel", {Size = UDim2.new(1, -28, 0, 206), Position = UDim2.fromOffset(14, 46), BackgroundColor3 = Color3.fromRGB(18, 21, 32),
-    BorderSizePixel = 0, Text = "", RichText = true, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
-    TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 14, TextColor3 = Color3.fromRGB(220, 225, 235)}, panel)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, info)
-create("UIPadding", {PaddingTop = UDim.new(0, 9), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 8)}, info)
-
-local blackFrame = create("Frame", {Name = "BlackScreen", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(), BorderSizePixel = 0,
-    Visible = Config.BlackScreen, ZIndex = 100}, screen)
-local blackText = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(420, 90),
-    BackgroundTransparency = 1, Text = "BEE KAITUN\nDang chay... nhan F7 de bat/tat man hinh den",
-    TextColor3 = Color3.fromRGB(90, 178, 255), Font = Enum.Font.GothamBold, TextSize = 18, ZIndex = 101}, blackFrame)
+-- Toggle black screen: nut tren man hinh (cho mobile/tablet) + F7 (cho PC).
+-- Nut dat tren cung (ZIndex 200) nen luon bam duoc ca khi man den dang bat.
+local overlayVisible = Config.BlackScreen ~= false
+local toggleButton = create("TextButton", {Name = "ScreenToggle",
+    Size = UDim2.fromOffset(130, 34), Position = UDim2.new(1, -142, 0, 8),
+    BackgroundColor3 = Color3.fromRGB(28, 33, 48), BorderSizePixel = 0,
+    Text = "", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14,
+    AutoButtonColor = true, ZIndex = 200}, screen)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, toggleButton)
+local function setBlackScreen(visible)
+    overlayVisible = visible
+    Config.BlackScreen = visible
+    overlay.Visible = visible
+    toggleButton.Text = visible and "Man den: BAT" or "Man den: TAT"
+end
+setBlackScreen(overlayVisible)
+connect(toggleButton.MouseButton1Click, function()
+    setBlackScreen(not overlayVisible)
+end)
 connect(UserInputService.InputBegan, function(input, processed)
     if not processed and input.KeyCode == Enum.KeyCode.F7 then
-        Config.BlackScreen = not Config.BlackScreen
-        blackFrame.Visible = Config.BlackScreen
+        setBlackScreen(not overlayVisible)
     end
-end)
-
-local dragging, dragStart, startPosition
-connect(title.InputBegan, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging, dragStart, startPosition = true, input.Position, panel.Position
-    end
-end)
-connect(UserInputService.InputChanged, function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - dragStart
-        panel.Position = startPosition + UDim2.fromOffset(delta.X, delta.Y)
-    end
-end)
-connect(UserInputService.InputEnded, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
-end)
-
-local minimized = false
-connect(minimize.MouseButton1Click, function()
-    minimized = not minimized
-    info.Visible = not minimized
-    panel.Size = minimized and UDim2.fromOffset(380, 48) or UDim2.fromOffset(380, 258)
-    minimize.Text = minimized and "+" or "-"
 end)
 
 Runtime.UI.Screen = screen
-Runtime.UI.Info = info
-Runtime.UI.BlackFrame = blackFrame
-
-local function gearSummary()
-    local stats = getStats(false) or {}
-    return tostring(stats.EquippedBackpack or stats.EquippedContainer or "?") .. " / " .. tostring(stats.EquippedCollector or "?")
-end
-
-local function eventBeeSummary()
-    if not Config.AutoBuyEventBees then return "Event bee off" end
-    local entry, tickets = Runtime.NextEventBee(false)
-    if not entry then
-        return string.format("Da mua du (%d) | hatch %d", Runtime.EventBeesPurchased, Runtime.EventBeesHatched)
-    end
-    local required = math.max(0, math.floor(tonumber(entry.TicketCost) or 0))
-    return string.format("%s %d/%d ticket", entry.Item, tickets, required)
-end
+Runtime.UI.Overlay = overlay
+Runtime.UI.Status = statusLabel
+Runtime.UI.HoneyRate = honeyRateLabel
+Runtime.UI.Uptime = uptimeLabel
 
 task.spawn(function()
     while Runtime.Running and screen.Parent do
-        local ratio, pollen, capacity = pollenRatio()
-        local honey = coreValue("Honey", 0)
-        local elapsed = math.floor(os.clock() - Runtime.StartedAt)
-        local uiText = string.format(
-            "<font color='#6DBBFF'>User:</font> %s\n<font color='#6DBBFF'>Status:</font> %s\n%s\n" ..
-            "<font color='#9BCBFF'>Progress:</font> %s   <font color='#7DE3A8'>Hive:</font> %d/%d\n" ..
-            "<font color='#FFCF70'>Material:</font> %s\n" ..
-            "<font color='#D9B3FF'>Quest:</font> %s   <font color='#FF9D9D'>Avoid mob:</font> %s\n" ..
-            "<font color='#9BCBFF'>Field:</font> %s   <font color='#FFD36D'>Tokens:</font> %d\n" ..
-            "<font color='#FF9DE2'>Event:</font> %s\n" ..
-            "<font color='#FFC65A'>Honey:</font> %s   <font color='#ECA7FF'>Pollen:</font> %s/%s (%.0f%%)\n" ..
-            "<font color='#7DE3A8'>Gear:</font> %s   <font color='#AAAAAA'>Time:</font> %02d:%02d",
-            Player.Name, Runtime.State, Runtime.Detail, Runtime.ProgressStage, beeCount(), hiveCapacity(),
-            Runtime.MaterialTarget ~= "" and (Runtime.MaterialTarget .. " -> " .. MaterialSystem.Display(Runtime.MaterialName)) or "None",
-            Runtime.CurrentQuest ~= "" and Runtime.CurrentQuest or "None",
-            Runtime.AvoidingMob and "ON" or "OFF",
-            Runtime.CurrentField ~= "" and Runtime.CurrentField or selectedFieldName(), Runtime.TokensCollected,
-            eventBeeSummary(),
-            formatNumber(honey), formatNumber(pollen),
-            formatNumber(capacity), ratio * 100, gearSummary(), math.floor(elapsed / 60), elapsed % 60
-        )
+        local elapsed = math.max(0, math.floor(os.clock() - Runtime.StartedAt))
         local ok, err = pcall(function()
-            info.Text = uiText
-            blackFrame.Visible = Config.BlackScreen
+            statusLabel.Text = "Status: " .. Runtime.State
+                .. (Runtime.Detail ~= "" and (" | " .. Runtime.Detail) or "")
+            honeyRateLabel.Text = "Honey: " .. formatNumber(Runtime.HoneyPerHour()) .. "/h"
+            uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d",
+                math.floor(elapsed / 3600), math.floor(elapsed / 60) % 60, elapsed % 60)
         end)
         if not ok then
             reportError("UI", err)
             task.wait(1)
         end
-        task.wait(0.25)
+        task.wait(0.5)
     end
 end)
 
@@ -4858,12 +5353,29 @@ task.spawn(function()
     end
 end)
 
+-- Auto treat worker: doc lap voi quest, chi remote (khong di chuyen). Feed bee
+-- level thap nhat bang treat trong kho (mua them theo budget 10% honey/h).
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoTreatBees and not Runtime.MeteorPriorityActive then
+            local ok, err = xpcall(Runtime.TreatLowestBee, debug.traceback)
+            if not ok then
+                Runtime.TreatBusy = false
+                reportError("TreatWorker", err)
+            end
+        end
+        task.wait(math.max(2, tonumber(Config.TreatWorkerInterval) or 5))
+    end
+end)
+
 -- BadgeEvent is a RemoteEvent, so claim one badge per pass. This avoids the
 -- invocation-queue spam caused by firing every badge in the same frame.
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoClaimBadges then Runtime.ClaimNextBadge() end
-        task.wait(math.max(0.25, (tonumber(Config.BadgeClaimInterval) or 1.25) * 0.5))
+        -- ClaimNextBadge da tu gioi han theo BadgeClaimInterval nen khong co loi
+        -- gi khi poll nhanh hon; canh bang de giam so vong lap tan CPU.
+        task.wait(math.max(0.5, tonumber(Config.BadgeClaimInterval) or 1.25))
     end
 end)
 
