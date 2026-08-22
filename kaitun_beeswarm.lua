@@ -159,12 +159,10 @@ local DEFAULT_CONFIG = {
         {Shop = "Ticket Tent", Item = "Crimson Bee Egg", Category = "Eggs", Type = "Crimson", TicketCost = 250,
             PackageTypes = {"CrimsonBee", "Crimson Bee", "Crimson"}},
     },
-    -- Tele rewards (goc tu telebss rewards.txt): ngay khi vao game, bay qua cac
-    -- diem reward tren map truoc khi claim hive/hatch. Toa do da duoc test tay.
+    -- Tele rewards (goc tu telebss rewards.txt): ngay khi vao game, instant tele
+    -- tung diem reward tren map truoc khi claim hive/hatch. Toa do da test tay.
     AutoTeleRewards = true,
-    TeleRewardRiseHeight = 500,
-    TeleRewardTweenSeconds = 1,
-    TeleRewardBobSeconds = 2,
+    TeleRewardDwellSeconds = 2,
     TeleRewardSpots = {
         {Label = "Diamond Egg", CFrame = CFrame.new(42, 149, -531)},
         {Label = "Star Jelly", CFrame = CFrame.new(-413.77, 17.17, 467.18)},
@@ -1506,11 +1504,10 @@ local function redeemCodes()
     getStats(true)
 end
 
--- Tele reward phase (goc tu telebss rewards.txt): bay qua tung diem reward tren
--- map ngay khi vao game, TRUOC khi claim hive/hatch. Moi diem: bay thang len do
--- cao an toan -> lao ngang den reward -> bob len xuong de touch pickup. Khong
--- can kill/respawn giua cac diem nhu script goc: bay len tu vi tri hien tai
--- van an toan va nhanh hon. Meteor van la uu tien tuyet doi.
+-- Tele reward phase (goc tu telebss rewards.txt): instant teleport tung diem
+-- reward tren map ngay khi vao game, TRUOC khi claim hive/hatch. Moi diem: dat
+-- CFrame thang vao vi tri reward, dung yen tai cho + nudge len xuong bang CFrame
+-- de touch pickup. Khong tween, khong bay len cao. Meteor van la uu tien tuyet doi.
 function Runtime.CollectWorldRewards()
     if not Config.AutoTeleRewards or Runtime.TeleRewardsDone then return false end
     local spots = Config.TeleRewardSpots or {}
@@ -1518,24 +1515,13 @@ function Runtime.CollectWorldRewards()
     -- chay lai phan nay trong cung mot lan execute.
     Runtime.TeleRewardsDone = true
     if #spots <= 0 then return false end
-    local riseHeight = math.max(60, tonumber(Config.TeleRewardRiseHeight) or 500)
-    local tweenSeconds = math.max(0.15, tonumber(Config.TeleRewardTweenSeconds) or 1)
-    local bobSeconds = math.max(0.3, tonumber(Config.TeleRewardBobSeconds) or 2)
+    local dwell = math.max(0.3, tonumber(Config.TeleRewardDwellSeconds) or 2)
 
-    local function glide(target, duration)
-        local _, _, root = getCharacter(5)
-        if not root then return false end
-        duration = math.max(0.05, duration or tweenSeconds)
-        local tween = TweenService:Create(root,
-            TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = target})
-        local finished = false
-        local connection = tween.Completed:Connect(function() finished = true end)
-        tween:Play()
-        local deadline = os.clock() + duration + 3
-        while Runtime.Running and not finished and os.clock() < deadline do task.wait(0.05) end
-        connection:Disconnect()
-        if not finished then pcall(tween.Cancel, tween) end
-        return finished and Runtime.Running
+    local function pin(root, cframe)
+        pcall(function()
+            root.CFrame = cframe
+            root.AssemblyLinearVelocity = Vector3.zero
+        end)
     end
 
     for index, spot in ipairs(spots) do
@@ -1545,17 +1531,16 @@ function Runtime.CollectWorldRewards()
         local _, _, root = getCharacter(8)
         if not root then continue end
         setStatus("Tele reward", string.format("%d/%d %s", index, #spots, tostring(spot.Label or "reward")))
-        glide(CFrame.new(root.Position.X, math.max(riseHeight, root.Position.Y), root.Position.Z))
-        if not Runtime.Running then break end
-        glide(spot.CFrame)
-        local deadline = os.clock() + bobSeconds
+        pin(root, spot.CFrame)
+        -- Dung yen tai diem reward, nudge len xuong de kich hoat touch pickup.
+        local deadline = os.clock() + dwell
         while Runtime.Running and not Runtime.MeteorPriorityActive and os.clock() < deadline do
             local _, _, currentRoot = getCharacter(2)
             if not currentRoot then break end
-            local p = currentRoot.Position
-            if not glide(CFrame.new(p.X, p.Y + 1, p.Z), 0.2) then break end
-            p = currentRoot.Position
-            if not glide(CFrame.new(p.X, p.Y - 1, p.Z), 0.2) then break end
+            pin(currentRoot, spot.CFrame + Vector3.new(0, 1, 0))
+            task.wait(0.12)
+            pin(currentRoot, spot.CFrame)
+            task.wait(0.12)
         end
         Runtime.TeleRewardsCollected += 1
     end
