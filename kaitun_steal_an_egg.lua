@@ -17,7 +17,7 @@ local CONFIG = {
     ALLOW_ANY_IF_NONE = true,   -- nếu area không có Secret/Eternal -> vẫn lấy trứng xịn nhất có sẵn
     STOP_ON_FOUND     = false,  -- true = dừng hẳn khi ấp ra Secret/Eternal
     AUTO_EQUIP_BEST   = true,   -- tự Equip Best sau mỗi lần ấp
-    AUTO_SELL_RANK_MAX = 0,     -- 0 = tắt. VD: 8 = tự bán mọi pet <= Legendary (theo RARITY_RANK)
+    AUTO_SELL_RANK_MAX = 0,     -- 0 = tắt. > 0 = bật bán dọn plot (SellAll/AutoSell của game)
     SKIP_GROWTH       = true,   -- thử dùng RequestSkipGrowth cho nhanh (tốn tiền in-game)
     TWEEN_SPEED       = 240,    -- studs/giây khi tween
     GROWTH_TIMEOUT    = 420,    -- giây chờ trứng lớn tối đa trước khi force hatch
@@ -179,38 +179,119 @@ local function tweenTo(pos, yOff)
 end
 
 --// ══════════════════ DATA GAME ══════════════════
+-- ── Deep-scan: tự dò dữ liệu bất kể tên field server dùng ──
+local function looksLikeGuid(s)
+    return type(s) == "string" and #s >= 16 and not s:find("%s")
+end
+
+local function deepFindVector3(t, depth)
+    depth = depth or 0
+    if depth > 4 or type(t) ~= "table" then return nil end
+    for _, v in pairs(t) do
+        if typeof(v) == "Vector3" then return v end
+        if typeof(v) == "CFrame" then return v.Position end
+        -- server có thể gửi vector dạng table {x=,y=,z=}
+        if type(v) == "table" and type(v.x) == "number" and type(v.y) == "number" and type(v.z) == "number" then
+            return Vector3.new(v.x, v.y, v.z)
+        end
+        local r = deepFindVector3(v, depth + 1)
+        if r then return r end
+    end
+    return nil
+end
+
+local function deepFindRarity(t, depth)
+    depth = depth or 0
+    if depth > 5 or type(t) ~= "table" then return nil end
+    for _, v in pairs(t) do
+        if type(v) == "string" then
+            local key = v:gsub("%s+", "")
+            if RARITY_RANK[key] then return key end
+        elseif type(v) == "table" then
+            local r = deepFindRarity(v, depth + 1)
+            if r then return r end
+        end
+    end
+    return nil
+end
+
+-- ID có thể nằm ở: field quen thuộc, KEY của table cha, hoặc chuỗi GUID bất kỳ trong entry
+local function extractId(t, depth)
+    depth = depth or 0
+    if depth > 4 or type(t) ~= "table" then return nil end
+    local v = pick(t, { "id", "Id", "eggId", "eggID", "EggId", "uuid", "guid", "uid", "slotId", "eggUuid" })
+    if v ~= nil then return v end
+    for k, val in pairs(t) do
+        if looksLikeGuid(k) then return k end
+        if looksLikeGuid(val) then return val end
+        if type(val) == "table" then
+            local r = extractId(val, depth + 1)
+            if r then return r end
+        end
+    end
+    return nil
+end
+
 -- Snapshot trứng area -> list các entry table
 local function getAreaEggs(verbose)
     local ok, res = invoke("Eggs: RequestAreaEggSnapshot")
     if not ok or res == nil then return nil end
     if verbose then
         log("AreaEggSnapshot raw:")
-        dumpTable(res, "snapshot", 0, 10)
+        dumpTable(res, "snapshot", 0, 12)
     end
-    -- res có thể là: {eggs={...}} | {...} | {slots={...}} | map id->entry
-    local list = {}
-    if type(res) == "table" then
-        local container = pick(res, { "eggs", "Eggs", "slots", "Slots", "areaEggs", "list", "data" })
-        if type(container) ~= "table" then container = res end
-        for _, v in pairs(container) do
-            if type(v) == "table" then
-                table.insert(list, v)
+    if type(res) ~= "table" then return nil end
+
+    -- Có thể có bảng vị trí slot riêng: slots = { [slotId] = Vector3 } hoặc mảng {id, position}
+    local slotPos = {}
+    for _, key in ipairs({ "slots", "Slots", "slotPositions", "positions" }) do
+        local s = res[key]
+        if type(s) == "table" then
+            for k, v in pairs(s) do
+                if typeof(v) == "Vector3" then
+                    slotPos[tostring(k)] = v
+                elseif type(v) == "table" then
+                    local sid = pick(v, { "id", "Id", "slotId", "slot" })
+                    local p = pick(v, { "position", "Position", "pos", "cframe" })
+                    if sid and typeof(p) == "Vector3" then slotPos[tostring(sid)] = p end
+                end
             end
+        end
+    end
+
+    -- Entry trứng: trong container quen thuộc hoặc map id->entry
+    local container = pick(res, { "eggs", "Eggs", "areaEggs", "AreaEggs", "list", "data" })
+    if type(container) ~= "table" then container = res end
+    local list = {}
+    for k, v in pairs(container) do
+        if type(v) == "table" then
+            table.insert(list, { data = v, keyId = (type(k) == "string") and k or nil, slotPos = slotPos })
         end
     end
     return list
 end
 
--- Rút trừ thông tin 1 entry trứng: id, rarity, position
-local function parseEggEntry(e)
+-- Rút thông tin 1 entry trứng (nhận wrapped {data, keyId, slotPos})
+local function parseEggEntry(wrapped)
+    local e = wrapped.data or wrapped
     if type(e) ~= "table" then return nil end
+
     local id = pick(e, { "id", "Id", "eggId", "eggID", "EggId", "uuid", "guid", "uid", "slotId" })
+    if id == nil and wrapped.keyId then id = wrapped.keyId end
+    if id == nil then id = extractId(e) end
+
     local rarity = pick(e, { "rarity", "Rarity", "rarityName", "RarityName", "tier", "Tier", "grade" })
-    local pos = pick(e, { "position", "Position", "pos", "Pos", "cframe", "CFrame" })
+    if type(rarity) == "string" and not RARITY_RANK[rarity:gsub("%s+", "")] then rarity = nil end
+    if rarity == nil then rarity = deepFindRarity(e) end
+
+    local pos = pick(e, { "position", "Position", "pos", "Pos", "cframe", "CFrame", "worldPos", "slotPosition" })
+    if typeof(pos) ~= "Vector3" and typeof(pos) ~= "CFrame" then pos = nil end
+    if pos == nil and wrapped.slotPos and id then pos = wrapped.slotPos[tostring(id)] end
+    if pos == nil then pos = deepFindVector3(e) end
+
     local name = pick(e, { "name", "Name", "eggName", "assetName", "displayName", "DisplayName" })
-    if typeof(pos) == "Instance" then pos = nil end -- không phải vector
-    if type(rarity) ~= "string" then rarity = nil end
-    if pos ~= nil and typeof(pos) ~= "Vector3" and typeof(pos) ~= "CFrame" then pos = nil end
+    if type(name) ~= "string" then name = nil end
+
     return {
         raw    = e,
         id     = id,
@@ -221,35 +302,94 @@ local function parseEggEntry(e)
 end
 
 -- Tìm vị trí vật lý của trứng khi snapshot không kèm pos:
--- đối chiếu id với render trong PlacedEggSlotsClient / AreaEggSlotsClient
+-- đối chiếu id/tên/rarity với model trứng được render trong workspace
+local RENDER_FOLDERS = { "AreaEggSlotsClient", "PlacedEggRenders", "ClientRenderedAssets" }
+
+local function modelPos(m)
+    local hb = m:FindFirstChild("Hitbox", true) or m:FindFirstChildWhichIsA("BasePart")
+    return hb and hb.Position or nil
+end
+
 local function findEggWorldPos(egg)
-    if egg.pos then return egg.pos end
-    local ws = workspace
-    for _, folderName in ipairs({ "AreaEggSlotsClient", "PlacedEggRenders", "ClientRenderedAssets" }) do
-        local folder = ws:FindFirstChild(folderName)
+    if egg.pos then return egg.pos, "snapshot" end
+
+    -- Tập chuỗi id ứng viên: full id + 8 ký tự đầu (model render hay dùng id rút gọn)
+    local candidates = {}
+    if egg.id then
+        local s = tostring(egg.id):lower()
+        candidates[#candidates + 1] = s
+        candidates[#candidates + 1] = s:sub(1, 8)
+    end
+
+    -- Bước 1: khớp theo id trong tên model hoặc attribute/StringValue bên trong
+    for _, folderName in ipairs(RENDER_FOLDERS) do
+        local folder = workspace:FindFirstChild(folderName)
         if folder then
             for _, m in ipairs(folder:GetChildren()) do
-                local nm = string.lower(m.Name)
-                local idStr = egg.id and string.lower(tostring(egg.id)) or ""
-                if idStr ~= "" and (nm:find(idStr, 1, true) or string.lower(m.Name) == idStr) then
-                    local hb = m:FindFirstChild("Hitbox") or m:FindFirstChildWhichIsA("BasePart")
-                    if hb then return hb.Position end
+                local nm = m.Name:lower()
+                local hit = false
+                for _, c in ipairs(candidates) do
+                    if #c >= 6 and nm:find(c, 1, true) then hit = true break end
+                end
+                if not hit then
+                    local attrs = m:GetAttributes()
+                    for _, av in pairs(attrs) do
+                        local v = tostring(av):lower()
+                        for _, c in ipairs(candidates) do
+                            if #c >= 6 and v:find(c, 1, true) then hit = true break end
+                        end
+                        if hit then break end
+                    end
+                end
+                if not hit then
+                    for _, d in ipairs(m:GetDescendants()) do
+                        if d:IsA("StringValue") or d:IsA("ObjectValue") then
+                            local v = tostring(d.Value):lower()
+                            for _, c in ipairs(candidates) do
+                                if #c >= 6 and v:find(c, 1, true) then hit = true break end
+                            end
+                            if hit then break end
+                        end
+                    end
+                end
+                if hit then
+                    local p = modelPos(m)
+                    if p then return p, folderName end
                 end
             end
         end
     end
-    -- Fallback: ăn theo ProximityPrompt/Model mới xuất hiện gần nhất
-    local folder = ws:FindFirstChild("AreaEggSlotsClient")
-    if folder and egg.id then
-        for _, m in ipairs(folder:GetChildren()) do
-            for _, d in ipairs(m:GetDescendants()) do
-                if (d:IsA("StringValue") or d:IsA("ObjectValue")) and tostring(d.Value) == tostring(egg.id) then
-                    local hb = m:FindFirstChild("Hitbox") or m:FindFirstChildWhichIsA("BasePart")
-                    if hb then return hb.Position end
-				end
+
+    -- Bước 2: khớp theo TÊN pet/trứng hoặc chữ rarity trên billboard (vd "Cosmic")
+    local nameL = egg.name and egg.name:lower() or nil
+    local rarL = egg.rarity and egg.rarity:lower() or nil
+    if nameL or rarL then
+        for _, folderName in ipairs(RENDER_FOLDERS) do
+            local folder = workspace:FindFirstChild(folderName)
+            if folder then
+                for _, m in ipairs(folder:GetChildren()) do
+                    local matched = nameL and m.Name:lower():find(nameL, 1, true) or nil
+                    if not matched then
+                        for _, d in ipairs(m:GetDescendants()) do
+                            if d:IsA("TextLabel") then
+                                local t = d.Text:lower()
+                                if (rarL and #rarL >= 4 and t:find(rarL, 1, true))
+                                    or (nameL and #nameL >= 4 and t:find(nameL, 1, true)) then
+                                    matched = true
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    if matched then
+                        local p = modelPos(m)
+                        if p then return p, folderName .. "(text)" end
+                    end
+                end
             end
         end
     end
+
     return nil
 end
 
@@ -377,7 +517,7 @@ end
 local function hatchMyEggs()
     local hatched = 0
     for _, e in ipairs(getMyEggs()) do
-        local id = pick(e, { "id", "Id", "eggId", "uuid", "uid" })
+        local id = pick(e, { "id", "Id", "eggId", "uuid", "uid" }) or extractId(e)
         if id then
             if CONFIG.SKIP_GROWTH and not eggReady(e) then
                 invoke("Eggs: RequestSkipGrowth", id)
@@ -581,13 +721,30 @@ local function kaitunLoop()
         end
 
         -- 3. Tween tới trứng
-        local pos = findEggWorldPos(target)
+        local pos, posSource = findEggWorldPos(target)
         if not pos then
-            setStatus("Không xác định được vị trí trứng (xem console PROBE)")
-            warnLog("PROBE entry trứng để chỉnh field:")
+            setStatus("Không tìm được vị trí trứng - xem console")
+            warnLog("PROBE entry trứng (để đối chiếu field):")
             dumpTable(target.raw, "egg", 0, 15)
+            warnLog("PROBE model render trong workspace (3 mẫu đầu):")
+            for _, folderName in ipairs(RENDER_FOLDERS) do
+                local folder = workspace:FindFirstChild(folderName)
+                if folder then
+                    local n = 0
+                    for _, m in ipairs(folder:GetChildren()) do
+                        n = n + 1
+                        if n <= 3 then
+                            local attrs = {}
+                            for k, v in pairs(m:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(v) end
+                            warnLog("  " .. folderName .. "/" .. m.Name .. " | " .. table.concat(attrs, ", "))
+                        end
+                    end
+                end
+            end
+            task.wait(3)
             continue
         end
+        log("Vị trí trứng tìm qua:", posSource or "?", "| id=", target.id, "| rarity=", target.rarity or "?")
         setStatus(("Đi tới %s (%s)"):format(target.name or target.id or "?", target.rarity or "?"))
         setNoclip(true)
         tweenTo(pos)
