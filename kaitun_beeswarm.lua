@@ -75,12 +75,29 @@ local DEFAULT_CONFIG = {
     MeteorSummonerCooldown = 79200,
     MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
     AutoQuest = true,
-    QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear"},
-    QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear"},
-    QuestNPCBeeRequirements = {["Science Bear"] = 10},
+    QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
+    QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
+    QuestNPCBeeRequirements = {["Science Bear"] = 10, ["Polar Bear"] = 25},
+    -- Stop Black Bear right after the Diamond Egg quest ("Quest Of Legends").
+    -- The line is strictly sequential, so an ACTIVE quest past that point proves
+    -- the Diamond Egg was already claimed - detection works even for accounts
+    -- that finished it long before running this script (no script history needed).
+    BlackBearStopAfterQuest = "Quest Of Legends",
+    -- Compact list of quests AFTER the Diamond Egg quest (Star Jelly + Mythic
+    -- lines). Any of these active - or a repeatable "Black Bear: ..." quest -
+    -- proves the Diamond Egg is already claimed. Parsed into a lookup set once.
+    BlackBearPastQuests = "High Altitude|Blissfully Blue|Rouge Round-up|White As Snow"
+        .. "|Solo On The Stump|Colorful Craving|Pumpkins, Please!|Smorgasbord"
+        .. "|Pollen Fetcher 5|White Clover Redux|Strawberry Field Forever|Tasting The Sky"
+        .. "|Whispy and Crispy|Walk Through The Woods|Get Red-y|One Stop On The Tip Top"
+        .. "|Blue Mushrooms 2|Pretty Pumpkins|Black Bear, Why?|Bee A Star"
+        .. "|Bamboo Boogie 2: Bamboo Boogaloo|Rocky Red Mountain|Can't Without Ants"
+        .. "|The 15 Bee Zone|Bubble Trouble|Sweet And Sour|Rare Red Clover|Low Tier Treck"
+        .. "|Okey-Pokey|Pollen Fetcher 6|Capsaicin Collector|Mountain Mix|You Blue It"
+        .. "|Variety Fetcher 2|Getting Stumped|Weed Wacker 3|All-Whitey Then"
+        .. "|Red Delicacy|Boss Battles|Myth In The Making",
     AutoQuestFeedTasks = true,
     AutoQuestJellyTasks = true,
-    QuestTreatBatchSize = 10,
     -- Auto treat: spend 10% of earned honey on treats and feed the lowest-level
     -- bee until the whole hive shares one level.
     AutoTreatBees = true,
@@ -88,7 +105,6 @@ local DEFAULT_CONFIG = {
     TreatCycleHours = 1,
     TreatHoneyCost = 10,
     TreatBuyChunk = 100,
-    TreatFeedBatch = 100,
     TreatWorkerInterval = 5,
     -- Auto amulet: compares EACH STAT against the equipped amulet of the same type.
     -- Only replace when no stat is worse and at least one is better (strict win);
@@ -426,7 +442,7 @@ local function merge(target, source)
             or key == "QuestNPCs" or key == "QuestFarmPriority" or key == "BadgeNames"
             or key == "BlueBeeTypes" or key == "MythicBeeTypes" or key == "BestColorFields"
             or key == "EventBeeSequence" or key == "TeleRewardSpots" or key == "CommonBeeTypes"
-            or key == "AutoToys" or key == "BoostedFieldWhitelist"
+            or key == "AutoToys" or key == "BoostedFieldWhitelist" or key == "BlackBearPastQuests"
         if type(value) == "table" and type(target[key]) == "table" and not replaceTable then
             merge(target[key], value)
         else
@@ -439,8 +455,9 @@ end
 local Config = merge(deepCopy(DEFAULT_CONFIG), ENV.BSS_KAITUN_CONFIG or {})
 -- Mother Bear returns to the kaitun: "Feed Treats" and "Use Royal Jelly" tasks now have
 -- automatic handlers; pollen/mob tasks go through the quest router like other bears.
-Config.QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear"}
-Config.QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear"}
+-- Polar Bear joined last: run when the other bears have nothing to do.
+Config.QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"}
+Config.QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"}
 if Config.FixLagAtlasMode then
     -- Atlas preset: old configs must not accidentally re-enable heavy visuals.
     Config.LowGraphics = true
@@ -657,6 +674,8 @@ local Runtime = {
     ViciousPending = false,
     ViciousBusy = false,
     ViciousRetryAt = 0,
+    BlackBearStopped = false,
+    BlackBearPastSet = nil,
     NextWealthClockCheck = 0,
     WealthClockClaims = 0,
     ServerNowFunction = nil,
@@ -2724,8 +2743,40 @@ local function activeBearQuests(refresh)
     return result
 end
 
-local function questTaskDescription(taskData, stats)
-    if type(taskData.Description) == "string" then return taskData.Description end
+-- Black Bear Diamond Egg stop rule. The quest line is strictly sequential, so
+-- the account's ACTIVE quest alone reveals progress - no script history needed:
+--   "past"   = active quest is after "Quest Of Legends" (Star/Mythic line or a
+--              repeatable "Black Bear: ...") -> Diamond Egg already claimed.
+--   "at"     = active quest IS the Diamond Egg quest -> complete it, then stop.
+--   "before" = earlier quest -> keep going. "none" = no Black Bear quest yet.
+local function normalizedQuestName(value)
+    return string.lower(tostring(value or "")):gsub("[^%w]", "")
+end
+
+function Runtime.BlackBearStopState()
+    if Runtime.BlackBearStopped then return "past" end
+    if not Config.BlackBearStopAfterQuest then return "before" end
+    if not Runtime.BlackBearPastSet then
+        Runtime.BlackBearPastSet = {}
+        for name in string.gmatch(tostring(Config.BlackBearPastQuests or ""), "[^|]+") do
+            Runtime.BlackBearPastSet[normalizedQuestName(name)] = true
+        end
+    end
+    local stopQuest = normalizedQuestName(Config.BlackBearStopAfterQuest)
+    for _, quest in ipairs(activeBearQuests(false)) do
+        if quest.NPC == "Black Bear" then
+            local name = normalizedQuestName(quest.Name)
+            if name == stopQuest then return "at" end
+            if Runtime.BlackBearPastSet[name] then return "past" end
+            -- Repeatable quests ("Black Bear: ...") only unlock after the full line.
+            if string.sub(name, 1, 9) == "blackbear" then return "past" end
+            return "before"
+        end
+    end
+    return "none"
+end
+
+local function questTaskDescription(taskData, stats)    if type(taskData.Description) == "string" then return taskData.Description end
     if type(taskData.Description) == "function" then
         local ok, value = pcall(taskData.Description, stats)
         if ok then return tostring(value) end
@@ -3162,10 +3213,21 @@ local function maintainBearQuests()
                 end
             end
         end
+        -- Diamond Egg stop rule: never interact with Black Bear again once the
+        -- Diamond Egg quest is done or provably already claimed on this account.
+        if npcName == "Black Bear" and Config.BlackBearStopAfterQuest
+            and Runtime.BlackBearStopState() == "past" then
+            continue
+        end
         if not hasQuest or allDone then
+            local stopAfterTurnIn = npcName == "Black Bear" and hasQuest
+                and Runtime.BlackBearStopState() == "at"
             local ok = interactQuestNPC(npcName)
             if not ok then
                 setStatus("Quest NPC error", npcName .. " | " .. Runtime.NPCModuleError)
+            elseif stopAfterTurnIn then
+                Runtime.BlackBearStopped = true
+                setStatus("Black Bear done", "Diamond Egg claimed - stopping Black Bear quests")
             elseif npcName == "Science Bear" then
                 local confirmed = Runtime.WaitForScienceQuest(previousQuest)
                 if not confirmed then
@@ -3273,7 +3335,8 @@ function Runtime.FeedQuestTreats(objective)
         setStatus("Quest feed", "No bee found to feed")
         return false
     end
-    local batch = math.min(treats, math.max(1, math.floor(tonumber(Config.QuestTreatBatchSize) or 10)))
+    -- Feed EVERY treat in stock in a single remote call (fast, no batching).
+    local batch = treats
     Runtime.CurrentQuest = objective.Quest
     setStatus("Quest feed", string.format("Feed %d treat | %s (%d,%d)", batch, bee.Type, bee.X, bee.Y))
     local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
@@ -3469,7 +3532,8 @@ function Runtime.TreatLowestBee()
     local treats = math.floor(MaterialSystem.Amount("Treat"))
     if treats <= 0 then treats = Runtime.BuyTreatsForCycle() end
     if treats > 0 then
-        local batch = math.min(treats, math.max(1, math.floor(tonumber(Config.TreatFeedBatch) or 20)))
+        -- Feed EVERY treat in stock in a single remote call.
+        local batch = treats
         setStatus("Treat bee", focusMode
             and string.format("Focus feed %d treats | %s lv.%d | hive equal, keep until level up",
                 batch, target.Type, targetLevel)
@@ -3656,6 +3720,7 @@ function Runtime.HandleAmuletOffer(...)
     end
     setStatus("Amulet", string.format("%s %s | %s",
         accept and "REPLACE" or "KEEP", tostring(amuletName or "?"), detail))
+    Runtime.AmuletRemoteAt = os.clock()
     task.wait(0.3)
     remoteCall(accept and "ClientAcceptAmulet" or "ClientRejectAmulet",
         amuletType, amuletName, statsText)
@@ -3668,9 +3733,109 @@ if amuletOfferRemote and amuletOfferRemote:IsA("RemoteEvent") then
         local ok, err = xpcall(Runtime.HandleAmuletOffer, debug.traceback, ...)
         if not ok then reportError("Amulet", err) end
     end)
+    warn("[BSS Kaitun] Auto amulet armed (remote listener + GUI fallback)")
 else
-    warn("[BSS Kaitun] LocalAmuletEvent not found - auto amulet disabled")
+    warn("[BSS Kaitun] LocalAmuletEvent not found - GUI fallback only")
 end
+
+-- GUI fallback: some servers drive the amulet offer purely through the GUI, so
+-- also poll PlayerGui for the comparison menu. Reads the game's own green/red
+-- stat coloring (green = better, red = worse - zero guesswork) and clicks the
+-- game's own Accept/Decline button, which fires the correct remotes itself.
+local AMULET_ACCEPT_WORDS = {"accept", "take", "equip", "replace", "confirm"}
+local AMULET_DECLINE_WORDS = {"decline", "keep", "cancel", "discard", "current"}
+
+function Runtime.IsAmuletGui(object)
+    local cursor, depth = object, 0
+    while cursor and cursor ~= Player and depth < 12 do
+        if string.lower(cursor.Name):find("amulet", 1, true) then return true end
+        cursor = cursor.Parent
+        depth += 1
+    end
+    return false
+end
+
+function Runtime.HandleAmuletGui()
+    if not Config.AutoCompareAmulets then return false end
+    -- Yield while the remote path just answered the same offer.
+    if os.clock() - (Runtime.AmuletRemoteAt or 0) < 3 then return false end
+    local now = os.clock()
+    if now - (Runtime.AmuletGuiAt or 0) < 1.5 then return false end
+    local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return false end
+
+    local statLabels, acceptButton, declineButton, titleText = {}, nil, nil, nil
+    for _, object in ipairs(playerGui:GetDescendants()) do
+        if Runtime.IsAmuletGui(object) then
+            if object:IsA("TextLabel") and MaterialSystem.GuiVisible(object) then
+                local text = tostring(object.Text)
+                if text:find("+", 1, true) and text:find("%d", 1, true) then
+                    table.insert(statLabels, object)
+                elseif not titleText and #text > 3 then
+                    titleText = text
+                end
+            elseif object:IsA("TextButton") and MaterialSystem.GuiVisible(object) then
+                local label = string.lower(tostring(object.Text)):gsub("[^%w]", "")
+                if not acceptButton then
+                    for _, word in ipairs(AMULET_ACCEPT_WORDS) do
+                        if label:find(word, 1, true) then acceptButton = object break end
+                    end
+                end
+                if not declineButton then
+                    for _, word in ipairs(AMULET_DECLINE_WORDS) do
+                        if label:find(word, 1, true) then declineButton = object break end
+                    end
+                end
+            end
+        end
+    end
+
+    if not acceptButton and not declineButton then
+        Runtime.AmuletGuiAttempts = 0
+        return false
+    end
+
+    -- Replace only when nothing is red and at least one stat is green.
+    local green, red = 0, 0
+    for _, label in ipairs(statLabels) do
+        local color = label.TextColor3
+        if color then
+            if color.G > color.R + 0.2 and color.G > 0.45 then green += 1
+            elseif color.R > color.G + 0.2 and color.R > 0.45 then red += 1 end
+        end
+    end
+    local accept
+    if red > 0 then
+        accept = false
+    elseif green > 0 then
+        accept = true
+    else
+        -- No colored stats: accept only when no amulet of that kind is on.
+        accept = Runtime.EquippedAmuletStatsText(nil) == nil
+    end
+
+    Runtime.AmuletGuiAt = now
+    Runtime.AmuletGuiAttempts = (Runtime.AmuletGuiAttempts or 0) + 1
+    if Runtime.AmuletGuiAttempts > 6 then return false end
+    local button = accept and (acceptButton or declineButton) or (declineButton or acceptButton)
+    if not button then return false end
+    warn(string.format("[BSS Kaitun] Amulet GUI: %s | green=%d red=%d -> %s",
+        tostring(titleText or "?"), green, red, accept and "REPLACE" or "KEEP"))
+    setStatus("Amulet", string.format("%s %s | %d green %d red (gui)",
+        accept and "REPLACE" or "KEEP", tostring(titleText or "?"), green, red))
+    MaterialSystem.ActivateButton(button)
+    return true
+end
+
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoCompareAmulets then
+            local ok, err = xpcall(Runtime.HandleAmuletGui, debug.traceback)
+            if not ok then reportError("AmuletGui", err) end
+        end
+        task.wait(1)
+    end
+end)
 
 local function questWork(seconds)
     if not Config.AutoQuest then return false end
@@ -3680,6 +3845,16 @@ local function questWork(seconds)
     -- the scheduler is actually working on.
     Runtime.CurrentQuest = ""
     Runtime.QuestCurrentField = ""
+    -- Drop Black Bear objectives once the Diamond Egg rule says stop (e.g. an
+    -- already-accepted later quest on an account that passed the line before).
+    if Config.BlackBearStopAfterQuest
+        and (Runtime.BlackBearStopped or Runtime.BlackBearStopState() == "past") then
+        local filtered = {}
+        for _, objective in ipairs(objectives) do
+            if objective.NPC ~= "Black Bear" then table.insert(filtered, objective) end
+        end
+        objectives = filtered
+    end
     -- Feed treat / use Royal Jelly: instant tasks, completed before any
     -- travel-based tasks (mob/field).
     for _, objective in ipairs(objectives) do
@@ -3698,6 +3873,25 @@ local function questWork(seconds)
                 and tostring(objective.Task.Type) == "Defeat Monsters" then
                 local _, attempted = Runtime.FarmQuestMob(objective, Config.QuestMobFightTimeout)
                 if attempted then return true end
+            end
+        end
+    end
+    -- Blocked on a kill-mob cooldown (typical Polar Bear flow): camp Pine Tree
+    -- Forest and farm while waiting; FarmQuestMob grabs the mob the moment its
+    -- spawner is ready, then maintainBearQuests turns the quest in at the bear.
+    -- Only reached when there is no other quest plan left to farm.
+    if Config.AutoQuestMobs and fieldUnlocked("Pine Tree Forest") then
+        for _, objective in ipairs(objectives) do
+            if objective.Task and tostring(objective.Task.Type) == "Defeat Monsters" then
+                local campField = findField("Pine Tree Forest")
+                if campField then
+                    Runtime.CurrentQuest = objective.Quest
+                    Runtime.QuestFarming = true
+                    local ok = farmStep(seconds or Config.QuestFarmSeconds, campField,
+                        "Waiting for mob", "Pine Tree Forest | mob cooldown")
+                    Runtime.QuestFarming = false
+                    return ok
+                end
             end
         end
     end
