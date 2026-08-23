@@ -2,19 +2,19 @@
     Bee Swarm Kaitun - guide-aware progression
     Place: Bee Swarm Simulator (1537690962)
 
-    Luong chinh:
-      Tele reward map -> Claim hive -> redeem material codes -> mua gear theo moc bee
-      -> mua hive slot -> mua/no Basic Egg -> farm/convert -> lap lai den target.
+    Main flow:
+      Tele reward map -> Claim hive -> redeem material codes -> buy gear per bee milestone
+      -> buy hive slot -> buy/hatch Basic Egg -> farm/convert -> repeat until target.
 
-    Song song: tu mua event bee o Ticket Shop dung thu tu Tabby -> Photon ->
-    Cobalt -> Crimson ngay khi du ticket (xem EventBeeSequence + loop EventBeeShop).
+    Parallel: auto-buy event bees at the Ticket Shop in order Tabby -> Photon ->
+    Cobalt -> Crimson as soon as tickets suffice (see EventBeeSequence + EventBeeShop loop).
 
-    Huong build early game nghieng blue theo BSS Game Guide: uu tien sprinkler,
-    Bubble Wand khi macro, Bubble Mask va bao toan vat pham endgame.
+    Early-game build leans blue per BSS Game Guide: prioritize sprinkler,
+    Bubble Wand when macroing, Bubble Mask and endgame material preservation.
 ]]
 
 if game.PlaceId ~= 1537690962 then
-    warn("[BSS Kaitun] Sai game. PlaceId hien tai: " .. tostring(game.PlaceId))
+    warn("[BSS Kaitun] Wrong game. Current PlaceId: " .. tostring(game.PlaceId))
     return
 end
 
@@ -81,20 +81,21 @@ local DEFAULT_CONFIG = {
     AutoQuestFeedTasks = true,
     AutoQuestJellyTasks = true,
     QuestTreatBatchSize = 10,
-    -- Auto treat: mua treat bang 10% so honey kiem duoc, feed bee level thap
-    -- nhat den khi toan bo hive cung level.
+    -- Auto treat: spend 10% of earned honey on treats and feed the lowest-level
+    -- bee until the whole hive shares one level.
     AutoTreatBees = true,
     TreatBudgetPercent = 10,
     TreatCycleHours = 1,
     TreatHoneyCost = 10,
-    TreatFeedBatch = 20,
+    TreatBuyChunk = 100,
+    TreatFeedBatch = 100,
     TreatWorkerInterval = 5,
-    -- Auto amulet: so sanh TUNG STAT voi amulet cung loai dang de. Chi replace
-    -- khi khong stat nao kem hon va co it nhat 1 stat tot hon (thang tuyet doi);
-    -- con lai (lech hoac giong hec) -> keep. Khong dung trong so gia dinh.
+    -- Auto amulet: compares EACH STAT against the equipped amulet of the same type.
+    -- Only replace when no stat is worse and at least one is better (strict win);
+    -- otherwise (mixed or identical) -> keep. No made-up weights.
     AutoCompareAmulets = true,
     QuestJellyBatchMax = 5,
-    -- Jelly quest chi dung len common bee khong gifted de khong pha event/mythic.
+    -- Jelly quests only target non-gifted common bees so event/mythics stay safe.
     CommonBeeTypes = {"Basic", "Bumble", "Cool", "Hasty", "Rascal", "Stubborn"},
     QuestCheckInterval = 3,
     QuestInteractTimeout = 12,
@@ -108,6 +109,19 @@ local DEFAULT_CONFIG = {
     AutoClaimBadges = true,
     BadgeClaimInterval = 1.25,
     AutoWealthClock = true,
+    -- Free toys: only tap Free Ant Pass + Blue Field Booster (no Royal Jelly
+    -- dispenser and no Red/Top booster by request). When a Blue boost is active,
+    -- kaitun farms the boosted field.
+    AutoFreeToys = true,
+    AutoToys = {
+        {Name = "Free Ant Pass Dispenser", Cooldown = 7200},
+        {Name = "Blue Field Booster", Cooldown = 7200, FieldBoost = "Blue"},
+    },
+    -- Boosts only count for the 3 main blue fields; boosts on other fields are ignored.
+    BoostedFieldWhitelist = {"Pine Tree Forest", "Blue Flower Field", "Bamboo Field"},
+    -- Mondo Chick: spawns hourly on Mountain Top, drops Bitterberry/Neonberry.
+    AutoFarmMondoChick = true,
+    MondoChickFightTimeout = 120,
     WealthClockInterval = 3600,
     WealthClockCheckInterval = 15,
     WealthClockRetryInterval = 60,
@@ -135,7 +149,9 @@ local DEFAULT_CONFIG = {
     FireflyScanInterval = 0.25,
     FireflyLandingVelocity = 0.15,
     FireflyMaxFieldHeight = 4,
-    FireflyFarmBudget = 9,
+    -- 8 fireflies/formation: nudging all 8 + collecting the center reward needs a
+    -- bigger budget than the old 9s.
+    FireflyFarmBudget = 18,
     FireflyTouchTimeout = 2.5,
     FireflyTokenWindow = 3,
     FireflyRetryCooldown = 1.25,
@@ -145,6 +161,13 @@ local DEFAULT_CONFIG = {
     SproutMaxFarmSeconds = 180,
     SproutDropWindow = 20,
     AutoFarmVicious = true,
+    -- Damage-avoid strategy: fly above the Vicious (its spikes come from the ground)
+    -- and hover there while bees attack.
+    ViciousHoverHeight = 14,
+    -- Always farm Vicious whenever one spawns (night), without waiting for the
+    -- material planner. Only fight vic whose level is BELOW the hive average.
+    AutoFarmViciousAlways = true,
+    ViciousRespectHiveLevel = true,
     AutoMaterialPlanters = true,
     AutoNectarCondenser = true,
     MaterialFarmSeconds = 10,
@@ -165,9 +188,9 @@ local DEFAULT_CONFIG = {
     EventBeeStatsRefreshInterval = 2,
     EventBeeRetryCooldown = 12,
     EventBeeSequence = {
-        -- Package Type da verify truc tiep tu Workspace.Shops.TicketShop.Items
-        -- cua place BSS: {Category = "Eggs", Type = "TabbyBee"} ... Ten da verify
-        -- dung dau danh sach de executor khong require duoc ItemPackages van mua dung.
+        -- Package Types verified directly from Workspace.Shops.TicketShop.Items
+        -- from the BSS place: {Category = "Eggs", Type = "TabbyBee"} ... Verified name
+        -- first so executors that cannot require ItemPackages still buy correctly.
         {Shop = "Ticket Tent", Item = "Tabby Bee Egg", Category = "Eggs", Type = "Tabby", TicketCost = 500,
             PackageTypes = {"TabbyBee", "Tabby Bee", "Tabby"}},
         {Shop = "Ticket Tent", Item = "Photon Bee Egg", Category = "Eggs", Type = "Photon", TicketCost = 500,
@@ -177,8 +200,8 @@ local DEFAULT_CONFIG = {
         {Shop = "Ticket Tent", Item = "Crimson Bee Egg", Category = "Eggs", Type = "Crimson", TicketCost = 250,
             PackageTypes = {"CrimsonBee", "Crimson Bee", "Crimson"}},
     },
-    -- Tele rewards (goc tu telebss rewards.txt): ngay khi vao game, instant tele
-    -- tung diem reward tren map truoc khi claim hive/hatch. Toa do da test tay.
+    -- Tele rewards (from telebss rewards.txt): on game entry, instantly teleport
+    -- to each map reward point before claiming hive/hatching. Coordinates hand-tested.
     AutoTeleRewards = true,
     TeleRewardDwellSeconds = 2,
     TeleRewardSpots = {
@@ -188,9 +211,9 @@ local DEFAULT_CONFIG = {
         {Label = "Star Jelly", CFrame = CFrame.new(-435.52, 93.26, 48.78)},
         {Label = "Star Jelly", CFrame = CFrame.new(-480.57, 69.39, -0.42)},
         {Label = "Ticket", CFrame = CFrame.new(5.215, 174.664, -96.96)},
-        {Label = "Enzim", CFrame = CFrame.new(-105.185, 71.711, 557.967)},
-        {Label = "Enzim", CFrame = CFrame.new(-115.21, 71.747, 558.186)},
-        {Label = "Enzim", CFrame = CFrame.new(-124.223, 71.747, 558.221)},
+        {Label = "Enzymes", CFrame = CFrame.new(-105.185, 71.711, 557.967)},
+        {Label = "Enzymes", CFrame = CFrame.new(-115.21, 71.747, 558.186)},
+        {Label = "Enzymes", CFrame = CFrame.new(-124.223, 71.747, 558.221)},
         {Label = "Jelly", CFrame = CFrame.new(87.597, 310.219, -294.334)},
         {Label = "Star Jelly", CFrame = CFrame.new(524.506, 151.902, -411.876)},
         {Label = "Glue", CFrame = CFrame.new(369.314, 84.816, -237.077)},
@@ -201,17 +224,17 @@ local DEFAULT_CONFIG = {
         {Label = "Jelly", CFrame = CFrame.new(34.864, 57.965, 190.511)},
         {Label = "Jelly", CFrame = CFrame.new(-64.232, 37.717, 113.388)},
         {Label = "Jelly", CFrame = CFrame.new(146.351, 37.496, 266.086)},
-        {Label = "Banh Gau", CFrame = CFrame.new(47.836, 52.594, 398.93)},
-        {Label = "Enzim", CFrame = CFrame.new(226.929, 25252.527, -716.011)},
-        {Label = "Gliter", CFrame = CFrame.new(301.8563537597656, 25283.02734375, -807.7046508789062)},
+        {Label = "Bear Cookie", CFrame = CFrame.new(47.836, 52.594, 398.93)},
+        {Label = "Enzymes", CFrame = CFrame.new(226.929, 25252.527, -716.011)},
+        {Label = "Glitter", CFrame = CFrame.new(301.8563537597656, 25283.02734375, -807.7046508789062)},
         {Label = "Star Jelly", CFrame = CFrame.new(271.973, 25294.129, -871.085)},
         {Label = "Jelly", CFrame = CFrame.new(-189.317, 64.263, 367.295)},
-        {Label = "Enzim", CFrame = CFrame.new(3.3575220108032227, 304.2304992675781, -266.304931640625)},
+        {Label = "Enzymes", CFrame = CFrame.new(3.3575220108032227, 304.2304992675781, -266.304931640625)},
         {Label = "Bloom Sake", CFrame = CFrame.new(329.359, 193.14, -234.35)},
-        {Label = "Gliter", CFrame = CFrame.new(-336.5309143066406, 132.36778259277344, -384.9282531738281)},
+        {Label = "Glitter", CFrame = CFrame.new(-336.5309143066406, 132.36778259277344, -384.9282531738281)},
         {Label = "Jelly", CFrame = CFrame.new(-357.5382080078125, 129.8998565673828, -227.21456909179688)},
         {Label = "Ticket", CFrame = CFrame.new(-232.84506225585938, 184.9242706298828, -249.955322265625)},
-        {Label = "Banh Gau", CFrame = CFrame.new(-465.8412780761719, 109.4454116821289, -175.78443908691406)},
+        {Label = "Bear Cookie", CFrame = CFrame.new(-465.8412780761719, 109.4454116821289, -175.78443908691406)},
         {Label = "Ticket", CFrame = CFrame.new(98.66006469726562, 35.20281219482422, 355.489013671875)},
         {Label = "Ticket", CFrame = CFrame.new(-374.18780517578125, 19.293209075927734, 494.7056884767185)},
         {Label = "Ticket", CFrame = CFrame.new(14.022793769836426, 4.5928144454956055, 68.14900207519531)},
@@ -219,9 +242,9 @@ local DEFAULT_CONFIG = {
         {Label = "Ticket", CFrame = CFrame.new(-380.6947021484375, 54.6801872253418, 206.6320037841797)},
         {Label = "Ticket", CFrame = CFrame.new(131.64907836914062, 117.50926208496094, -63.04363250732422)},
         {Label = "Ticket", CFrame = CFrame.new(338.76171875, 130.92079162597656, -233.84364318847656)},
-        {Label = "Cay Thong", CFrame = CFrame.new(23.648874282836914, 17.36900520324707, 390.58270263671875)},
+        {Label = "Pine Tree", CFrame = CFrame.new(23.648874282836914, 17.36900520324707, 390.58270263671875)},
         {Label = "Gumdrop", CFrame = CFrame.new(32.6508674621582, 13.400006294250488, 405.8634033203125)},
-        {Label = "Cay Thong", CFrame = CFrame.new(43.54356384277344, 13.86900520324707, 373.79779052734375)},
+        {Label = "Pine Tree", CFrame = CFrame.new(43.54356384277344, 13.86900520324707, 373.79779052734375)},
     },
     AutoUnlockBlueHQ = true,
     BlueHQRequiredDiscoveries = 4,
@@ -238,12 +261,9 @@ local DEFAULT_CONFIG = {
     DynamicField = true,
     MacroMode = true,
     SafeMaterialMode = true,
-    -- Fix lag khong Destroy token/bee/field logic; Atlas chi xoa visual-only
-    -- SurfaceAppearance va decoration da loc, nen scanner van hoat dong.
-    -- CPU saver: fps cap la cai tiet kiem CPU lon nhat cho kaitun AFK.
-    CPUSaver = true,
-    CPUSaverFPSCap = 30,
-    -- Black screen UI: false = vao game khong co man den (van co the bam F7 bat lai).
+    -- Lag fix never Destroys token/bee/field logic; Atlas preset only removes visual-only
+    -- SurfaceAppearance and decorations are filtered, so scanners keep working.
+    -- Black screen UI: false = start without the dark overlay (F7 can still enable it).
     BlackScreen = true,
     LowGraphics = true,
     FixLagAtlasMode = true,
@@ -254,6 +274,7 @@ local DEFAULT_CONFIG = {
     FixLagHideParticles = true,
     FixLagHideDecorations = true,
     FixLagDeleteDecorations = true,
+    FixLagHidePlayers = true,
     FixLagHideWeather = true,
     FixLagRemoveTextures = true,
     FixLagPlasticMaterials = true,
@@ -264,8 +285,8 @@ local DEFAULT_CONFIG = {
     FixLagBrightness = 0.65,
     RedeemCodes = true,
     PromoCodes = {
-        -- Material codes duoc progression guide khuyen dung luc moi bat dau.
-        -- Khong tu redeem boost/event codes som de tranh lang phi field boost.
+        -- Material codes the progression guide recommends using right at the start.
+        -- Boost/event codes are not redeemed early to avoid wasting field boosts.
         "BeesBuzz123", "38217", "BopMaster", "Connoisseur",
         "Crawlers", "Nectar", "Roof", "Wax",
     },
@@ -289,13 +310,13 @@ local DEFAULT_CONFIG = {
     },
     ProgressionMilestones = {
         {TargetBees = 5, Items = {
-            -- Hai gia nay co dinh trong Basic Shop. Giu gia tai day de account moi
-            -- khong bi ket farm neu ItemPackages/GetCost cua executor tra cache rong.
+            -- These two prices are fixed in the Basic Shop. Keep them here so a fresh
+            -- account never stalls when executor ItemPackages/GetCost returns an empty cache.
             {Shop = "BasicShop", Item = "Clippers", Category = "Collector", Type = "Clippers", HoneyCost = 2200},
             {Shop = "BasicShop", Item = "Backpack", Category = "Accessory", Type = "Backpack", HoneyCost = 5500},
         }},
         {TargetBees = 10, Items = {
-            -- So 1 va 2 tren slide: capacity truoc, collector sau.
+            -- Numbers 1 and 2 on the slide: capacity first, collector second.
             {Shop = "BasicShop", Item = "Canister", Category = "Accessory", Type = "Canister", HoneyCost = 22000},
             {Shop = "BasicShop", Item = "Vacuum", Category = "Collector", Type = "Vacuum", HoneyCost = 14000},
             {Shop = "BasicShop", Item = "Basic Boots", Category = "Accessory", Type = "Basic Boots", HoneyCost = 4400, RequiresMaterials = true, SupersededBy = {"Hiking Boots", "Beekeeper's Boots", "Coconut Clogs"}},
@@ -303,19 +324,19 @@ local DEFAULT_CONFIG = {
             {Shop = "BasicShop", Item = "Helmet", Category = "Accessory", Type = "Helmet", HoneyCost = 30000, RequiresMaterials = true, SupersededBy = {"Propeller Hat", "Beekeeper's Mask", "Bubble Mask", "Diamond Mask"}},
         }},
         {TargetBees = 15, Items = {
-            -- Pulsar la so 1; cum container Pro Shop la so 2 tren slide.
+            -- Pulsar is #1; the Pro Shop container set is #2 on the slide.
             {Shop = "ProShop", Item = "Pulsar", Category = "Collector", Type = "Pulsar", HoneyCost = 125000},
             {Shop = "ProShop", Item = "Mega-Jug", Category = "Accessory", Type = "Mega-Jug", HoneyCost = 50000},
             {Shop = "ProShop", Item = "Compressor", Category = "Accessory", Type = "Compressor", HoneyCost = 160000},
             {Shop = "ProShop", Item = "Elite Barrel", Category = "Accessory", Type = "Elite Barrel", HoneyCost = 650000},
         }},
         {TargetBees = 20, EggRushAfter = true, Items = {
-            -- Sau Port-O-Hive, hoan tat dung thu tu nay roi dong bang gear phu
-            -- de danh toan bo honey cho Basic Egg/Hive Slot den 25 bee.
+            -- After Port-O-Hive, finish this order then freeze side gear
+            -- to save all honey for Basic Egg/Hive Slot up to 25 bees.
             {Shop = "ProShop", Item = "Port-O-Hive", Category = "Accessory", Type = "Port-O-Hive", HoneyCost = 1250000},
             {Shop = "ProShop", Item = "Propeller Hat", Category = "Accessory", Type = "Propeller Hat", HoneyCost = 2500000, RequiresMaterials = true, SupersededBy = {"Beekeeper's Mask", "Bubble Mask", "Diamond Mask"}},
             {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
-            -- Guard Pro Shop (gia theo wiki BSS): Looker 300K + 25 Sunflower Seed,
+            -- Pro Shop guards (prices per BSS wiki): Looker 300K + 25 Sunflower Seed,
             -- Brave 300K + 3 Stinger.
             {Shop = "ProShop", Item = "Looker Guard", Category = "Accessory", Type = "Looker Guard", HoneyCost = 300000, RequiresMaterials = true,
                 SupersededBy = {"Elite Blue Guard", "Elite Red Guard", "Cobalt Guard", "Crimson Guard"}},
@@ -323,10 +344,10 @@ local DEFAULT_CONFIG = {
                 SupersededBy = {"Elite Blue Guard", "Elite Red Guard", "Cobalt Guard", "Crimson Guard"}},
         }},
         {TargetBees = 25, EggRushAfter = true, Items = {
-            -- Retry Bubble Wand trong luc hatch: neu Blue HQ vua mo sau mot lan
-            -- Royal Jelly thi mua ngay, con neu van khoa thi tiep tuc egg rush.
+            -- Retry Bubble Wand while hatching: if Blue HQ just opened after one
+            -- Royal Jelly roll, buy immediately; if still locked continue the egg rush.
             {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
-            -- Elite Guards chuyen tu moc 33 bee len 25 bee theo yeu cau.
+            -- Elite Guards moved from the 33-bee milestone to 25 bees by request.
             {Shop = "BlueHQ", Item = "Elite Blue Guard", Category = "Accessory", Type = "Elite Blue Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Cobalt Guard"}},
             {Shop = "RedHQ", Item = "Elite Red Guard", Category = "Accessory", Type = "Elite Red Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Crimson Guard"}},
         }},
@@ -343,14 +364,14 @@ local DEFAULT_CONFIG = {
             {Shop = "Mountaintop", Item = "Porcelain Port-O-Hive", Category = "Accessory", Type = "Porcelain Port-O-Hive", HoneyCost = 250000000, RequiresMaterials = true},
         }},
         {TargetBees = 40, Items = {
-            -- Moc 40 bee: farm du material va mua dung thu tu guard xanh,
-            -- guard do, sau do Diamond Mask. Ba mon nay deu la bat buoc.
+            -- 40-bee milestone: farm materials and buy in exact order blue guard,
+            -- red guard, then Diamond Mask. All three are mandatory.
             {Shop = "MasterRoomShop", Item = "Cobalt Guard", Category = "Accessory", Type = "Cobalt Guard", HoneyCost = 200000000, RequiresMaterials = true},
             {Shop = "MasterRoomShop", Item = "Crimson Guard", Category = "Accessory", Type = "Crimson Guard", HoneyCost = 200000000, RequiresMaterials = true},
             {Shop = "DiamondMaskShop", Item = "Diamond Mask", Category = "Accessory", Type = "Diamond Mask", HoneyCost = 5000000000, RequiresMaterials = true},
         }},
         {TargetBees = 45, Items = {
-            -- Muc tieu song song sau khi hoan thanh bo 40 bee.
+            -- Parallel goals after finishing the 40-bee set.
             {Shop = "Petal Shop", Item = "Petal Belt", Category = "Accessory", Type = "Petal Belt", HoneyCost = 15000000000, RequiresMaterials = true, Optional = true},
             {Shop = "Coconut Cave", Item = "Coconut Canister", Category = "Accessory", Type = "Coconut Canister", HoneyCost = 25000000000, RequiresMaterials = true, Optional = true},
         }},
@@ -405,6 +426,7 @@ local function merge(target, source)
             or key == "QuestNPCs" or key == "QuestFarmPriority" or key == "BadgeNames"
             or key == "BlueBeeTypes" or key == "MythicBeeTypes" or key == "BestColorFields"
             or key == "EventBeeSequence" or key == "TeleRewardSpots" or key == "CommonBeeTypes"
+            or key == "AutoToys" or key == "BoostedFieldWhitelist"
         if type(value) == "table" and type(target[key]) == "table" and not replaceTable then
             merge(target[key], value)
         else
@@ -415,12 +437,12 @@ local function merge(target, source)
 end
 
 local Config = merge(deepCopy(DEFAULT_CONFIG), ENV.BSS_KAITUN_CONFIG or {})
--- Mother Bear quay lai kaitun: task "Feed Treats" va "Use Royal Jelly" da co
--- handler tu dong, con task pollen/mob di qua quest router nhu cac bear khac.
+-- Mother Bear returns to the kaitun: "Feed Treats" and "Use Royal Jelly" tasks now have
+-- automatic handlers; pollen/mob tasks go through the quest router like other bears.
 Config.QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear"}
 Config.QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear"}
 if Config.FixLagAtlasMode then
-    -- Preset Atlas: config cu khong the vo tinh bat lai cac visual nang.
+    -- Atlas preset: old configs must not accidentally re-enable heavy visuals.
     Config.LowGraphics = true
     Config.FixLagHideBees = true
     Config.FixLagHideTokens = true
@@ -434,6 +456,7 @@ if Config.FixLagAtlasMode then
     Config.FixLagPlasticMaterials = true
     Config.FixLagDisableLights = true
     Config.FixLagStopBeeAnimations = true
+    Config.FixLagHidePlayers = true
 end
 
 -- Requirements are kept in one table so the purchase scheduler, material UI and
@@ -552,7 +575,7 @@ repeat task.wait() until Player
 
 local Events = ReplicatedStorage:WaitForChild("Events", 30)
 if not Events then
-    warn("[BSS Kaitun] Khong tim thay ReplicatedStorage.Events")
+    warn("[BSS Kaitun] ReplicatedStorage.Events not found")
     return
 end
 
@@ -570,8 +593,8 @@ end
 
 local Runtime = {
     Running = true,
-    State = "Khoi dong",
-    Detail = "Dang cho nhan vat",
+    State = "Starting",
+    Detail = "Waiting for character",
     StartedAt = os.clock(),
     Connections = {},
     ActiveTween = nil,
@@ -625,6 +648,15 @@ local Runtime = {
     BadgeChecks = 0,
     LastBadgeName = "",
     LastWealthClockAttempt = -math.huge,
+    ToyRetryAt = {},
+    ToysClaimed = 0,
+    BoostedField = nil,
+    BoostedFieldUntil = 0,
+    MondoChickPending = false,
+    MondoChickRetryAt = 0,
+    ViciousPending = false,
+    ViciousBusy = false,
+    ViciousRetryAt = 0,
     NextWealthClockCheck = 0,
     WealthClockClaims = 0,
     ServerNowFunction = nil,
@@ -666,6 +698,8 @@ local Runtime = {
     MaterialRequirements = {},
     FireflyPending = false,
     FireflyBusy = false,
+    FireflyCenter = nil,
+    FireflyCenterAt = 0,
     FireflyCooldowns = setmetatable({}, {__mode = "k"}),
     FirefliesCollected = 0,
     LastFireflySeen = -math.huge,
@@ -736,8 +770,8 @@ local function coreValue(name, fallback)
     return fallback or 0
 end
 
--- Do honey/h theo cua so truot 10 phut: chi tinh phan Honey tang len (mua do
--- lam Honey giam khong bi tinh am). Tu sample moi 10s, giu toi da 10 phut.
+-- Tracks honey/h over a 10-minute sliding window: only increases count (buying
+-- lowers Honey but is not counted negative). Samples every 10s, keeps 10 minutes max.
 function Runtime.UpdateHoneyRate()
     local now = os.clock()
     local samples = Runtime.HoneyRateSamples
@@ -984,7 +1018,7 @@ local function restoreFieldMoveSpeed(expectedGeneration)
     local original = Runtime.FieldSpeedOriginal
     if humanoid and humanoid.Parent and original ~= nil then
         pcall(function()
-            -- Neu game da tu doi speed do buff/debuff thi khong ghi de gia tri moi.
+            -- If the game changed speed via buff/debuff, do not overwrite the new value.
             if humanoid.WalkSpeed == Config.FieldMoveSpeed then humanoid.WalkSpeed = original end
         end)
     end
@@ -1045,8 +1079,8 @@ local function tweenTo(target, speed, owner, forceWalk)
 
     -- Always walk when both points are inside the same FlowerZone, exactly like a
     -- normal player. Short non-field moves also walk. Obstruction falls back to tween.
-    -- Meteor token luon di bo. Neu token khong con nam trong field hien tai thi
-    -- huy target thay vi fallback sang tween va keo nhan vat qua field khac.
+    -- Meteor tokens always walk. If a token is no longer in the current field,
+    -- cancel the target instead of tweening the player across fields.
     if forceWalk and not walkingInsideField then
         Runtime.MovementOwner = nil
         return false, "walk target outside current field"
@@ -1067,12 +1101,12 @@ local function tweenTo(target, speed, owner, forceWalk)
             and (root.Position - position).Magnitude > Config.SmartArrivalDistance and os.clock() < walkDeadline do
             local now = os.clock()
             if walkingInsideField and Runtime.AvoidingMob then
-                -- Thoi gian dung nhay ne mob khong duoc tinh vao timeout MoveTo.
+                -- Time spent jump-dodging mobs does not count toward the MoveTo timeout.
                 walkDeadline += now - lastWalkTick
                 mobPaused = true
                 if Runtime.MobRelocating and typeof(Runtime.MobRelocateTarget) == "Vector3" then
-                    -- Avoid-Mob worker va Smart Move cung ra lenh ve mot dich, tranh
-                    -- MoveTo cua route token/field keo nguoi choi nguoc lai vi tri nguy hiem.
+                    -- Avoid-Mob worker and Smart Move issue the same destination, preventing
+                    -- a token/field route MoveTo from dragging the player back into danger.
                     humanoid:MoveTo(Runtime.MobRelocateTarget)
                 else
                     Runtime.MobHoldPosition = Runtime.MobHoldPosition or root.Position
@@ -1103,7 +1137,7 @@ local function tweenTo(target, speed, owner, forceWalk)
         end
     end
 
-    -- Giu root on dinh trong luc tween va giu nguyen va cham cua nhan vat.
+    -- Keep the root steady during the tween and preserve character collision.
     Runtime.TweenRoot = root
     Runtime.TweenRootWasAnchored = root.Anchored
     pcall(function()
@@ -1178,8 +1212,8 @@ local function cancelMovement()
     releaseTweenRoot()
 end
 
--- Dat Shutdown som de chay lai script van don duoc instance cu, ke ca khi
--- instance do dang o giua progression va chua vao main loop.
+-- Register Shutdown early so re-running the script still cleans the old instance,
+-- even when that instance is mid-progression and has not reached the main loop.
 function Runtime.Shutdown()
     if not Runtime.Running then return end
     Runtime.Running = false
@@ -1187,6 +1221,7 @@ function Runtime.Shutdown()
     for _, connection in ipairs(Runtime.Connections) do pcall(connection.Disconnect, connection) end
     Runtime.Connections = {}
     if Runtime.UI.Screen then pcall(Runtime.UI.Screen.Destroy, Runtime.UI.Screen) end
+    if Runtime.UI.TopScreen then pcall(Runtime.UI.TopScreen.Destroy, Runtime.UI.TopScreen) end
     if ENV.__BSS_KAITUN == Runtime then ENV.__BSS_KAITUN = nil end
 end
 
@@ -1251,8 +1286,8 @@ local function currentGearAtLeast(entry, stats)
     if not stats then return false end
     if entry.ForceOwn then return false end
     if entry.Category == "Collector" then
-        -- Rank theo route guide, khong theo thu tu khai bao cua game. Rake 800
-        -- honey khong duoc phep lam script bo qua Clippers/Vacuum.
+        -- Ranks follow the guide route, not the game's declaration order. Rake at 800
+        -- honey must not make the script skip Clippers/Vacuum.
         local ranks = {None = 0, Scooper = 0, Rake = 1, Clippers = 2, Magnet = 2,
             Vacuum = 3, ["Super-Scooper"] = 4, Pulsar = 5, Scissors = 6,
             ["Electro-Magnet"] = 7, ["Honey Dipper"] = 8, ["Bubble Wand"] = 9,
@@ -1277,8 +1312,8 @@ local function currentGearAtLeast(entry, stats)
 end
 
 local function livePlayerHas(entry)
-    -- ClientStatCache tren mot so mobile executor cap nhat cham sau Purchase.
-    -- Character/Backpack la bang chung replicated nhanh hon cho collector/accessory.
+    -- ClientStatCache updates slowly after Purchase on some mobile executors.
+    -- Character/Backpack replicate faster than stats as proof for collectors/accessories.
     local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
     for _, container in ipairs(containers) do
         if container then
@@ -1386,7 +1421,7 @@ end
 local function moveToShopItem(entry)
     local item, shop = findShopItem(entry)
     if not item then return false end
-    setStatus("Mua do", entry.Item .. " @ " .. entry.Shop)
+    setStatus("Buying gear", entry.Item .. " @ " .. entry.Shop)
     local position = objectPosition(item)
     if not position and shop then position = objectPosition(shop) end
     return position and tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Shop") or false
@@ -1411,7 +1446,7 @@ local function purchaseAndEquip(entry, fastRetry)
     if readiness == "unknown" then
         Runtime.PurchaseRetryAt[purchaseKey] = now
             + (fastRetry and Config.StarterDataRetryCooldown or Config.UnknownPurchaseRetryCooldown)
-        setStatus("Cho du lieu shop", entry.Item)
+        setStatus("Waiting for shop data", entry.Item)
         task.defer(function() getStats(true) end)
         return false, "unknown"
     elseif readiness ~= "ready" and readiness ~= "probe" then
@@ -1425,7 +1460,7 @@ local function purchaseAndEquip(entry, fastRetry)
     else
         -- Shop model may be renamed/streamed out while the purchase remote is still
         -- valid. Attempt once instead of freezing progression at the missing model.
-        setStatus("Mua do", "Remote fallback: " .. entry.Item)
+        setStatus("Buying gear", "Remote fallback: " .. entry.Item)
     end
     if Runtime.MeteorPriorityActive then
         Runtime.PurchaseRetryAt[purchaseKey] = nil
@@ -1434,8 +1469,8 @@ local function purchaseAndEquip(entry, fastRetry)
     local honeyBefore = liveCoreValue("Honey")
     local ok, purchased = remoteCall("ItemPackageEvent", "Purchase", getPackage(entry))
     local remoteConfirmed = ok and purchased == true
-    -- Purchase thuong tra nil du server da nhan. Equip ngay lap tuc vua ap dung
-    -- item neu mua thanh cong, vua lam inventory/equipped stats replicate nhanh.
+    -- Purchase often returns nil even when the server accepted. Equipping immediately
+    -- applies the item on success and makes inventory/equipped stats replicate faster.
     if ok and entry.Category ~= "Eggs" then
         remoteCall("ItemPackageEvent", "Equip", getPackage(entry))
     end
@@ -1461,7 +1496,7 @@ local function purchaseAndEquip(entry, fastRetry)
         Runtime.PurchaseRetryAt[purchaseKey] = os.clock()
             + (fastRetry and Config.StarterPurchaseRetryCooldown or Config.DeniedPurchaseRetryCooldown)
         local reason = ok and ("server result=" .. tostring(purchased)) or tostring(purchased)
-        setStatus("Cho mua", entry.Item .. " | " .. reason)
+        setStatus("Waiting to buy", entry.Item .. " | " .. reason)
     end
     return false, "purchase_failed"
 end
@@ -1527,7 +1562,7 @@ end
 
 local function claimHive()
     if findOwnedHive() then return true end
-    setStatus("Khoi tao", "Dang claim hive")
+    setStatus("Init", "Claiming hive")
     for attempt = 1, 12 do
         if not Runtime.Running then return false end
         while Runtime.Running and Runtime.MeteorPriorityActive do task.wait(0.05) end
@@ -1540,7 +1575,7 @@ local function claimHive()
             task.wait(1)
             if findOwnedHive() then return true end
         else
-            setStatus("Khoi tao", "Cho hive trong (" .. attempt .. "/12)")
+            setStatus("Init", "Waiting for free hive (" .. attempt .. "/12)")
             task.wait(Config.RetryDelay)
         end
     end
@@ -1566,15 +1601,15 @@ local function redeemCodes()
     getStats(true)
 end
 
--- Tele reward phase (goc tu telebss rewards.txt): instant teleport tung diem
--- reward tren map ngay khi vao game, TRUOC khi claim hive/hatch. Moi diem: dat
--- CFrame thang vao vi tri reward, dung yen tai cho + nudge len xuong bang CFrame
--- de touch pickup. Khong tween, khong bay len cao. Meteor van la uu tien tuyet doi.
+-- Tele reward phase (from telebss rewards.txt): instantly teleport to each
+-- map reward point on game entry, BEFORE claiming hive/hatching. Each point: set
+-- CFrame directly onto the reward, stand still + nudge up/down via CFrame
+-- to trigger the touch pickup. No tweening, no flying up. Meteor stays top priority.
 function Runtime.CollectWorldRewards()
     if not Config.AutoTeleRewards or Runtime.TeleRewardsDone then return false end
     local spots = Config.TeleRewardSpots or {}
-    -- Danh dau hoan thanh ngay khi vao: progression recovery loop khong bao gio
-    -- chay lai phan nay trong cung mot lan execute.
+    -- Mark done on entry: the progression recovery loop never
+    -- re-runs this phase within a single execution.
     Runtime.TeleRewardsDone = true
     if #spots <= 0 then return false end
     local dwell = math.max(0.3, tonumber(Config.TeleRewardDwellSeconds) or 2)
@@ -1594,7 +1629,7 @@ function Runtime.CollectWorldRewards()
         if not root then continue end
         setStatus("Tele reward", string.format("%d/%d %s", index, #spots, tostring(spot.Label or "reward")))
         pin(root, spot.CFrame)
-        -- Dung yen tai diem reward, nudge len xuong de kich hoat touch pickup.
+        -- Stand on the reward point, nudging up/down to trigger the touch pickup.
         local deadline = os.clock() + dwell
         while Runtime.Running and not Runtime.MeteorPriorityActive and os.clock() < deadline do
             local _, _, currentRoot = getCharacter(2)
@@ -1606,7 +1641,7 @@ function Runtime.CollectWorldRewards()
         end
         Runtime.TeleRewardsCollected += 1
     end
-    setStatus("Tele reward", string.format("Done %d/%d diem - chuyen sang claim hive", Runtime.TeleRewardsCollected, #spots))
+    setStatus("Tele reward", string.format("Done %d/%d spots - moving to hive claim", Runtime.TeleRewardsCollected, #spots))
     task.wait(0.2)
     return true
 end
@@ -1655,20 +1690,20 @@ local function buyBasicEgg()
     if readiness == "honey" then
         Runtime.WaitingForEggFunds = true
         Runtime.ProgressStage = "Saving honey for Basic Egg"
-        setStatus("Farm egg money", "Chua du honey - khong goi Purchase")
+        setStatus("Farm egg money", "Not enough honey - no Purchase call")
         return false
     elseif readiness == "locked" or readiness == "material" then
-        setStatus("Basic Egg bi khoa", readiness)
+        setStatus("Basic Egg locked", readiness)
         return false
     elseif readiness == "unknown" then
         -- The user-confirmed ItemPackageEvent remote works globally. On executors
         -- that cannot require ItemPackages, probe it directly instead of repeatedly
         -- tweening to Basic Shop merely to check the price.
-        setStatus("Mua Basic Egg", "Remote fallback - khong den dispenser")
+        setStatus("Buying Basic Egg", "Remote fallback - skip the dispenser")
     end
     Runtime.WaitingForEggFunds = false
     Runtime.PurchaseRetryAt[purchaseKey] = os.clock() + Config.PurchaseRetryCooldown
-    setStatus("Mua Basic Egg", "Dang mua trung cho hive")
+    setStatus("Buying Basic Egg", "Buying eggs for the hive")
     local before = eggCount("Basic")
     local beforeRaw = rawEggCount("Basic")
     local honeyBefore = liveCoreValue("Honey")
@@ -1695,7 +1730,7 @@ local function buyBasicEgg()
         Runtime.PurchaseRetryAt[purchaseKey] = os.clock()
             + (fallbackProbe and Config.UnknownPurchaseRetryCooldown or Config.DeniedPurchaseRetryCooldown)
         if packageReadiness(Config.BasicEgg) == "honey" then Runtime.WaitingForEggFunds = true end
-        setStatus("Cho mua Basic Egg", ok and ("server result=" .. tostring(result)) or tostring(result))
+        setStatus("Waiting for Basic Egg", ok and ("server result=" .. tostring(result)) or tostring(result))
     else
         setBasicEggShadow(math.max(before + 1, afterRaw))
         Runtime.WaitingForEggFunds = false
@@ -1809,7 +1844,7 @@ end
 local function hatchOneBasicEgg()
     if Runtime.MeteorPriorityActive then return false end
     local beforeBees = beeCount()
-    setStatus("No Basic Egg", string.format("Hive %d/%d bee", beforeBees, hiveCapacity()))
+    setStatus("Hatching Basic Egg", string.format("Hive %d/%d bee", beforeBees, hiveCapacity()))
 
     -- ClaimHive grants a free Basic Egg, but ClientStatCache can arrive late. Try
     -- the center cell first before walking to the dispenser or spending honey.
@@ -1831,7 +1866,7 @@ local function hatchOneBasicEgg()
     if eggCount("Basic") <= 0 and not buyBasicEgg() then return false end
 
     local order = {{3, 3}, {3, 4}, {3, 5}, {2, 3}, {4, 3}}
-    -- HoneycombTools cua game duyet CellX 1..5 va CellY 1..10.
+    -- The game's HoneycombTools iterates CellX 1..5 and CellY 1..10.
     for x = 1, 5 do
         for y = 1, 10 do table.insert(order, {x, y}) end
     end
@@ -1964,10 +1999,10 @@ function Runtime.EventBeePackage(entry, stats)
 end
 
 function Runtime.NextEventBee(refresh)
-    -- Loop mua chay moi 0.5s nhung khong can ep RetrievePlayerStats/StatCache
-    -- moi tick: chi refresh khi den han EventBeeStatsRefreshInterval, giua chan
-    -- dung stats da cache. Voi van toc nay ticket van duoc mua trong ~2s sau
-    -- khi du dieu kien.
+    -- The buy loop runs every 0.5s but must not force RetrievePlayerStats/StatCache
+    -- every tick: only refresh when EventBeeStatsRefreshInterval is due; between
+    -- checks use cached stats. At this rate tickets are still bought within ~2s of
+    -- becoming affordable.
     if refresh and os.clock() - Runtime.LastEventBeeStatsRefresh
         < math.max(0.5, tonumber(Config.EventBeeStatsRefreshInterval) or 2) then
         refresh = false
@@ -1995,15 +2030,15 @@ function Runtime.BuyNextEventBee()
     if not entry then return false end
 
     local required = math.max(0, math.floor(tonumber(entry.TicketCost) or 0))
-    -- Strict order: khong du 500 cho Tabby/Photon thi giu ticket, khong nhay
-    -- xuong mua Cobalt/Crimson 250 truoc.
+    -- Strict order: below 500 for Tabby/Photon keep the tickets; do not skip ahead
+    -- to buy the 250-cost Cobalt/Crimson first.
     if tickets < required then return false end
     local purchaseKey = "EventBee:" .. tostring(entry.Type)
     if (Runtime.PurchaseRetryAt[purchaseKey] or 0) > now then return false end
 
     Runtime.EventBeeBusy = true
     Runtime.PurchaseRetryAt[purchaseKey] = now + math.max(2, tonumber(Config.EventBeeRetryCooldown) or 12)
-    setStatus("Mua Event Bee", string.format("%s | %d/%d tickets", entry.Item, tickets, required))
+    setStatus("Buying Event Bee", string.format("%s | %d/%d tickets", entry.Item, tickets, required))
     local package = Runtime.EventBeePackage(entry, stats)
     if Runtime.MeteorPriorityActive then
         Runtime.EventBeeBusy = false
@@ -2021,9 +2056,9 @@ function Runtime.BuyNextEventBee()
         Runtime.EventBeesPurchased += 1
         Runtime.EventBeePending = false
         Runtime.PurchaseRetryAt[purchaseKey] = nil
-        setStatus("Da mua Event Bee", entry.Item .. " | con " .. tostring(ticketsAfter) .. " tickets")
+        setStatus("Bought Event Bee", entry.Item .. " | " .. tostring(ticketsAfter) .. " tickets left")
     else
-        setStatus("Cho mua Event Bee", entry.Item .. " | server result=" .. tostring(result))
+        setStatus("Waiting for Event Bee", entry.Item .. " | server result=" .. tostring(result))
     end
     Runtime.EventBeeBusy = false
     return acquired
@@ -2076,20 +2111,20 @@ local function buyHiveSlot()
     local readiness = packageReadiness(HIVE_SLOT)
     local fallbackProbe = readiness == "unknown"
     if readiness == "honey" then
-        setStatus("Farm hive money", "Chua du honey - khong den shop")
+        setStatus("Farm hive money", "Not enough honey - skip the shop")
         return false
     elseif readiness == "locked" or readiness == "material" then
-        setStatus("Hive Slot bi khoa", readiness)
+        setStatus("Hive Slot locked", readiness)
         return false
     elseif readiness == "unknown" then
         -- Cost scales with slot count; when ItemPackages is unavailable the server
         -- remains the source of truth. Probe once under the normal purchase cooldown.
-        setStatus("Mo hive slot", "Remote fallback")
+        setStatus("Opening hive slot", "Remote fallback")
     end
     Runtime.PurchaseRetryAt[purchaseKey] = os.clock() + Config.PurchaseRetryCooldown
-    setStatus("Mo hive slot", string.format("Suc chua hive: %d", before))
+    setStatus("Opening hive slot", string.format("Hive capacity: %d", before))
     local moved = fallbackProbe or moveToShopItem(HIVE_SLOT)
-    if not moved then setStatus("Mo hive slot", "Remote fallback") end
+    if not moved then setStatus("Opening hive slot", "Remote fallback") end
     if Runtime.MeteorPriorityActive then
         Runtime.PurchaseRetryAt[purchaseKey] = nil
         return false
@@ -2108,7 +2143,7 @@ local function buyHiveSlot()
     if not acquired then
         Runtime.PurchaseRetryAt[purchaseKey] = os.clock()
             + (fallbackProbe and Config.UnknownPurchaseRetryCooldown or Config.DeniedPurchaseRetryCooldown)
-        setStatus("Cho Hive Slot", ok and ("server result=" .. tostring(result)) or tostring(result))
+        setStatus("Waiting for Hive Slot", ok and ("server result=" .. tostring(result)) or tostring(result))
     else
         Runtime.PurchaseRetryAt[purchaseKey] = nil
     end
@@ -2165,7 +2200,7 @@ function Runtime.ClaimWealthClock()
     end
 
     Runtime.LastWealthClockAttempt = now
-    setStatus("Wealth Clock", "Auto claim thuong moi 1 gio")
+    setStatus("Wealth Clock", "Auto claim reward every hour")
     local ok = remoteCall("ToyEvent", "Wealth Clock")
     if ok then
         Runtime.WealthClockClaims += 1
@@ -2198,6 +2233,12 @@ local function fieldUnlocked(name)
 end
 
 local function selectedFieldName()
+    -- A booster-buffed field (x2+ pollen) always wins: farm exactly that field
+    -- until the buff expires.
+    if Runtime.BoostedField and os.clock() < (Runtime.BoostedFieldUntil or 0)
+        and fieldUnlocked(Runtime.BoostedField) then
+        return Runtime.BoostedField
+    end
     if not Config.DynamicField then return Config.FarmField end
     local count = beeCount()
     local selected = Config.FarmField
@@ -2502,12 +2543,12 @@ local function farmStep(seconds, overrideField, state, detail)
     if Runtime.MeteorPriorityActive then return false end
     local field = overrideField or getField()
     if not field then
-        setStatus("Farm", "Khong tim thay field: " .. tostring(selectedFieldName()))
+        setStatus("Farm", "Field not found: " .. tostring(selectedFieldName()))
         task.wait(1)
         return false
     end
     if not fieldUnlocked(field.Name) then
-        setStatus("Field bi khoa", string.format("%s | can %d bees", field.Name, FIELD_REQUIREMENTS[field.Name] or -1))
+        setStatus("Field locked", string.format("%s | needs %d bees", field.Name, FIELD_REQUIREMENTS[field.Name] or -1))
         return false
     end
     Runtime.CurrentField = field.Name
@@ -2560,6 +2601,94 @@ local FIELD_COLORS = {
     ["Pepper Patch"] = "Red", ["Blue Flower Field"] = "Blue", ["Bamboo Field"] = "Blue",
     ["Pine Tree Forest"] = "Blue", ["Stump Field"] = "Blue",
 }
+
+-- Free toys (Ant Pass, Blue Field Booster...): same pattern as Wealth Clock - reads
+-- ToyTimes + the toy instance's Cooldown to avoid spam; fires only 1 remote.
+function Runtime.ClaimFreeToys()
+    if not Config.AutoFreeToys or not Config.Enabled or Runtime.MeteorPriorityActive then return false end
+    local now = os.clock()
+    if now < (Runtime.NextFreeToyCheck or 0) then return false end
+    Runtime.NextFreeToyCheck = now + 5
+    local stats = getStats(false)
+    local serverNow = MaterialSystem.Clock()
+    local toysFolder = workspace:FindFirstChild("Toys")
+    for _, toyEntry in ipairs(Config.AutoToys or {}) do
+        local toyName = tostring(toyEntry.Name or "")
+        if toyName ~= "" and (Runtime.ToyRetryAt[toyName] or 0) <= now then
+            local cooldown = math.max(60, tonumber(toyEntry.Cooldown) or 7200)
+            local toyInstance = toysFolder and toysFolder:FindFirstChild(toyName)
+            if toyInstance then
+                local cooldownValue = toyInstance:FindFirstChild("Cooldown")
+                if cooldownValue and cooldownValue:IsA("ValueBase") then
+                    cooldown = math.max(60, tonumber(cooldownValue.Value) or cooldown)
+                end
+            end
+            local toyTimes = type(stats) == "table" and stats.ToyTimes or nil
+            local lastUse = type(toyTimes) == "table" and tonumber(toyTimes[toyName]) or nil
+            local remaining = lastUse and math.max(0, cooldown - (serverNow - lastUse)) or 0
+            if remaining > 0 then
+                Runtime.ToyRetryAt[toyName] = now + math.clamp(remaining, 5, 300)
+            else
+                Runtime.ToyRetryAt[toyName] = now + cooldown
+                setStatus("Free toy", toyName)
+                if remoteCall("ToyEvent", toyName) then
+                    Runtime.ToysClaimed += 1
+                    if toyEntry.FieldBoost then
+                        task.wait(1)
+                        Runtime.DetectFieldBoost(MaterialSystem.Stats(true), toyEntry.FieldBoost)
+                    end
+                end
+            end
+        end
+    end
+    return true
+end
+
+-- Find the buffed field in stats (field name -> multiplier/expire map).
+-- Only fields in BoostedFieldWhitelist (the 3 main blue fields) are accepted;
+-- preferring the field matching the tapped booster color (Blue).
+function Runtime.DetectFieldBoost(stats, colorHint)
+    if type(stats) ~= "table" then return false end
+    local whitelist = Config.BoostedFieldWhitelist
+    local function allowed(fieldName)
+        if type(whitelist) ~= "table" or #whitelist <= 0 then return true end
+        for _, name in ipairs(whitelist) do
+            if name == fieldName then return true end
+        end
+        return false
+    end
+    local visited = {}
+    local best, bestIsHinted
+    local function scan(value)
+        if type(value) ~= "table" or visited[value] then return end
+        visited[value] = true
+        for key, child in pairs(value) do
+            if type(key) == "string" and FIELD_COLORS[key] ~= nil and allowed(key) then
+                local multiplier = tonumber(child)
+                if type(child) == "table" then
+                    multiplier = tonumber(child.Value or child.Mult or child.Boost or child.Amount or child.Multiplier)
+                end
+                if multiplier and multiplier > 1 then
+                    local hinted = colorHint ~= nil and FIELD_COLORS[key] == colorHint
+                    if not best or (hinted and not bestIsHinted) then
+                        best = key
+                        bestIsHinted = hinted
+                    end
+                end
+            elseif type(child) == "table" then
+                scan(child)
+            end
+        end
+    end
+    scan(stats)
+    if best and fieldUnlocked(best) then
+        Runtime.BoostedField = best
+        Runtime.BoostedFieldUntil = os.clock() + 900
+        setStatus("Field boost", string.format("%s | farm this field for %d min", best, 15))
+        return true
+    end
+    return false
+end
 
 local function questCall(method, ...)
     if not okQuests or type(Quests) ~= "table" or type(Quests[method]) ~= "function" then return nil end
@@ -2857,8 +2986,8 @@ local function objectiveField(objective)
     local taskData = objective.Task
     if taskData.Zone then
         if fieldUnlocked(taskData.Zone) then return taskData.Zone, true end
-        -- Farm o field thay the khong lam tang objective yeu cau dung Zone.
-        -- Bo qua objective bi khoa de planner co the chuyen sang Science Bear.
+        -- Farming an alternate field does not advance objectives requiring a specific Zone.
+        -- Skip locked objectives so the planner can move to Science Bear.
         return nil, true
     end
     local color = taskData.Color or taskData.Tag
@@ -2958,17 +3087,17 @@ local function interactQuestNPC(name)
     local npc = findQuestNPC(name)
     local platform = npc and npc:FindFirstChild("Platform", true)
     if not npc or not platform or not platform:IsA("BasePart") then
-        Runtime.NPCModuleError = "khong tim thay NPC.Platform"
+        Runtime.NPCModuleError = "NPC.Platform not found"
         return false
     end
-    setStatus("Den NPC", name)
+    setStatus("Going to NPC", name)
     if not tweenTo(CFrame.new(platform.Position + Vector3.new(0, 5, 0)), Config.TweenSpeed, "QuestNPC") then return false end
     task.wait(1)
     if Runtime.MeteorPriorityActive then return false end
     local _, _, root = getCharacter(1)
     local distance = root and (root.Position - platform.Position).Magnitude or math.huge
     if distance > 25 then
-        Runtime.NPCModuleError = string.format("ngoai tam %.1f studs", distance)
+        Runtime.NPCModuleError = string.format("out of range %.1f studs", distance)
         return false
     end
 
@@ -2984,7 +3113,7 @@ local function interactQuestNPC(name)
     local opened = false
     for attempt = 1, 3 do
         if Runtime.MeteorPriorityActive then return false end
-        setStatus("Nhan/tra quest", string.format("%s | lan %d/3", name, attempt))
+        setStatus("Turn in/accept quest", string.format("%s | attempt %d/3", name, attempt))
         local oldIdentity
         if type(GetThreadIdentity) == "function" then pcall(function() oldIdentity = GetThreadIdentity() end) end
         if type(SetThreadIdentity) == "function" then pcall(SetThreadIdentity, 2) end
@@ -3036,13 +3165,13 @@ local function maintainBearQuests()
         if not hasQuest or allDone then
             local ok = interactQuestNPC(npcName)
             if not ok then
-                setStatus("Quest NPC loi", npcName .. " | " .. Runtime.NPCModuleError)
+                setStatus("Quest NPC error", npcName .. " | " .. Runtime.NPCModuleError)
             elseif npcName == "Science Bear" then
                 local confirmed = Runtime.WaitForScienceQuest(previousQuest)
                 if not confirmed then
                     Runtime.LastQuestCheck = -math.huge
-                    Runtime.NPCModuleError = "Science quest chua replicate - se scan lai"
-                    setStatus("Cho Science quest", Runtime.NPCModuleError)
+                    Runtime.NPCModuleError = "Science quest not replicated - will rescan"
+                    setStatus("Waiting for Science quest", Runtime.NPCModuleError)
                 end
             end
             return true
@@ -3051,10 +3180,10 @@ local function maintainBearQuests()
     return false
 end
 
--- Mother Bear quest engine: tu dong lam task "Feed X Treats" va "Use X Royal
--- Jelly". Ca hai deu dung chung remote ConstructHiveCellFromEgg (nhu Basic Egg
--- va Unlock Blue HQ): eggType = "Treat" hoac "RoyalJelly". Jelly chi dung len
--- common bee khong gifted de khong pha event/mythic bee.
+-- Mother Bear quest engine: auto-completes "Feed X Treats" and "Use X Royal
+-- Jelly" tasks. Both share the ConstructHiveCellFromEgg remote (like Basic Egg
+-- and Unlock Blue HQ): eggType = "Treat" or "RoyalJelly". Jelly only targets
+-- non-gifted common bees so event/mythic bees stay untouched.
 local function hiveBeeCells()
     local reference = Player:FindFirstChild("Honeycomb")
     local hive = reference and reference:IsA("ObjectValue") and reference.Value
@@ -3088,8 +3217,8 @@ function Runtime.IsCommonBeeType(value)
     return false
 end
 
--- Bee an toan lam muc tieu: common khong gifted la tuyet doi an toan; neu khong
--- commonOnly thi fallback sang bee dau tien khong bi khoa (chi dung cho feed).
+-- Safe target bee: non-gifted common is always safe; when not
+-- commonOnly, fall back to the first unlocked bee (feed only).
 function Runtime.FindQuestTargetBee(commonOnly)
     local fallback
     for _, entry in ipairs(hiveBeeCells()) do
@@ -3104,9 +3233,9 @@ function Runtime.FindQuestTargetBee(commonOnly)
     return fallback
 end
 
--- Phan loai task theo Type + Description: "jelly" = use royal jelly,
--- "treat" = feed treat, nil = task khac. Match chu phong thuc de chiu duoc
--- su khac nhau giua cac phien ban quest module.
+-- Task classification by Type + Description: "jelly" = use royal jelly,
+-- "treat" = feed treat, nil = other. Case-insensitive matching toler
+-- differences between quest module versions.
 function Runtime.QuestTaskKind(objective)
     local taskData = type(objective) == "table" and objective.Task or {}
     local text = string.lower(tostring(taskData.Type or "") .. " " .. tostring(objective and objective.Description or ""))
@@ -3136,12 +3265,12 @@ function Runtime.FeedQuestTreats(objective)
     local stats = MaterialSystem.Stats(true)
     local treats = math.floor(MaterialSystem.Amount("Treat", stats))
     if treats <= 0 then
-        setStatus("Quest feed", "Het treat - cho reward/quest khac bo tro")
+        setStatus("Quest feed", "Out of treats - wait for rewards/quests")
         return false
     end
     local bee = Runtime.FindQuestTargetBee(false)
     if not bee then
-        setStatus("Quest feed", "Khong tim thay bee de feed")
+        setStatus("Quest feed", "No bee found to feed")
         return false
     end
     local batch = math.min(treats, math.max(1, math.floor(tonumber(Config.QuestTreatBatchSize) or 10)))
@@ -3162,16 +3291,16 @@ function Runtime.UseQuestRoyalJelly(objective)
     while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
         local stats = MaterialSystem.Stats(used == 0)
         if math.floor(MaterialSystem.Amount("RoyalJelly", stats)) <= 0 then
-            setStatus("Quest jelly", "Het Royal Jelly - cho reward/blender bo tro")
+            setStatus("Quest jelly", "Out of Royal Jelly - wait for rewards/blender")
             break
         end
         local bee = Runtime.FindQuestTargetBee(true)
         if not bee then
-            setStatus("Quest jelly", "Khong con common bee (khong gifted) de dung jelly")
+            setStatus("Quest jelly", "No non-gifted common bee left for jelly")
             break
         end
         Runtime.CurrentQuest = objective.Quest
-        setStatus("Quest jelly", string.format("Dung Royal Jelly len %s (%d,%d)", bee.Type, bee.X, bee.Y))
+        setStatus("Quest jelly", string.format("Using Royal Jelly on %s (%d,%d)", bee.Type, bee.X, bee.Y))
         local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
             "ConstructHiveCellFromEgg", bee.X, bee.Y, "RoyalJelly", 1)
         applyHatchResponse("RoyalJelly", remaining, success, honeycomb, discoveredBees, eggUses)
@@ -3183,10 +3312,10 @@ function Runtime.UseQuestRoyalJelly(objective)
     return used > 0
 end
 
--- Auto treat (doc lap voi quest): theo CHU KY GIO. Moi 1h, lay 10% so honey
--- kiem duoc trong gio vua roi de mua treat, roi feed HET treat trong kho vao
--- bee level thap nhat den khi ca hive bang level. Het budget thi cho den
--- chu ky gio ke tiep moi mua tiep.
+-- Auto treat (independent of quests): HOURLY CYCLE. Every 1h, take 10% of the
+-- honey earned in the past hour to buy treats, then feed ALL treats in stock
+-- to the lowest-level bee until the whole hive is equal. When the budget runs
+-- out, wait for the next hourly cycle.
 function Runtime.HiveBeeLevel(entry)
     local cell = entry.Instance
     if not cell then return nil end
@@ -3217,7 +3346,7 @@ function Runtime.TreatCycleRollover()
     local now = os.clock()
     local cycleSeconds = math.max(60, (tonumber(Config.TreatCycleHours) or 1) * 3600)
     if Runtime.TreatCycleStart == nil then
-        -- Gio dau tien chua co budget: bat dau do honey tu luc khoi dong script.
+        -- First hour has no budget yet: start measuring honey from script start.
         Runtime.TreatCycleStart = now
         Runtime.TreatCycleBase = Runtime.HoneyRateTotal
         return
@@ -3229,7 +3358,7 @@ function Runtime.TreatCycleRollover()
     Runtime.TreatCycleBoughtHoney = 0
     Runtime.TreatCycleBase = Runtime.HoneyRateTotal
     Runtime.TreatCycleStart = now
-    setStatus("Treat bee", string.format("Chu ky moi: budget %s honey (%d%% so honey kiem duoc)",
+    setStatus("Treat bee", string.format("New cycle: budget %s honey (%d%% of earned honey)",
         formatNumber(Runtime.TreatCycleBudget), percent))
 end
 
@@ -3239,22 +3368,38 @@ function Runtime.BuyTreatsForCycle()
     local boughtHoney = Runtime.TreatCycleBoughtHoney or 0
     local remainingHoney = budget - boughtHoney
     if remainingHoney < unitCost then
-        setStatus("Treat bee", string.format("Het budget gio nay (%s/%s honey) - cho gio sau",
+        setStatus("Treat bee", string.format("Hourly budget used (%s/%s honey) - wait for next hour",
             formatNumber(boughtHoney), formatNumber(budget)))
         return 0
     end
     local purchaseKey = "Eggs:Treat"
     if (Runtime.PurchaseRetryAt[purchaseKey] or 0) > os.clock() then return 0 end
-    Runtime.PurchaseRetryAt[purchaseKey] = os.clock() + 10
-    -- Mua nho lo (toi da 10/lan) cho den khi het budget cua gio.
-    local wanted = math.min(10, math.floor(remainingHoney / unitCost))
-    setStatus("Treat bee", string.format("Mua %d treat | budget %s/%s honey",
-        wanted, formatNumber(boughtHoney), formatNumber(budget)))
+    Runtime.PurchaseRetryAt[purchaseKey] = os.clock() + 2
+    -- Buy in big chunks (package Amount - same mechanism as shop "Treat x100"
+    -- items) to spend the budget fast instead of trickling one by one.
+    local affordable = math.floor(remainingHoney / unitCost)
+    local chunk = math.min(affordable, math.max(1, math.floor(tonumber(Config.TreatBuyChunk) or 100)))
+    setStatus("Treat bee", string.format("Buy %d treats | budget %s/%s honey",
+        chunk, formatNumber(boughtHoney), formatNumber(budget)))
+    local treatsBefore = math.floor(MaterialSystem.Amount("Treat"))
+    local ok, result = remoteCall("ItemPackageEvent", "Purchase",
+        {Category = "Eggs", Type = "Treat", Amount = chunk})
+    task.wait(0.5)
+    local treatsAfter = math.floor(MaterialSystem.Amount("Treat", MaterialSystem.Stats(true)))
+    local gained = treatsAfter - treatsBefore
+    if (ok and result ~= false) or gained > 0 then
+        local bought = gained > 0 and gained or chunk
+        Runtime.TreatCycleBoughtHoney = boughtHoney + bought * unitCost
+        Runtime.PurchaseRetryAt[purchaseKey] = nil
+        task.defer(function() MaterialSystem.Stats(true) end)
+        return bought
+    end
+    -- Server rejected the chunk purchase: fall back to single buys (max 10/pass).
     local bought = 0
-    for _ = 1, wanted do
-        local ok, result = remoteCall("ItemPackageEvent", "Purchase",
+    for _ = 1, math.min(chunk, 10) do
+        local okOne, resultOne = remoteCall("ItemPackageEvent", "Purchase",
             {Category = "Eggs", Type = "Treat", Amount = 1})
-        if ok and result ~= false then
+        if okOne and resultOne ~= false then
             bought += 1
             Runtime.TreatCycleBoughtHoney = boughtHoney + bought * unitCost
         else
@@ -3273,7 +3418,7 @@ function Runtime.TreatLowestBee()
     Runtime.UpdateHoneyRate()
     Runtime.TreatCycleRollover()
 
-    -- Quet hive: thu level tung bee, sap xep tang dan level.
+    -- Scan the hive: read each bee's level, sort ascending.
     local cells = {}
     for _, entry in ipairs(hiveBeeCells()) do
         if beeTypePresent(entry.Type) and not entry.Locked then
@@ -3288,13 +3433,13 @@ function Runtime.TreatLowestBee()
 
     local target, targetLevel, focusMode
     if lowest.Level < highest.Level then
-        -- Con thap nhat dien hien: feed no (kieu cu), huy focus cu neu co.
+        -- A lowest bee exists: feed it (classic mode), clear any stale focus.
         Runtime.TreatFocusKey = nil
         target, targetLevel, focusMode = lowest.Cell, lowest.Level, false
     else
-        -- Hive da bang level het: focus 1 con bat ky va giu no den khi no LEN
-        -- LEVEL moi doi con khac - he thong khong bao gio dung im. Sau khi con
-        -- focus len level, hive lech tro lai thi pass sau equalize dan.
+        -- Hive fully equal: focus one random bee and keep it until it LEVELS
+        -- UP, then switch - the system never idles. After the focused bee
+        -- levels up, the hive is uneven again and later passes equalize it.
         focusMode = true
         local focus
         if Runtime.TreatFocusKey then
@@ -3306,7 +3451,7 @@ function Runtime.TreatLowestBee()
             end
         end
         if focus and focus.Level > (Runtime.TreatFocusLevel or focus.Level) then
-            -- Con focus vua len level: tra quyen lai cho che do equalize.
+            -- Focused bee just leveled: hand control back to equalize mode.
             Runtime.TreatFocusKey = nil
             return false
         end
@@ -3320,15 +3465,15 @@ function Runtime.TreatLowestBee()
 
     Runtime.TreatBusy = true
     local handled = false
-    -- Feed het treat trong kho; kho rong moi mua them trong budget cua gio.
+    -- Feed all treats in stock; only buy more within the hour's budget when empty.
     local treats = math.floor(MaterialSystem.Amount("Treat"))
     if treats <= 0 then treats = Runtime.BuyTreatsForCycle() end
     if treats > 0 then
         local batch = math.min(treats, math.max(1, math.floor(tonumber(Config.TreatFeedBatch) or 20)))
         setStatus("Treat bee", focusMode
-            and string.format("Focus feed %d treat | %s lv.%d | hive bang level, giu den khi len level",
+            and string.format("Focus feed %d treats | %s lv.%d | hive equal, keep until level up",
                 batch, target.Type, targetLevel)
-            or string.format("Feed %d treat | %s lv.%d | thap nhat trong hive",
+            or string.format("Feed %d treats | %s lv.%d | lowest in hive",
                 batch, target.Type, targetLevel))
         local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
             "ConstructHiveCellFromEgg", target.X, target.Y, "Treat", batch)
@@ -3341,13 +3486,50 @@ function Runtime.TreatLowestBee()
     return handled
 end
 
+-- Read a mob's level (Vicious/Werewolf...): a Level value on the model, or
+-- "Lv. X" in the name / health-bar BillboardGui.
+function Runtime.MobLevel(mob)
+    if not mob then return nil end
+    for _, name in ipairs({"Level", "MobLevel", "MonsterLevel"}) do
+        local value = mob:FindFirstChild(name)
+        if value and value:IsA("ValueBase") and tonumber(value.Value) then
+            return tonumber(value.Value)
+        end
+    end
+    local levelInName = tostring(mob.Name):match("[Ll][Vv]%.?%s*(%d+)")
+    if levelInName then return tonumber(levelInName) end
+    for _, descendant in ipairs(mob:GetDescendants()) do
+        if descendant:IsA("TextLabel") then
+            local level = tostring(descendant.Text):match("[Ll][Vv]%.?%s*(%d+)")
+            if level then return tonumber(level) end
+        end
+    end
+    return nil
+end
+
+-- Average level of every bee in the hive (reuses the treat level reader).
+function Runtime.HiveAverageLevel()
+    local total, count = 0, 0
+    for _, entry in ipairs(hiveBeeCells()) do
+        if beeTypePresent(entry.Type) then
+            local level = Runtime.HiveBeeLevel(entry)
+            if level then
+                total += level
+                count += 1
+            end
+        end
+    end
+    if count <= 0 then return nil end
+    return total / count
+end
+
 -- Amulet engine ---------------------------------------------------------------
--- Server de nghi amulet moi qua LocalAmuletEvent. Chu ky Accept da duoc verify
--- tu remote that: ClientAcceptAmulet:FireServer(type, ten, statsString) voi
--- statsString dang "\n+48% Convert Rate\n+1% Critical Chance...". So sanh
--- TUNG STAT voi amulet cung loai dang de (khong dung trong so gia dinh):
--- replace chi khi thang tuyet doi - khong stat nao kem hon va co it nhat
--- mot stat tot hon; con lai (lech hoac giong hec) -> keep.
+-- The server offers new amulets via LocalAmuletEvent. The Accept signature was
+-- verified from a real remote: ClientAcceptAmulet:FireServer(type, name, statsString)
+-- with statsString like "\n+48% Convert Rate\n+1% Critical Chance...". Compare
+-- EACH STAT against the equipped amulet of the same type (no made-up weights):
+-- replace only on a strict win - no stat worse and at least one
+-- stat better; otherwise (mixed or identical) -> keep.
 function Runtime.ParseAmuletStats(text)
     local stats = {}
     for value, percent, name in tostring(text or ""):gmatch("%+([%d%.]+)(%%?)%s*([^\n\r]+)") do
@@ -3358,8 +3540,8 @@ function Runtime.ParseAmuletStats(text)
     return stats
 end
 
--- So sanh tung stat: tra ve (soStatTotHon, soStatKemHon, ghiChu). Stat moi co
--- ma cu khong co = tot hon; stat cu mat di o ban moi = kem hon.
+-- Compare stat by stat: returns (betterCount, worseCount, notes). A new stat the
+-- old one lacks = better; an old stat missing from the new one = worse.
 function Runtime.CompareAmuletStats(newText, oldText)
     local newStats = Runtime.ParseAmuletStats(newText)
     local oldStats = Runtime.ParseAmuletStats(oldText)
@@ -3369,11 +3551,11 @@ function Runtime.CompareAmuletStats(newText, oldText)
         local oldValue = oldStats[key] and oldStats[key].Value or 0
         if stat.Value > oldValue then
             better += 1
-            table.insert(notes, string.format("+%s%s %s (cu %s)", tostring(stat.Value),
+            table.insert(notes, string.format("+%s%s %s (old %s)", tostring(stat.Value),
                 stat.Percent and "%" or "", stat.Name, tostring(oldValue)))
         elseif stat.Value < oldValue then
             worse += 1
-            table.insert(notes, string.format("-%s%s %s (cu %s)", tostring(stat.Value),
+            table.insert(notes, string.format("-%s%s %s (old %s)", tostring(stat.Value),
                 stat.Percent and "%" or "", stat.Name, tostring(oldValue)))
         end
     end
@@ -3383,9 +3565,9 @@ function Runtime.CompareAmuletStats(newText, oldText)
     return better, worse, notes
 end
 
--- Tim stats cua amulet cung loai dang de trong PlayerStats. Cau truc chua
--- verify duoc nen scan de phong nhieu dang: Amulets[type] = {Name, Stats},
--- entry co Type/Name chu "Amulet", hoac key amulet chua truc tiep stats text.
+-- Find the equipped same-type amulet stats inside PlayerStats. The layout is
+-- unverified, so scan defensively: Amulets[type] = {Name, Stats},
+-- entries with Type/Name containing "Amulet", or an amulet key holding raw stats text.
 function Runtime.EquippedAmuletStatsText(amuletType)
     local stats = MaterialSystem.Stats(false)
     local wanted = string.lower(tostring(amuletType or "")):gsub("[^%w]", "")
@@ -3407,7 +3589,7 @@ function Runtime.EquippedAmuletStatsText(amuletType)
         visited[value] = true
         for key, child in pairs(value) do
             local normalizedKey = string.lower(tostring(key)):gsub("[^%w]", "")
-            -- key trung loai amulet (vd Amulets.Ant) hoac key chua "amulet"
+            -- key matching the amulet type (e.g. Amulets.Ant) or a key containing "amulet"
             if type(child) == "table" then
                 if wanted ~= "" and (normalizedKey == wanted or tostring(key):lower():find(wanted, 1, true)) then
                     local direct = scanEntry(child)
@@ -3433,7 +3615,7 @@ function Runtime.HandleAmuletOffer(...)
     if not Config.AutoCompareAmulets then return end
     local args = table.pack(...)
 
-    -- Parse de nghi: 3 string (type, ten, stats) hoac table payload.
+    -- Parse the offer: 3 strings (type, name, stats) or a table payload.
     local amuletType, amuletName, statsText
     local strings = {}
     for i = 1, args.n do
@@ -3465,11 +3647,11 @@ function Runtime.HandleAmuletOffer(...)
 
     local currentText = Runtime.EquippedAmuletStatsText(amuletType)
     local accept = true
-    local detail = "chua co amulet loai nay"
+    local detail = "no amulet of this type yet"
     if currentText then
         local better, worse, notes = Runtime.CompareAmuletStats(statsText, currentText)
         accept = worse <= 0 and better > 0
-        detail = string.format("%d stat tot hon, %d kem hon%s", better, worse,
+        detail = string.format("%d stat(s) better, %d worse%s", better, worse,
             #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
     end
     setStatus("Amulet", string.format("%s %s | %s",
@@ -3487,19 +3669,19 @@ if amuletOfferRemote and amuletOfferRemote:IsA("RemoteEvent") then
         if not ok then reportError("Amulet", err) end
     end)
 else
-    warn("[BSS Kaitun] Khong tim thay LocalAmuletEvent - auto amulet tam khoa")
+    warn("[BSS Kaitun] LocalAmuletEvent not found - auto amulet disabled")
 end
 
 local function questWork(seconds)
     if not Config.AutoQuest then return false end
     if maintainBearQuests() then return true end
     local objectives = incompleteQuestObjectives(true)
-    -- Khong hien objective dau danh sach neu no dang bi khoa; UI chi hien quest
-    -- ma scheduler thuc su dang lam.
+    -- Do not surface the first objective when it is locked; the UI only shows quests
+    -- the scheduler is actually working on.
     Runtime.CurrentQuest = ""
     Runtime.QuestCurrentField = ""
-    -- Feed treat / dung Royal Jelly: task instant, hoan thanh truoc cac task
-    -- phai di chuyen (mob/field).
+    -- Feed treat / use Royal Jelly: instant tasks, completed before any
+    -- travel-based tasks (mob/field).
     for _, objective in ipairs(objectives) do
         local kind = Runtime.QuestTaskKind(objective)
         if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return true end
@@ -3507,8 +3689,8 @@ local function questWork(seconds)
     end
     local plan = chooseQuestField(objectives)
     local planRank = plan and plan.NPCRank or math.huge
-    -- Mob objective cung phai ton trong thu tu NPC. Vi du Science dang co
-    -- objective Science farm duoc thi cac job ngoai thu tu khong duoc chen ngang.
+    -- Mob objectives also respect NPC order. E.g. when Science has a farmable
+    -- objective, out-of-order jobs must not cut in line.
     for rank, npcName in ipairs(Config.QuestFarmPriority or Config.QuestNPCs or {}) do
         if rank > planRank then break end
         for _, objective in ipairs(objectives) do
@@ -3617,9 +3799,9 @@ Runtime.ScanMob = function()
     return nearbyLiveMob(field)
 end
 
--- Khi bi danh, uu tien rut ve tam field. Neu nhan vat da o gan tam thi
--- chon mot diem khac van nam trong FlowerZone va xa mob hon de khong nhay
--- mai tren dung hitbox nguy hiem.
+-- When hit, retreat toward the field center first. If already near center,
+-- pick another point inside the FlowerZone farther from the mob so we don't
+-- keep jumping on the same dangerous hitbox.
 Runtime.FindMobEscapePosition = function(field, rootPosition, mob)
     if not field or not rootPosition then return nil end
     local center = objectPosition(field)
@@ -3681,7 +3863,7 @@ task.spawn(function()
                             + math.max(1.5, tonumber(Config.AvoidMobRelocateTimeout) or 4)
                         Runtime.MobHoldPosition = nil
                         humanoid:MoveTo(escape)
-                        setStatus("Avoid mob", "Bi damage - doi vi tri trong " .. field.Name)
+                        setStatus("Avoid mob", "Taking damage - relocating within " .. field.Name)
                     end
                 end
 
@@ -3697,7 +3879,7 @@ task.spawn(function()
                         humanoid:MoveTo(Runtime.MobHoldPosition)
                         if humanoid.FloorMaterial ~= Enum.Material.Air then humanoid.Jump = true end
                     else
-                        -- Dang rut khoi diem bi danh: chi di bo, den diem an toan moi nhay tiep.
+                        -- Retreating from the hit point: walk only; jump again once safe.
                         humanoid:MoveTo(Runtime.MobRelocateTarget)
                     end
                 else
@@ -3721,8 +3903,8 @@ task.spawn(function()
             Runtime.MobLastHumanoid = nil
             Runtime.MobLastHealth = nil
         end
-        -- CPU saver: chi nh nhanh khi dang co mob can ne; khi binh thuong
-        -- 0.25s van du kip phat hien mob moi.
+        -- CPU saver: tick fast only while dodging a mob; normally
+        -- 0.25s still detects new mobs quickly.
         task.wait(Runtime.AvoidingMob and math.max(0.08, Config.MobJumpInterval) or 0.25)
     end
 end)
@@ -3741,7 +3923,7 @@ local function convertPollen()
     local position = objectPosition(target)
     if not position then return false end
 
-    setStatus("Convert honey", "Tween ve hive")
+    setStatus("Convert honey", "Tween to hive")
     if not tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Convert") then return false end
     task.wait(0.25)
     if Runtime.MeteorPriorityActive then return false end
@@ -3754,14 +3936,14 @@ local function convertPollen()
     local lastProgress = os.clock()
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local ratio, pollen = pollenRatio()
-        setStatus("Convert honey", formatNumber(pollen) .. " pollen con lai")
+        setStatus("Convert honey", formatNumber(pollen) .. " pollen left")
         if ratio <= Config.ConvertFinishPercent or pollen <= 0 then break end
         if pollen < lastPollen then
             lastPollen = pollen
             lastProgress = os.clock()
         elseif os.clock() - lastProgress > 8 and hivePhase(hive) == "Idle" then
-            -- Chi retry khi server xac nhan hive van Idle, tranh toggle nham
-            -- lam dung convert dang chay cham.
+            -- Retry only when the server confirms the hive is Idle, avoiding mistaken toggles
+            -- that could stall a slow-but-running conversion.
             remoteCall("PlayerHiveCommand", "ToggleHoneyMaking")
             lastProgress = os.clock()
         end
@@ -3918,7 +4100,7 @@ function MaterialSystem.MoveToBlender()
     local blenderObject = workspace:FindFirstChild("Blender", true)
     local position = objectPosition(blenderObject) or Config.BlenderMovePosition
     if typeof(position) ~= "Vector3" then return false end
-    setStatus("Blender", "Di den may tron")
+    setStatus("Blender", "Going to the blender")
     return tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Blender")
 end
 
@@ -3942,7 +4124,7 @@ function MaterialSystem.StartBlender(action)
         Runtime.LastMaterialStats = -math.huge
         return true
     end
-    setStatus("Blender loi", tostring(result or "PlaceOrder bi tu choi"))
+    setStatus("Blender error", tostring(result or "PlaceOrder rejected"))
     return false
 end
 
@@ -3953,7 +4135,7 @@ function MaterialSystem.ClaimBlender()
     MaterialSystem.MoveToBlender()
     task.wait(0.35)
     if Runtime.MeteorPriorityActive then return false end
-    setStatus("Blender", "Nhan " .. tostring(blender and blender.Recipe or Runtime.BlenderRecipe))
+    setStatus("Blender", "Claim " .. tostring(blender and blender.Recipe or Runtime.BlenderRecipe))
     local ok, result = remoteCall("BlenderCommand", "StopOrder")
     if ok and result ~= false then
         Runtime.BlenderStartedAt = -math.huge
@@ -3994,8 +4176,8 @@ end
 function MaterialSystem.FindSprout()
     local particles = workspace:FindFirstChild("Particles")
     if not particles then return nil end
-    -- Game dat marker Sprout that trong Particles.Folder2. Chi fallback sang
-    -- descendants tren cac ban game cu de tranh nham visual con ten Sprout.
+    -- The game puts real Sprout markers in Particles.Folder2. Only fall back to
+    -- descendants on older game builds to avoid confusing visuals also named Sprout.
     local folder = particles:FindFirstChild("Folder2")
     local objects = folder and folder:GetChildren() or particles:GetDescendants()
     local _, _, root = getCharacter(1)
@@ -4017,7 +4199,7 @@ end
 
 function MaterialSystem.FarmSprout()
     if not Config.AutoFarmSprouts or Runtime.SproutBusy or Runtime.MeteorPriorityActive then return false end
-    -- Fireflies chi xuat hien ban dem va co cua so cham ngan hon Sprout.
+    -- Fireflies only appear at night with a shorter catch window than Sprouts.
     if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then return false end
 
     local sprout, field = MaterialSystem.FindSprout()
@@ -4046,14 +4228,14 @@ function MaterialSystem.FarmSprout()
         end
         if currentField then field = currentField end
 
-        -- Balo day thi convert ngay va quay lai neu marker van con. Neu khong
-        -- lam buoc nay, account balo nho se dung vinh vien tren Sprout.
+        -- Convert immediately when the bag fills and return if the marker survives. Without
+        -- this step, small-bag accounts would stall on the Sprout forever.
         if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
             Runtime.Digging = false
             convertPollen()
         else
             local worked = farmStep(math.max(0.5, tonumber(Config.SproutFarmSlice) or 3),
-                field, "Auto Sprout", "Dang pha Sprout | " .. field.Name)
+                field, "Auto Sprout", "Breaking Sprout | " .. field.Name)
             handled = worked or handled
         end
         if not sprout.Parent then
@@ -4067,7 +4249,7 @@ function MaterialSystem.FarmSprout()
         Runtime.SproutsFarmed += 1
         Runtime.Digging = true
         Runtime.CurrentField = field.Name
-        setStatus("Auto Sprout", "Sprout da no | nhat token " .. field.Name)
+        setStatus("Auto Sprout", "Sprout popped | collecting tokens " .. field.Name)
         if standingField() ~= field then
             local point = fieldPoint(field)
             if point then tweenTo(CFrame.new(point), Config.TweenSpeed, "SproutDrop") end
@@ -4095,25 +4277,6 @@ end
 Runtime.ScanSprout = MaterialSystem.FindSprout
 Runtime.FarmSprout = MaterialSystem.FarmSprout
 
--- Scanner chi doc marker va khong chiem movement. Scheduler xu ly job o diem
--- yield gan nhat theo thu tu Meteor > Fireflies > Sprout > progression.
-task.spawn(function()
-    while Runtime.Running do
-        if Config.Enabled and Config.AutoFarmSprouts and not Runtime.SproutBusy
-            and not Runtime.MeteorPriorityActive then
-            local sprout, field = MaterialSystem.FindSprout()
-            Runtime.SproutPending = sprout or false
-            Runtime.SproutMarker = sprout or false
-            Runtime.SproutField = field and field.Name or ""
-        elseif not Runtime.SproutBusy then
-            Runtime.SproutPending = false
-            Runtime.SproutMarker = false
-            Runtime.SproutField = ""
-        end
-        task.wait(math.max(0.1, tonumber(Config.SproutScanInterval) or 0.25))
-    end
-end)
-
 function MaterialSystem.FindFirefly()
     local folder = workspace:FindFirstChild("NPCBees")
     local _, _, root = getCharacter(1)
@@ -4129,8 +4292,8 @@ function MaterialSystem.FindFirefly()
             local position = objectPosition(firefly)
             local speed = velocity and velocity.Velocity.Magnitude
                 or (linearVelocity and linearVelocity.VectorVelocity.Magnitude)
-            -- Fireflies chi co the duoc kich hoat khi da dap xuong field. Khong
-            -- chase con dang bay vi no se doi field truoc khi nhan vat cham toi.
+            -- Fireflies can only be triggered once landed. Do not
+            -- chase a flying one; it switches fields before the player can touch it.
             if position and speed and speed <= landingSpeed then
                 local field = flowerFieldAtPosition(position, 6)
                 local surfaceHeight = field and fieldSurfaceOffset(field, position) or nil
@@ -4144,6 +4307,26 @@ function MaterialSystem.FindFirefly()
         end
     end
     return best, bestField
+end
+
+-- Real mechanic (wiki): 8 fireflies land in a circle in one field; after nudging
+-- all 8, rewards spawn in the MIDDLE of the formation. This computes the circle
+-- center as the average position of the firefly group in the field.
+function MaterialSystem.FireflyFormationCenter(field)
+    local folder = workspace:FindFirstChild("NPCBees")
+    if not folder then return nil end
+    local sum, count = Vector3.zero, 0
+    for _, firefly in ipairs(folder:GetChildren()) do
+        if firefly.Name == "Firefly" then
+            local position = objectPosition(firefly)
+            if position and (not field or fieldContainsPosition(field, position, 15)) then
+                sum += position
+                count += 1
+            end
+        end
+    end
+    if count >= 2 then return sum / count end
+    return nil
 end
 
 function MaterialSystem.FindMoonCharmToken(field, origin, radius)
@@ -4175,7 +4358,7 @@ function MaterialSystem.FarmFirefly()
     local looseMoonCharm = currentField and MaterialSystem.FindMoonCharmToken(currentField, nil, nil) or nil
     if looseMoonCharm then
         Runtime.FireflyBusy = true
-        setStatus("Auto Fireflies", "Nhat Moon Charm | " .. currentField.Name)
+        setStatus("Auto Fireflies", "Collecting Moon Charm | " .. currentField.Name)
         local collected = collectToken(looseMoonCharm, "FireflyMoonCharm")
         Runtime.FireflyBusy = false
         Runtime.FireflyPending = false
@@ -4191,17 +4374,23 @@ function MaterialSystem.FarmFirefly()
         and firefly and field and os.clock() < budgetDeadline do
         local position = objectPosition(firefly)
         if not position or not fieldUnlocked(field.Name) then break end
+        -- Update the formation center while the group is still in the field.
+        local center = MaterialSystem.FireflyFormationCenter(field)
+        if center then
+            Runtime.FireflyCenter = center
+            Runtime.FireflyCenterAt = os.clock()
+        end
         Runtime.CurrentField = field.Name
         Runtime.Digging = true
-        setStatus("Auto Fireflies", "Cho Firefly dap | " .. field.Name)
+        setStatus("Auto Fireflies", "Waiting for Firefly to land | " .. field.Name)
         local moved = tweenTo(CFrame.new(position + Vector3.new(0, 1.5, 0)), Config.TokenTweenSpeed, "Firefly")
         Runtime.FireflyCooldowns[firefly] = os.clock()
             + math.max(0.5, tonumber(Config.FireflyRetryCooldown) or 1.25)
         if moved then
             handled = true
             Runtime.FirefliesCollected += 1
-            -- Dung tren Firefly den khi no bat dau bay lai; day la dau hieu
-            -- touch da kich hoat va Moon Charm co the vua spawn.
+            -- Stay on the Firefly until it starts flying again; that signals
+            -- the touch registered and a Moon Charm may have spawned.
             local touchDeadline = os.clock() + math.max(0.5, tonumber(Config.FireflyTouchTimeout) or 2.5)
             while firefly.Parent and not Runtime.MeteorPriorityActive and os.clock() < touchDeadline do
                 local velocity = firefly:FindFirstChild("BodyVelocity", true)
@@ -4229,6 +4418,28 @@ function MaterialSystem.FarmFirefly()
         if Runtime.MeteorPriorityActive then break end
         firefly, field = MaterialSystem.FindFirefly()
     end
+
+    -- The whole group has flown up (no landed fireflies left): rewards spawn at the
+    -- CENTER of the formation - fly to the tracked center to collect.
+    if handled and not firefly and typeof(Runtime.FireflyCenter) == "Vector3"
+        and os.clock() - (Runtime.FireflyCenterAt or 0) <= 30
+        and not Runtime.MeteorPriorityActive then
+        setStatus("Auto Fireflies", "Collecting formation center reward")
+        Runtime.Digging = true
+        if tweenTo(CFrame.new(Runtime.FireflyCenter + Vector3.new(0, 2, 0)),
+            Config.TokenTweenSpeed, "Firefly") then
+            remoteCall("ToolCollect")
+            if Config.AutoTokens then sweepTokens(4, "FireflyCenter") end
+            local centerDeadline = os.clock() + 3
+            repeat
+                local token = MaterialSystem.FindMoonCharmToken(nil, Runtime.FireflyCenter, 30)
+                if token then collectToken(token, "FireflyMoonCharm") end
+                task.wait(0.1)
+            until not Runtime.Running or Runtime.MeteorPriorityActive or os.clock() >= centerDeadline
+        end
+        Runtime.FireflyCenter = nil
+        Runtime.Digging = false
+    end
     Runtime.Digging = false
     Runtime.FireflyBusy = false
     Runtime.FireflyPending = false
@@ -4238,12 +4449,24 @@ end
 Runtime.ScanFirefly = MaterialSystem.FindFirefly
 Runtime.FarmFirefly = MaterialSystem.FarmFirefly
 
--- Scanner nay chi doc NPCBees, khong chiem movement. Scheduler chinh se tam
--- dung farmStep va xu ly Firefly o diem yield gan nhat, nen khong co hai tween
--- cung tranh HumanoidRootPart.
+-- Unified scanner: ONE loop updates Sprout + Firefly/Moon
+-- Charm + Mondo Chick - halving workspace traversals versus the two separate
+-- loops. Read-only, never owns movement; the scheduler handles each job
+-- at the nearest yield point in order Meteor > Firefly > Sprout > Mondo.
 task.spawn(function()
     while Runtime.Running do
-        if Config.Enabled and Config.AutoFarmFireflies and not Runtime.FireflyBusy and not Runtime.MeteorPriorityActive then
+        local enabled = Config.Enabled and not Runtime.MeteorPriorityActive
+        if enabled and Config.AutoFarmSprouts and not Runtime.SproutBusy then
+            local sprout, field = MaterialSystem.FindSprout()
+            Runtime.SproutPending = sprout or false
+            Runtime.SproutMarker = sprout or false
+            Runtime.SproutField = field and field.Name or ""
+        elseif not Runtime.SproutBusy then
+            Runtime.SproutPending = false
+            Runtime.SproutMarker = false
+            Runtime.SproutField = ""
+        end
+        if enabled and Config.AutoFarmFireflies and not Runtime.FireflyBusy then
             local npcBees = workspace:FindFirstChild("NPCBees")
             local exists = npcBees and npcBees:FindFirstChild("Firefly")
             if exists then Runtime.LastFireflySeen = os.clock() end
@@ -4253,13 +4476,22 @@ task.spawn(function()
                 local firefly = moonCharm and nil or MaterialSystem.FindFirefly()
                 Runtime.FireflyPending = moonCharm or firefly or false
             else
-                -- Ban ngay khong scan toan bo Collectibles moi 0.25 giay.
+                -- During the day, skip scanning all Collectibles every tick.
                 Runtime.FireflyPending = false
             end
         elseif not Runtime.FireflyBusy then
             Runtime.FireflyPending = false
         end
-        task.wait(math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25))
+        if enabled and Config.AutoFarmMondoChick and type(Runtime.FindMondoChick) == "function" then
+            Runtime.MondoChickPending = Runtime.FindMondoChick() ~= nil
+        end
+        if enabled and Config.AutoFarmViciousAlways and Config.AutoFarmVicious
+            and type(MaterialSystem.FindVicious) == "function" then
+            Runtime.ViciousPending = MaterialSystem.FindVicious() ~= nil
+        end
+        task.wait(math.max(0.15, math.min(
+            math.max(0.1, tonumber(Config.SproutScanInterval) or 0.25),
+            math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25))))
     end
 end)
 
@@ -4282,7 +4514,7 @@ end
 
 function MaterialSystem.FarmVicious()
     if not Config.AutoFarmVicious then return false end
-    if Runtime.MeteorPriorityActive then return false end
+    if Runtime.MeteorPriorityActive or Runtime.ViciousBusy then return false end
     local target, thorn = MaterialSystem.FindVicious()
     local position = objectPosition(target)
     local field = position and flowerFieldAtPosition(position, 18) or nil
@@ -4291,8 +4523,13 @@ function MaterialSystem.FarmVicious()
     Runtime.CurrentField = field.Name
     Runtime.Digging = true
     Runtime.MaterialCombat = true
+    Runtime.ViciousBusy = true
     setStatus("Farm material", "Stinger | Vicious @ " .. field.Name)
-    tweenTo(CFrame.new(position + Vector3.new(0, 2, 5)), Config.TweenSpeed, "Vicious")
+    -- Phase 1: tween to the field first (a point inside the field near the vic).
+    local entryPoint = fieldPoint(field)
+    if entryPoint then
+        tweenTo(CFrame.new(entryPoint), Config.TweenSpeed, "Vicious")
+    end
     if thorn then
         local spawnDeadline = os.clock() + 4
         repeat
@@ -4301,6 +4538,9 @@ function MaterialSystem.FarmVicious()
         until not Runtime.Running or Runtime.MeteorPriorityActive or not thorn or os.clock() >= spawnDeadline
     end
 
+    -- Phase 2: hover above the Vicious' head - outside ground-spike range, avoiding damage;
+    -- bees around the player attack it. Re-tween to the vic whenever it drifts too far.
+    local hoverHeight = math.max(6, tonumber(Config.ViciousHoverHeight) or 14)
     local deadline = os.clock() + Config.MaterialCombatSeconds
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local mob = select(1, MaterialSystem.FindVicious())
@@ -4308,8 +4548,60 @@ function MaterialSystem.FarmVicious()
         local mobPosition = objectPosition(mob)
         local _, humanoid, root = getCharacter(1)
         if not humanoid or not root or not mobPosition then break end
-        if (root.Position - mobPosition).Magnitude > 24 then
-            tweenTo(CFrame.new(mobPosition + Vector3.new(0, 2, 8)), Config.TweenSpeed, "Vicious")
+        local hoverTarget = CFrame.new(mobPosition + Vector3.new(0, hoverHeight, 0))
+        if (root.Position - hoverTarget.Position).Magnitude > 5 then
+            tweenTo(hoverTarget, Config.TokenTweenSpeed, "Vicious")
+        else
+            humanoid:Move(Vector3.zero, false)
+        end
+        remoteCall("ToolCollect")
+        task.wait(0.2)
+    end
+    sweepTokens(3, "ViciousDrop")
+    Runtime.MaterialCombat = false
+    Runtime.ViciousBusy = false
+    Runtime.Digging = false
+    return true
+end
+
+-- Mondo Chick: spawns hourly on Mountain Top Field, drops Bitterberry/
+-- Neonberry for the blender. The scanner sets MondoChickPending; the scheduler
+-- calls FarmMondoChick at a safe yield point (like Sprout/Firefly).
+function Runtime.FindMondoChick()
+    local monsters = workspace:FindFirstChild("Monsters")
+    if not monsters then return nil end
+    for _, mob in ipairs(monsters:GetChildren()) do
+        local humanoid = mob:FindFirstChildOfClass("Humanoid")
+        local normalized = string.lower(mob.Name):gsub("[^%w]", "")
+        if humanoid and humanoid.Health > 0 and objectPosition(mob)
+            and string.find(normalized, "mondochick", 1, true) then
+            return mob
+        end
+    end
+    return nil
+end
+
+function Runtime.FarmMondoChick()
+    if not Config.AutoFarmMondoChick or Runtime.MeteorPriorityActive then return false end
+    if beeCount() < (FIELD_REQUIREMENTS["Mountain Top Field"] or math.huge) then return false end
+    local chick = Runtime.FindMondoChick()
+    if not chick then
+        Runtime.MondoChickPending = false
+        return false
+    end
+
+    Runtime.CurrentField = "Mountain Top Field"
+    Runtime.Digging = true
+    setStatus("Mondo Chick", "Fighting Mondo Chick | Mountain Top Field")
+    local deadline = os.clock() + math.max(30, tonumber(Config.MondoChickFightTimeout) or 120)
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
+        chick = Runtime.FindMondoChick()
+        if not chick then break end
+        local position = objectPosition(chick)
+        local _, humanoid, root = getCharacter(1)
+        if not position or not humanoid or not root then break end
+        if (root.Position - position).Magnitude > 24 then
+            tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "MondoChick")
         else
             humanoid:Move(Vector3.zero, false)
             if humanoid.FloorMaterial ~= Enum.Material.Air then humanoid.Jump = true end
@@ -4317,10 +4609,43 @@ function MaterialSystem.FarmVicious()
         remoteCall("ToolCollect")
         task.wait(0.2)
     end
-    sweepTokens(3, "ViciousDrop")
-    Runtime.MaterialCombat = false
+    sweepTokens(3, "MondoDrop")
     Runtime.Digging = false
+    Runtime.MondoChickPending = false
+    -- Dead or expired: wait 60s before rescanning to avoid retry spam.
+    Runtime.MondoChickRetryAt = os.clock() + 60
+    task.defer(function() getStats(true) end)
     return true
+end
+
+-- Vicious always-on: no material planner needed - whenever a live vic spawns
+-- (night), fight it and bank stingers. Level gate: only fight vic whose level
+-- is BELOW the hive average (read from the real hive); skip stronger ones.
+function Runtime.ViciousLevelAllowed(mob)
+    if not Config.ViciousRespectHiveLevel then return true end
+    local mobLevel = Runtime.MobLevel(mob)
+    local hiveLevel = Runtime.HiveAverageLevel()
+    if not mobLevel or not hiveLevel then return true end
+    return mobLevel < hiveLevel
+end
+
+function Runtime.FarmViciousAlways()
+    if not Config.AutoFarmViciousAlways or not Config.AutoFarmVicious then return false end
+    if Runtime.MeteorPriorityActive or Runtime.ViciousBusy then return false end
+    local mob = MaterialSystem.FindVicious()
+    if not mob then
+        Runtime.ViciousPending = false
+        return false
+    end
+    if not Runtime.ViciousLevelAllowed(mob) then
+        local mobLevel = Runtime.MobLevel(mob) or 0
+        local hiveLevel = Runtime.HiveAverageLevel() or 0
+        setStatus("Vicious Bee", string.format("Skip: vic lv.%d >= hive avg lv.%.1f", mobLevel, hiveLevel))
+        Runtime.ViciousPending = false
+        Runtime.ViciousRetryAt = os.clock() + 30
+        return false
+    end
+    return MaterialSystem.FarmVicious()
 end
 
 function MaterialSystem.PlanterData()
@@ -4597,7 +4922,7 @@ function MaterialSystem.Work(entry)
         return false
     elseif state == "crafting" then
         Runtime.ProgressStage = string.format("Blender x%d %s", tonumber(blender.Count) or 0, tostring(blender.Recipe))
-        setStatus("Blender dang chay", string.format("%s | con %.1f phut", tostring(blender.Recipe), remaining / 60))
+        setStatus("Blender running", string.format("%s | %.1f min left", tostring(blender.Recipe), remaining / 60))
         -- Blender consumes ingredients as soon as the order starts. Add its
         -- pending output to a virtual inventory so the planner does not farm the
         -- exact same input batch again during the wait.
@@ -4615,7 +4940,7 @@ function MaterialSystem.Work(entry)
         -- Ingredients for the current queue are already consumed. Keep earning
         -- honey/tokens instead of standing beside the Blender.
         return farmStep(math.min(Config.MaterialFarmSeconds, 8), MaterialSystem.Field("RoyalJelly"),
-            "Cho Blender", string.format("%s | %.1f phut", tostring(blender.Recipe), remaining / 60))
+            "Waiting for Blender", string.format("%s | %.1f min", tostring(blender.Recipe), remaining / 60))
     end
 
     if action and action.Kind == "craft" then
@@ -4822,8 +5147,8 @@ local function handleMeteor()
     pruneQueue()
     if #Runtime.MeteorQueue == 0 then return finish(false) end
 
-    -- Giu field dang xu ly. Neu chua co lock, uu tien field nhan vat dang dung;
-    -- neu field do khong co meteor thi lay field cua impact som nhat.
+    -- Keep the field being handled. Without a lock, prefer the player's current field;
+    -- if it has no meteor, take the earliest impact's field.
     local lockedName = Runtime.MeteorLockedField
     local meteor = lockedName ~= "" and firstMeteorInField(lockedName) or nil
     if not meteor then
@@ -4847,9 +5172,9 @@ local function handleMeteor()
     Runtime.MeteorLockedField = field.Name
     Runtime.CurrentField = field.Name
     Runtime.Digging = true
-    setStatus("Auto meteor", string.format("Khoa field %s | den diem roi", field.Name))
+    setStatus("Auto meteor", string.format("Lock field %s | heading to impact", field.Name))
     local target = meteor.Position + Vector3.new(0, 3, 0)
-    -- Chi tween mot lan khi vao field. Moi impact sau trong cung field se di bo.
+    -- Tween only once when entering the field. Later impacts in the same field walk.
     local moved = tweenTo(CFrame.new(target), Config.TokenTweenSpeed, "MeteorImpact", standingField() == field)
     if not moved then
         Runtime.Digging = false
@@ -4872,28 +5197,28 @@ local function handleMeteor()
     removeMeteor(meteor)
     pruneQueue()
 
-    -- Con meteor trong field da khoa: bo qua field khac va xu ly impact cung
-    -- field ngay o tick tiep theo, khong tween qua lai theo ReadyAt toan cuc.
+    -- Meteor remains in the locked field: ignore other fields and handle same-field
+    -- impacts on the very next tick instead of tweening by global ReadyAt.
     if firstMeteorInField(field.Name) then
         Runtime.Digging = false
         return finish(true)
     end
 
-    -- Het marker trong field: di bo nhat token. Neu field khac dang doi thi chi
-    -- cho mot grace window ngan; neu queue rong thi giu full MeteorStayTime de
-    -- gom token va bat cac event cung field den tre.
+    -- No markers left in field: walk-collect tokens. If another field waits, keep only
+    -- a short grace window; with an empty queue keep the full MeteorStayTime to
+    -- gather tokens and catch late same-field events.
     local otherFieldWaiting = #Runtime.MeteorQueue > 0
     local stayTime = otherFieldWaiting
         and math.max(0.25, tonumber(Config.MeteorFieldGraceTime) or 1.25)
         or math.max(0.5, tonumber(Config.MeteorStayTime) or 9)
     local tokenDeadline = os.clock() + stayTime
     local otherFieldDeadline = otherFieldWaiting and tokenDeadline or nil
-    setStatus("Auto meteor", string.format("Khoa field %s | di bo nhat token", field.Name))
+    setStatus("Auto meteor", string.format("Lock field %s | walking to collect tokens", field.Name))
     while Runtime.Running and Config.Enabled and Config.AutoMeteor and os.clock() < tokenDeadline do
         pruneQueue()
         if firstMeteorInField(field.Name) then break end
-        -- Neu luc dau queue rong nhung sau do co meteor o field khac, khong giu
-        -- field cu het 9 giay: rut deadline ve grace window de kip field tiep.
+        -- If the queue was empty but another field gets a meteor, do not hold
+        -- the old field for 9s: pull the deadline back to the grace window to catch the next.
         if #Runtime.MeteorQueue > 0 and not otherFieldDeadline then
             otherFieldDeadline = os.clock()
                 + math.max(0.25, tonumber(Config.MeteorFieldGraceTime) or 1.25)
@@ -4908,8 +5233,8 @@ local function handleMeteor()
         end
     end
 
-    -- Chi bo lock khi field that su khong con meteor. Event den trong luc nhat
-    -- token se giu lock va duoc xu ly truoc tat ca field khac.
+    -- Only drop the lock when the field truly has no meteors. Events arriving while
+    -- collecting tokens keep the lock and outrank every other field.
     pruneQueue()
     if not firstMeteorInField(field.Name) then Runtime.MeteorLockedField = "" end
     Runtime.Digging = false
@@ -4939,8 +5264,8 @@ task.spawn(function()
         elseif not Config.AutoMeteor or #Runtime.MeteorQueue == 0 then
             Runtime.MeteorPriorityActive = false
         end
-        -- CPU saver: chi can nh nhanh (0.03s) khi dang co meteor; khi queue rong
-        -- 0.2s la du vi meteor phat hien qua LocalFX event chu khong phai poll.
+        -- CPU saver: poll fast (0.03s) only with active meteors; with an empty queue
+        -- 0.2s suffices since meteors arrive via LocalFX events, not polling.
         task.wait(#Runtime.MeteorQueue > 0 and 0.03 or 0.2)
     end
 end)
@@ -4948,19 +5273,6 @@ end)
 local function applyLowGraphics(enabled)
     Config.LowGraphics = enabled
     if not enabled then return end
-
-    -- FPS cap la CPU saver manh nhat: executor render it frame hon thi CPU/GPU
-    -- giam theo. Re-assert trong vong 12s vi mot so executor reset cap.
-    local function applyFpsCap()
-        if not Config.CPUSaver then return end
-        local cap = math.max(5, math.floor(tonumber(Config.CPUSaverFPSCap) or 30))
-        local capFunction = rawget(ENV, "setfpscap")
-        if type(capFunction) ~= "function" and type(setfpscap) == "function" then
-            capFunction = setfpscap
-        end
-        if type(capFunction) == "function" then pcall(capFunction, cap) end
-    end
-    applyFpsCap()
 
     local beeRoots = {Bees = true, NPCBees = true}
     local tokenRoots = {Collectibles = true}
@@ -5018,8 +5330,8 @@ local function applyLowGraphics(enabled)
         if not object or not object.Parent then return end
         local disposable = disposableDecoration(object)
         if disposable and disposable.Parent then
-            -- Xoa local-only nhom decor da xac dinh; khong cham vao 30BeeZone,
-            -- gate, field, shop, NPC, toy, hive hay cac folder gameplay khac.
+            -- Remove only identified local-only decor groups; never touch 30BeeZone,
+            -- gate, field, shop, NPC, toy, hive or any other gameplay folder.
             disposable:Destroy()
             return
         end
@@ -5039,14 +5351,14 @@ local function applyLowGraphics(enabled)
                 object.CastShadow = false
                 object.Reflectance = 0
                 object.MaterialVariant = ""
-                -- Giu nguyen material cua meteor marker de detector fallback van
-                -- nhan ra Neon part; cung khong lam nhan vat local bi xam/plastic.
+                -- Keep the meteor marker's material so the fallback detector still
+                -- recognizes the Neon part; also keeps the local character from going gray/plastic.
                 if Config.FixLagPlasticMaterials and not weatherVisual and not playerVisual then
                     object.Material = Enum.Material.Plastic
                 end
                 if hidden then
-                    -- Transparency la thay doi client-side; instance van ton tai de
-                    -- token/flower/meteor scanner doc Position va attribute binh thuong.
+                    -- Transparency is a client-side change; instances still exist so
+                    -- token/flower/meteor scanners keep reading Position and attributes normally.
                     object.LocalTransparencyModifier = 1
                     object.Transparency = 1
                 end
@@ -5144,13 +5456,15 @@ local function applyLowGraphics(enabled)
             or object:IsA("DepthOfFieldEffect") or object:IsA("SunRaysEffect") then
             object.Enabled = false
         elseif object:IsA("ColorCorrectionEffect") then
-            -- Khong dung post-processing xam: no phu mau len toan viewport va co
-            -- the lam nguoi dung tuong PlayerGui cung bi an/xam.
+            -- No gray post-processing: it tints the whole viewport and may
+            -- make users think PlayerGui is hidden/grayed too.
             object.Enabled = false
         end
     end
 
     local function applyLightingSettings()
+        pcall(function() workspace.GlobalWind = Vector3.zero end)
+        pcall(function() settings().Rendering.AntiAliasing = false end)
         pcall(function()
             Lighting.GlobalShadows = false
             Lighting.Brightness = math.clamp(tonumber(Config.FixLagBrightness) or 0.65, 0, 3)
@@ -5217,13 +5531,48 @@ local function applyLowGraphics(enabled)
     connect(Lighting.DescendantAdded, function(object)
         if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
     end)
+    -- Hide every other player: their characters + accessories + tools are one of
+    -- the biggest lag sources on busy servers. Local-only hiding (render), no effect
+    -- on gameplay for either side.
+    if Config.FixLagHidePlayers then
+        local function hideCharacter(character)
+            if not character or character == Player.Character then return end
+            for _, descendant in ipairs(character:GetDescendants()) do
+                if descendant:IsA("BasePart") then
+                    pcall(function()
+                        descendant.LocalTransparencyModifier = 1
+                        descendant.CastShadow = false
+                    end)
+                elseif descendant:IsA("Decal") then
+                    pcall(function() descendant.Transparency = 1 end)
+                elseif descendant:IsA("ParticleEmitter") or descendant:IsA("Trail") then
+                    pcall(function()
+                        descendant.Enabled = false
+                        descendant.Rate = 0
+                    end)
+                elseif descendant:IsA("Animator") then
+                    pcall(function()
+                        for _, track in ipairs(descendant:GetPlayingAnimationTracks()) do
+                            track:Stop(0)
+                        end
+                    end)
+                end
+            end
+        end
+        local function bindPlayer(otherPlayer)
+            if otherPlayer == Player then return end
+            if otherPlayer.Character then hideCharacter(otherPlayer.Character) end
+            connect(otherPlayer.CharacterAdded, hideCharacter)
+        end
+        for _, otherPlayer in ipairs(Players:GetPlayers()) do bindPlayer(otherPlayer) end
+        connect(Players.PlayerAdded, bindPlayer)
+    end
     task.spawn(function()
         while Runtime.Running and Config.LowGraphics do
             applyLightingSettings()
-            applyFpsCap()
             pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
-            -- Object moi da duoc xu ly bang DescendantAdded; khong quet lai ca
-            -- workspace dinh ky vi chinh vong quet do tao spike tren mobile.
+            -- New objects are handled by DescendantAdded; do not rescan the
+            -- whole workspace periodically - that rescan itself spikes on mobile.
             task.wait(12)
         end
     end)
@@ -5243,18 +5592,25 @@ local guiParent = Player:WaitForChild("PlayerGui")
 if gethui then
     pcall(function()
         local protectedRoot = gethui()
-        local protectedOld = protectedRoot and protectedRoot:FindFirstChild("BSSKaitunUI")
-        if protectedOld then protectedOld:Destroy() end
+        for _, guiName in ipairs({"BSSKaitunUI", "BSSKaitunUITop"}) do
+            local protectedOld = protectedRoot and protectedRoot:FindFirstChild(guiName)
+            if protectedOld then protectedOld:Destroy() end
+        end
     end)
 end
 local oldGui = guiParent:FindFirstChild("BSSKaitunUI")
 if oldGui then oldGui:Destroy() end
+local oldTop = guiParent:FindFirstChild("BSSKaitunUITop")
+if oldTop then oldTop:Destroy() end
 
-local screen = create("ScreenGui", {Name = "BSSKaitunUI", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, guiParent)
+-- DisplayOrder -100: the black screen sits BELOW every game GUI (menu/shop/hive
+-- stay visible and clickable above the dark overlay).
+local screen = create("ScreenGui", {Name = "BSSKaitunUI", ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = -100}, guiParent)
 
--- CPU-saver UI: black screen full man hinh + chu trang toi gian (hub, player,
--- status, uptime). Khong panel/drag/RichText; chi 2 label dong duoc cap nhat
--- moi 0.5s de UI gan nhu khong ton CPU.
+-- CPU-saver UI: full-screen black overlay + minimal white text (hub, player,
+-- status, uptime). No panel/drag/RichText; only 2 dynamic labels update
+-- every 0.5s so the UI costs almost no CPU.
 local overlay = create("Frame", {Name = "BlackScreen", Size = UDim2.fromScale(1, 1),
     BackgroundColor3 = Color3.new(), BorderSizePixel = 0,
     Visible = Config.BlackScreen ~= false}, screen)
@@ -5279,20 +5635,23 @@ local uptimeLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
     Text = "Uptime: 00:00:00", Font = Enum.Font.Gotham, TextSize = 18,
     TextColor3 = Color3.new(1, 1, 1)}, overlay)
 
--- Toggle black screen: nut tren man hinh (cho mobile/tablet) + F7 (cho PC).
--- Nut dat tren cung (ZIndex 200) nen luon bam duoc ca khi man den dang bat.
+-- Black screen toggle: on-screen button (mobile/tablet) + F7 (PC).
+-- The button lives in its own top DisplayOrder ScreenGui so it is never
+-- covered by game GUIs or the black screen.
 local overlayVisible = Config.BlackScreen ~= false
+local topScreen = create("ScreenGui", {Name = "BSSKaitunUITop", ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, guiParent)
 local toggleButton = create("TextButton", {Name = "ScreenToggle",
     Size = UDim2.fromOffset(130, 34), Position = UDim2.new(1, -142, 0, 8),
     BackgroundColor3 = Color3.fromRGB(28, 33, 48), BorderSizePixel = 0,
     Text = "", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14,
-    AutoButtonColor = true, ZIndex = 200}, screen)
+    AutoButtonColor = true}, topScreen)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, toggleButton)
 local function setBlackScreen(visible)
     overlayVisible = visible
     Config.BlackScreen = visible
     overlay.Visible = visible
-    toggleButton.Text = visible and "Man den: BAT" or "Man den: TAT"
+    toggleButton.Text = visible and "Dark screen: ON" or "Dark screen: OFF"
 end
 setBlackScreen(overlayVisible)
 connect(toggleButton.MouseButton1Click, function()
@@ -5305,6 +5664,7 @@ connect(UserInputService.InputBegan, function(input, processed)
 end)
 
 Runtime.UI.Screen = screen
+Runtime.UI.TopScreen = topScreen
 Runtime.UI.Overlay = overlay
 Runtime.UI.Status = statusLabel
 Runtime.UI.HoneyRate = honeyRateLabel
@@ -5338,8 +5698,8 @@ connect(Player.Idled, function()
     end)
 end)
 
--- Read-only ticket check + mot Purchase remote; khong chiem mover nen co the
--- mua ngay ca khi progression dang farm/convert. Meteor van la uu tien tuyet doi.
+-- Read-only ticket check + one Purchase remote; never owns the mover so it can
+-- buy even mid farm/convert. Meteor remains absolute priority.
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoBuyEventBees and not Runtime.MeteorPriorityActive then
@@ -5353,8 +5713,8 @@ task.spawn(function()
     end
 end)
 
--- Auto treat worker: doc lap voi quest, chi remote (khong di chuyen). Feed bee
--- level thap nhat bang treat trong kho (mua them theo budget 10% honey/h).
+-- Auto treat worker: quest-independent, remote-only (no movement). Feeds the
+-- lowest bee with stock treats (buys more within the 10% honey/h budget).
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoTreatBees and not Runtime.MeteorPriorityActive then
@@ -5373,28 +5733,37 @@ end)
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoClaimBadges then Runtime.ClaimNextBadge() end
-        -- ClaimNextBadge da tu gioi han theo BadgeClaimInterval nen khong co loi
-        -- gi khi poll nhanh hon; canh bang de giam so vong lap tan CPU.
+        -- ClaimNextBadge already rate-limits via BadgeClaimInterval, so polling faster
+        -- gains nothing; match it to cut wasted CPU loops.
         task.wait(math.max(0.5, tonumber(Config.BadgeClaimInterval) or 1.25))
     end
 end)
 
--- Low-priority hourly reward: it never takes the mover and always yields to the
--- event-driven Meteor supervisor.
+-- Low-priority hourly rewards: Wealth Clock + free toys (Ant Pass, Blue Field
+-- Booster). Never owns the mover and always yields to the Meteor supervisor.
 task.spawn(function()
     while Runtime.Running do
-        if Config.Enabled and Config.AutoWealthClock and not Runtime.MeteorPriorityActive then
-            local ok, err = xpcall(Runtime.ClaimWealthClock, debug.traceback)
-            if not ok then
-                Runtime.NextWealthClockCheck = os.clock() + math.max(5, tonumber(Config.WealthClockRetryInterval) or 60)
-                reportError("WealthClock", err)
+        if Config.Enabled and not Runtime.MeteorPriorityActive then
+            if Config.AutoWealthClock then
+                local ok, err = xpcall(Runtime.ClaimWealthClock, debug.traceback)
+                if not ok then
+                    Runtime.NextWealthClockCheck = os.clock() + math.max(5, tonumber(Config.WealthClockRetryInterval) or 60)
+                    reportError("WealthClock", err)
+                end
+            end
+            if Config.AutoFreeToys then
+                local ok, err = xpcall(Runtime.ClaimFreeToys, debug.traceback)
+                if not ok then
+                    Runtime.NextFreeToyCheck = os.clock() + 30
+                    reportError("FreeToys", err)
+                end
             end
         end
         task.wait(math.max(1, math.min(15, tonumber(Config.WealthClockCheckInterval) or 15)))
     end
 end)
 
--- Dig loop: remote nay chinh la remote duoc LocalCollect cua game goi.
+-- Dig loop: this is the exact remote the game's LocalCollect calls.
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoFarm and (Runtime.Digging or Runtime.State == "Auto meteor") then
@@ -5519,7 +5888,7 @@ function Runtime.UnlockBlueHQ()
             Runtime.BlueJellyCell = cell
         end
         if not cell then
-            setStatus("Unlock Blue HQ", "Cho Basic Bee an toan de dung Royal Jelly")
+            setStatus("Unlock Blue HQ", "Waiting for a safe Basic Bee for Royal Jelly")
             return false, "no_basic"
         end
         local locked = cell:FindFirstChild("CellLocked")
@@ -5537,7 +5906,7 @@ function Runtime.UnlockBlueHQ()
         local stats = MaterialSystem.Stats(true)
         local jelly = math.floor(MaterialSystem.Amount("RoyalJelly", stats))
         if jelly <= 0 then
-            setStatus("Unlock Blue HQ", "Het Royal Jelly - cho token/quest reward")
+            setStatus("Unlock Blue HQ", "Out of Royal Jelly - wait for token/quest rewards")
             return false, "no_jelly"
         end
         local beforeBlue = Runtime.BlueDiscoveryCount(false)
@@ -5620,7 +5989,7 @@ local function upgradeSprinkler()
         else
             local readiness = packageReadiness(entry)
             if readiness == "ready" or readiness == "unknown" then
-                setStatus("Nang sprinkler", entry.Item)
+                setStatus("Upgrading sprinkler", entry.Item)
                 if purchaseAndEquip(entry) then
                     Runtime.DeferredItems[entry.Type] = nil
                     upgraded = true
@@ -5650,8 +6019,8 @@ end
 local function nextMilestone(count)
     for _, milestone in ipairs(Config.ProgressionMilestones) do
         local target = tonumber(milestone.TargetBees) or math.huge
-        -- Account da co san nhieu bee van phai mua bu cac gear bat buoc cu theo
-        -- dung thu tu slide; gear cao hon trong SupersededBy se duoc coi la da dat.
+        -- Accounts that already have many bees must still backfill old mandatory gear in
+        -- slide order; higher gear in SupersededBy counts as satisfied.
         if milestoneHasMissingRequiredGear(milestone) or count < target then return milestone end
     end
     return nil
@@ -5756,7 +6125,7 @@ end
 
 local function progressionWork(reason, allowSideJobs)
     if not Config.Enabled then
-        setStatus("Tam dung", "Dat Enabled=true trong config")
+        setStatus("Paused", "Set Enabled=true in config")
         task.wait(0.5)
         return
     end
@@ -5775,6 +6144,19 @@ local function progressionWork(reason, allowSideJobs)
         end
         if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return end
         if Config.AutoFarmSprouts and Runtime.SproutPending and MaterialSystem.FarmSprout() then return end
+        if Config.AutoFarmMondoChick and Runtime.MondoChickPending
+            and os.clock() >= (Runtime.MondoChickRetryAt or 0)
+            and Runtime.FarmMondoChick() then return end
+        if Config.AutoFarmViciousAlways and Runtime.ViciousPending
+            and os.clock() >= (Runtime.ViciousRetryAt or 0) then
+            local ok, result = xpcall(Runtime.FarmViciousAlways, debug.traceback)
+            if not ok then
+                Runtime.ViciousBusy = false
+                reportError("ViciousAlways", result)
+            elseif result then
+                return
+            end
+        end
     end
     local ratio = pollenRatio()
     if Config.AutoConvert and ratio >= Config.ConvertPercent then
@@ -5790,24 +6172,24 @@ local function progressionWork(reason, allowSideJobs)
         if Config.AutoQuest and questWork(Config.QuestFarmSeconds) then return end
     end
     if Config.AutoFarm then
-        setStatus("Farm progression", reason or "Tich honey mua gear/egg/hive slot")
+        setStatus("Farm progression", reason or "Saving honey for gear/egg/hive slot")
         farmStep(10)
     else
-        setStatus("Progression cho", "Bat Auto Farm hoac bo sung tai nguyen")
+        setStatus("Progression waiting", "Enable Auto Farm or add resources")
         task.wait(1)
     end
 end
 
 local function progression()
-    -- Thuong map truoc tien: bay qua cac diem reward roi moi claim hive/hatch.
-    -- Reward la pickup world nen khong can hive; loi o phase nay khong bao gio
-    -- chan luong progression chinh.
+    -- Map rewards first: sweep the reward spots before claiming hive/hatching.
+    -- Rewards are world pickups needing no hive; an error in this phase never
+    -- blocks the main progression flow.
     do
         local okReward, errReward = pcall(Runtime.CollectWorldRewards)
         if not okReward then reportError("TeleRewards", errReward) end
     end
     while Runtime.Running and not claimHive() do
-        setStatus("Khoi tao", "Chua claim duoc hive - dang thu lai")
+        setStatus("Init", "Hive not claimed yet - retrying")
         task.wait(Config.RetryDelay)
     end
     if not Runtime.Running then return false end
@@ -5820,10 +6202,10 @@ local function progression()
         Runtime.ProgressStage = "First bee"
         if eggFundingBlocked() then
             Runtime.ProgressStage = "Saving honey for first Basic Egg"
-            progressionWork("Farm honey mua Basic Egg dau tien", false)
+            progressionWork("Farm honey for the first Basic Egg", false)
         else
             if Config.AutoProgression and growHiveOneBee() then break end
-            setStatus("First bee", "Cho Basic Egg tu hive hoac thu mua lai")
+            setStatus("First bee", "Waiting for Basic Egg from hive or retry purchase")
             task.wait(Config.RetryDelay)
             getStats(true)
         end
@@ -5838,10 +6220,10 @@ local function progression()
             local ready, blockedEntry, blockReason, retryDelay = processMilestone(starterMilestone, true)
             if ready then break end
             if blockReason == "honey" then
-                progressionWork("Tich honey mua " .. tostring(blockedEntry and blockedEntry.Item or "starter gear"), false)
+                progressionWork("Saving honey for " .. tostring(blockedEntry and blockedEntry.Item or "starter gear"), false)
             else
                 setStatus("Retry starter shop", tostring(blockedEntry and blockedEntry.Item or "starter gear")
-                    .. " | " .. tostring(blockReason or "cho server"))
+                    .. " | " .. tostring(blockReason or "waiting for server"))
                 task.wait(math.clamp(tonumber(retryDelay) or 1, 0.5, 3))
                 getStats(true)
             end
@@ -5866,7 +6248,7 @@ local function progression()
         if count >= Config.ProgressionTargetBees and not nextMilestone(count) then break end
         if not Config.AutoProgression then
             Runtime.ProgressStage = "Paused"
-            setStatus("Progression tat", "Dat AutoProgression=true trong config")
+            setStatus("Progression off", "Set AutoProgression=true in config")
             task.wait(0.5)
             continue
         end
@@ -5878,7 +6260,7 @@ local function progression()
         getStats(true)
         if eggFundingBlocked() then
             Runtime.ProgressStage = "Saving honey for Basic Egg"
-            progressionWork("Farm honey mua Basic Egg")
+            progressionWork("Farm honey for Basic Egg")
             continue
         end
         local milestone = nextMilestone(beeCount())
@@ -5892,7 +6274,7 @@ local function progression()
             local eggRush = milestone and milestone.EggRushAfter and before < 25
             if eggRush then
                 Runtime.ProgressStage = string.format("Egg rush %d -> 25 bees | skip side gear", before)
-                setStatus("Focus Basic Egg", "Tam dung gear phu, uu tien mo hive den 25 bee")
+                setStatus("Focus Basic Egg", "Side gear paused, prioritize hatching to 25 bees")
             else
                 retryDeferredItems()
                 upgradeSprinkler()
@@ -5902,13 +6284,13 @@ local function progression()
                 Runtime.ProgressStage = string.format("Hive %d/%d bees", after, Config.ProgressionTargetBees)
                 if after <= before then task.wait(Config.RetryDelay) end
             else
-                progressionWork("Tich honey mua Basic Egg hoac Hive Slot")
+                progressionWork("Saving honey for Basic Egg or Hive Slot")
             end
         else
             if blockReason == "material" and blockedEntry and Config.AutoMaterials then
                 MaterialSystem.Work(blockedEntry)
             else
-                progressionWork("Tich honey mua " .. tostring(blockedEntry and blockedEntry.Item or "gear"))
+                progressionWork("Saving honey for " .. tostring(blockedEntry and blockedEntry.Item or "gear"))
             end
         end
     end
@@ -5924,7 +6306,7 @@ while Runtime.Running do
     local okProgression, progressionError = xpcall(progression, debug.traceback)
     if okProgression then break end
     reportError("Progression", progressionError)
-    setStatus("Recovery progression", "Thu khoi dong lai sau loi")
+    setStatus("Recovery progression", "Restarting after error")
     if not Runtime.MeteorHandling then cancelMovement() end
     task.wait(Config.RetryDelay)
 end
@@ -5934,12 +6316,12 @@ task.spawn(function()
     while Runtime.Running do
         local ok, err = xpcall(function()
             if not Config.Enabled then
-                setStatus("Tam dung", "Dat Enabled=true trong config")
+                setStatus("Paused", "Set Enabled=true in config")
                 task.wait(0.5)
                 return
             end
             if not getCharacter(5) then
-                setStatus("Hoi sinh", "Dang cho nhan vat")
+                setStatus("Respawning", "Waiting for character")
                 task.wait(1)
                 return
             end
@@ -5954,6 +6336,19 @@ task.spawn(function()
 
             if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return end
             if Config.AutoFarmSprouts and Runtime.SproutPending and MaterialSystem.FarmSprout() then return end
+            if Config.AutoFarmMondoChick and Runtime.MondoChickPending
+                and os.clock() >= (Runtime.MondoChickRetryAt or 0)
+                and Runtime.FarmMondoChick() then return end
+            if Config.AutoFarmViciousAlways and Runtime.ViciousPending
+                and os.clock() >= (Runtime.ViciousRetryAt or 0) then
+                local ok, result = xpcall(Runtime.FarmViciousAlways, debug.traceback)
+                if not ok then
+                    Runtime.ViciousBusy = false
+                    reportError("ViciousAlways", result)
+                elseif result then
+                    return
+                end
+            end
 
             if Config.AutoProgression and os.clock() - Runtime.LastProgressMaintenance >= 30 then
                 Runtime.LastProgressMaintenance = os.clock()
@@ -5979,13 +6374,13 @@ task.spawn(function()
             elseif Config.AutoFarm then
                 farmStep(3)
             else
-                setStatus("San sang", "Dat AutoFarm=true trong config")
+                setStatus("Ready", "Set AutoFarm=true in config")
                 task.wait(0.5)
             end
         end, debug.traceback)
         if not ok then
             reportError("MainLoop", err)
-            setStatus("Tu phuc hoi", Runtime.LastError)
+            setStatus("Self recovery", Runtime.LastError)
             if not Runtime.MeteorHandling then cancelMovement() end
             task.wait(1)
         end
