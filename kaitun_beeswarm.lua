@@ -106,6 +106,13 @@ local DEFAULT_CONFIG = {
     TreatHoneyCost = 10,
     TreatBuyChunk = 100,
     TreatWorkerInterval = 5,
+    -- GIFTED RULES (wiki-verified, for the future gifted hunter):
+    -- Only SPECIFIC treats can roll gifted, and only when fed to a bee whose
+    -- favorite it is: Strawberries / Blueberries / Sunflower Seeds / Pineapples
+    -- (bond 25, x2 = 50 when favorite; gifted odds 1/8000 rare, 1/10000 epic,
+    -- 1/12000 common+legendary, 1/24000 mythic). Event bees only via Star Treat
+    -- (100%). The generic "Treat" (bond 10, what this leveling system buys) is
+    -- NO bee's favorite and can NEVER trigger gifted.
     -- Auto amulet: compares EACH STAT against the equipped amulet of the same type.
     -- Only replace when no stat is worse and at least one is better (strict win);
     -- otherwise (mixed or identical) -> keep. No made-up weights.
@@ -116,6 +123,9 @@ local DEFAULT_CONFIG = {
     QuestCheckInterval = 3,
     QuestInteractTimeout = 12,
     QuestFarmSeconds = 8,
+    -- Farm burst length between quest/purchase checks: shorter bursts let quest
+    -- turn-ins and affordable-gear purchases interleave sooner while farming.
+    FarmBurstSeconds = 5,
     ScienceQuestConfirmTimeout = 6,
     AutoQuestMobs = true,
     QuestMobFightTimeout = 24,
@@ -659,12 +669,18 @@ local Runtime = {
     LastEventBeeCheck = -math.huge,
     LastEventBeeStatsRefresh = -math.huge,
     LastDeferredRetry = -math.huge,
+    NextGearTarget = nil,
     LastQuestCheck = -math.huge,
     LastBadgeClaim = -math.huge,
     BadgeClaimCursor = 1,
     BadgeChecks = 0,
     LastBadgeName = "",
     LastWealthClockAttempt = -math.huge,
+    TweenRoot = nil,
+    TweenRootWasAnchored = false,
+    TweenRootReleaseAt = nil,
+    Glide = nil,
+    GlideRunnerConnection = nil,
     ToyRetryAt = {},
     ToysClaimed = 0,
     BoostedField = nil,
@@ -1054,6 +1070,48 @@ local function applyFieldMoveSpeed(humanoid, generation)
     pcall(function() humanoid.WalkSpeed = Config.FieldMoveSpeed end)
 end
 
+-- Glide engine ----------------------------------------------------------------
+-- One persistent Heartbeat runner interpolates the anchored root every frame.
+-- Per-frame lerp instead of TweenService removes tween spin-up jitter, and
+-- consecutive moves retarget without re-anchoring, so chained hops (farm steps,
+-- token routes, vicious follow) no longer freeze between steps.
+local GLIDE_ANCHOR_GRACE = 0.45
+
+local function glideRunnerStep(deltaTime)
+    local root = Runtime.TweenRoot
+    if not root or not root.Parent then
+        Runtime.Glide = nil
+        Runtime.TweenRootReleaseAt = nil
+        releaseTweenRoot()
+        return
+    end
+    local glide = Runtime.Glide
+    if glide then
+        local current = root.CFrame
+        local target = glide.CFrame
+        local remaining = (target.Position - current.Position).Magnitude
+        if remaining <= 0.35 then
+            root.CFrame = target
+            Runtime.Glide = nil
+            Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
+            return
+        end
+        local step = math.min(glide.Speed * deltaTime, remaining)
+        root.CFrame = current:Lerp(target, step / remaining)
+        return
+    end
+    local releaseAt = Runtime.TweenRootReleaseAt
+    if releaseAt and os.clock() >= releaseAt then
+        Runtime.TweenRootReleaseAt = nil
+        releaseTweenRoot()
+    end
+end
+
+local function ensureGlideRunner()
+    if Runtime.GlideRunnerConnection then return end
+    Runtime.GlideRunnerConnection = connect(RunService.Heartbeat, glideRunnerStep)
+end
+
 local function tweenTo(target, speed, owner, forceWalk)
     local position
     local targetCFrame
@@ -1084,8 +1142,7 @@ local function tweenTo(target, speed, owner, forceWalk)
     -- Supersede any older move before choosing the new route.
     Runtime.TweenGeneration += 1
     local generation = Runtime.TweenGeneration
-    if Runtime.ActiveTween then pcall(Runtime.ActiveTween.Cancel, Runtime.ActiveTween) end
-    Runtime.ActiveTween = nil
+    Runtime.Glide = nil
     restoreFieldMoveSpeed()
     releaseTweenRoot()
     Runtime.MovementOwner = movementOwner
@@ -1105,6 +1162,9 @@ local function tweenTo(target, speed, owner, forceWalk)
         return false, "walk target outside current field"
     end
     if forceWalk or (Config.SmartMove and (walkingInsideField or distance <= Config.SmartWalkDistance)) then
+        -- Walking needs physics: release a still-anchored root left over from the
+        -- previous glide's grace window, otherwise MoveTo silently stalls.
+        if Runtime.TweenRoot == root then releaseTweenRoot() end
         if walkingInsideField then applyFieldMoveSpeed(humanoid, generation) end
         humanoid:MoveTo(position)
         local maxWalkTime = forceWalk and math.min(4, Config.SmartFieldWalkTimeout)
@@ -1156,34 +1216,37 @@ local function tweenTo(target, speed, owner, forceWalk)
         end
     end
 
-    -- Keep the root steady during the tween and preserve character collision.
-    Runtime.TweenRoot = root
-    Runtime.TweenRootWasAnchored = root.Anchored
-    pcall(function()
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-        root.Anchored = true
-    end)
+    -- Reuse the root still anchored by the previous glide when its grace window
+    -- has not expired: chained hops (farm steps, token routes, vicious follow)
+    -- retarget without toggling Anchored, which is what caused the visible hitch.
+    if Runtime.TweenRoot ~= root then
+        releaseTweenRoot()
+        Runtime.TweenRoot = root
+        Runtime.TweenRootWasAnchored = root.Anchored
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            root.Anchored = true
+        end)
+    end
+    Runtime.TweenRootReleaseAt = nil
 
-    -- Direct route: one linear segment from the current position to the target.
+    -- Direct route: frame-synced glide via the Heartbeat runner (no TweenService
+    -- object churn, no tween spin-up, smooth chained moves).
     local routeSucceeded = Runtime.Running and Runtime.TweenGeneration == generation
         and humanoid.Health > 0 and root.Parent ~= nil
     if routeSucceeded and distance > Config.SmartArrivalDistance then
+        Runtime.Glide = {CFrame = targetCFrame, Speed = moveSpeed, Generation = generation}
+        ensureGlideRunner()
         local duration = math.clamp(distance / moveSpeed, 0.05, 30)
-        local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
-        Runtime.ActiveTween = tween
-        local finished, completed = false, false
-        local connection = tween.Completed:Connect(function(playbackState)
-            finished = true
-            completed = playbackState == Enum.PlaybackState.Completed
-        end)
-        tween:Play()
-        local deadline = os.clock() + duration + 2
+        local deadline = os.clock() + duration + 1
         while Runtime.Running and Runtime.TweenGeneration == generation and humanoid.Health > 0
-            and not finished and os.clock() < deadline do task.wait(0.05) end
-        connection:Disconnect()
-        if not finished then pcall(tween.Cancel, tween) end
-        routeSucceeded = completed or (root.Position - position).Magnitude <= Config.SmartArrivalDistance
+            and Runtime.Glide ~= nil and Runtime.Glide.Generation == generation
+            and os.clock() < deadline do task.wait(0.05) end
+        if Runtime.Glide ~= nil and Runtime.Glide.Generation == generation then
+            Runtime.Glide = nil -- timed out; the runner's grace release unanchors later
+        end
+        routeSucceeded = (root.Position - position).Magnitude <= Config.SmartArrivalDistance
     end
 
     local arrived = routeSucceeded and (root.Position - position).Magnitude <= Config.SmartArrivalDistance
@@ -1195,20 +1258,19 @@ local function tweenTo(target, speed, owner, forceWalk)
         end)
     end
     if Runtime.TweenGeneration == generation then
-        Runtime.ActiveTween = nil
         Runtime.MovementOwner = nil
         restoreFieldMoveSpeed(generation)
-        releaseTweenRoot()
+        -- Deferred release: keep the root anchored briefly so the next chained
+        -- move reuses it. The runner unanchors automatically if nothing follows.
+        Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
     end
     return arrived
 end
 
 local function cancelMovement()
     Runtime.TweenGeneration += 1
-    if Runtime.ActiveTween then
-        pcall(Runtime.ActiveTween.Cancel, Runtime.ActiveTween)
-        Runtime.ActiveTween = nil
-    end
+    Runtime.Glide = nil
+    Runtime.TweenRootReleaseAt = nil
     Runtime.MovementOwner = nil
     Runtime.Digging = false
     Runtime.QuestFarming = false
@@ -1428,6 +1490,50 @@ local function packageReadiness(entry)
     return "ready"
 end
 
+-- Next-gear target tracking: which accessory the script is saving honey for
+-- right now, with its honey cost. Powers the dedicated UI line and the farm
+-- status suffix so the goal stays visible while farming.
+local function entryCostHoney(entry)
+    if okPackages and ItemPackages and type(ItemPackages.GetCost) == "function" then
+        local ok, cost = pcall(ItemPackages.GetCost, getPackage(entry), getStats(false))
+        if ok then
+            if type(cost) == "number" then return cost end
+            if type(cost) == "table" then
+                if tonumber(cost.Honey) then return tonumber(cost.Honey) end
+                local first = cost[1]
+                if type(first) == "table" and tonumber(first.Honey) then return tonumber(first.Honey) end
+            end
+        end
+    end
+    return tonumber(entry.HoneyCost)
+end
+
+function Runtime.SetNextGearTarget(entry)
+    if type(entry) ~= "table" then return end
+    Runtime.NextGearTarget = {
+        Item = tostring(entry.Item or entry.Type or "?"),
+        Cost = entryCostHoney(entry),
+        At = os.clock(),
+    }
+end
+
+function Runtime.ClearNextGearTarget()
+    Runtime.NextGearTarget = nil
+end
+
+function Runtime.GearStatusText()
+    local target = Runtime.NextGearTarget
+    if type(target) ~= "table" then return "" end
+    local cost = tonumber(target.Cost)
+    if not cost or cost <= 0 then
+        return "Next gear: " .. tostring(target.Item) .. " | saving honey"
+    end
+    local honey = liveCoreValue("Honey") or 0
+    local percent = math.min(100, math.floor(honey / cost * 100 + 0.5))
+    return string.format("Next gear: %s | %s / %s honey (%d%%)",
+        tostring(target.Item), formatNumber(honey), formatNumber(cost), percent)
+end
+
 local function findShopItem(entry)
     local shops = workspace:FindFirstChild("Shops")
     local shop = shops and shops:FindFirstChild(entry.Shop, true)
@@ -1620,6 +1726,24 @@ local function redeemCodes()
     getStats(true)
 end
 
+-- Cross-server memory for tele rewards: world pickups are ONE-TIME per account,
+-- so a single permanent marker file per UserId (executor file storage) skips the
+-- 40-spot sweep on every later execution or server, forever. Delete the file to
+-- force one re-sweep (e.g. after adding new spots to TeleRewardSpots).
+function Runtime.TeleRewardsClaimed()
+    local readfileFn = rawget(ENV, "readfile") or (type(readfile) == "function" and readfile)
+    if type(readfileFn) ~= "function" then return false end
+    local ok, content = pcall(readfileFn,
+        "bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt")
+    return ok and type(content) == "string" and content:find("done", 1, true) ~= nil
+end
+
+function Runtime.MarkTeleRewardsDone()
+    local writefileFn = rawget(ENV, "writefile") or (type(writefile) == "function" and writefile)
+    if type(writefileFn) ~= "function" then return end
+    pcall(writefileFn, "bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt", "done")
+end
+
 -- Tele reward phase (from telebss rewards.txt): instantly teleport to each
 -- map reward point on game entry, BEFORE claiming hive/hatching. Each point: set
 -- CFrame directly onto the reward, stand still + nudge up/down via CFrame
@@ -1631,6 +1755,12 @@ function Runtime.CollectWorldRewards()
     -- re-runs this phase within a single execution.
     Runtime.TeleRewardsDone = true
     if #spots <= 0 then return false end
+    -- Skip forever once this account swept the one-time rewards (persisted file).
+    if Runtime.TeleRewardsClaimed() then
+        setStatus("Tele reward", "One-time rewards already collected - skipping")
+        warn("[BSS Kaitun] Tele rewards already collected (one-time) - skipping phase")
+        return false
+    end
     local dwell = math.max(0.3, tonumber(Config.TeleRewardDwellSeconds) or 2)
 
     local function pin(root, cframe)
@@ -1661,6 +1791,7 @@ function Runtime.CollectWorldRewards()
         Runtime.TeleRewardsCollected += 1
     end
     setStatus("Tele reward", string.format("Done %d/%d spots - moving to hive claim", Runtime.TeleRewardsCollected, #spots))
+    Runtime.MarkTeleRewardsDone()
     task.wait(0.2)
     return true
 end
@@ -2572,7 +2703,23 @@ local function farmStep(seconds, overrideField, state, detail)
     end
     Runtime.CurrentField = field.Name
     local deadline = os.clock() + (seconds or 2)
-    setStatus(state or "Farm pollen", detail or Runtime.CurrentField)
+    -- Surface the gear being saved for while farming: "Bamboo Field | next: Pouch 42%".
+    local detailText = detail or Runtime.CurrentField
+    if not detail then
+        local target = Runtime.NextGearTarget
+        if type(target) == "table" then
+            local cost = tonumber(target.Cost)
+            if cost and cost > 0 then
+                local honey = liveCoreValue("Honey") or 0
+                detailText = string.format("%s | next: %s %d%%",
+                    Runtime.CurrentField, tostring(target.Item),
+                    math.min(100, math.floor(honey / cost * 100 + 0.5)))
+            else
+                detailText = Runtime.CurrentField .. " | next: " .. tostring(target.Item)
+            end
+        end
+    end
+    setStatus(state or "Farm pollen", detailText)
     Runtime.Digging = true
     if standingField() ~= field then
         local openingPoint = fieldPoint(field)
@@ -2599,10 +2746,17 @@ local function farmStep(seconds, overrideField, state, detail)
         end
         local point = fieldPoint(field)
         if point then
+            local startedAt = os.clock()
             tweenTo(CFrame.new(point), Config.TweenSpeed, "Farm")
             placeSprinklerIfNeeded(field)
+            -- Only idle for the REMAINDER of the step delay: travel time already
+            -- served as the per-spot dig pause, so the character flows between
+            -- points instead of move - full stop - move.
+            local idle = Config.FarmStepDelay - (os.clock() - startedAt)
+            if idle > 0 then task.wait(idle) end
+        else
+            task.wait(Config.FarmStepDelay)
         end
-        task.wait(Config.FarmStepDelay)
     end
     Runtime.Digging = false
     return true
@@ -2622,7 +2776,8 @@ local FIELD_COLORS = {
 }
 
 -- Free toys (Ant Pass, Blue Field Booster...): same pattern as Wealth Clock - reads
--- ToyTimes + the toy instance's Cooldown to avoid spam; fires only 1 remote.
+-- ToyTimes + the toy instance's Cooldown. Shared pads get a confirm + 90s retry
+-- loop because the server silently drops fires while globally busy.
 function Runtime.ClaimFreeToys()
     if not Config.AutoFreeToys or not Config.Enabled or Runtime.MeteorPriorityActive then return false end
     local now = os.clock()
@@ -2631,6 +2786,15 @@ function Runtime.ClaimFreeToys()
     local stats = getStats(false)
     local serverNow = MaterialSystem.Clock()
     local toysFolder = workspace:FindFirstChild("Toys")
+    if not Runtime.ToyDiagnosticsShown then
+        Runtime.ToyDiagnosticsShown = true
+        for _, toyEntry in ipairs(Config.AutoToys or {}) do
+            local toyName = tostring(toyEntry.Name or "")
+            local instance = toysFolder and toysFolder:FindFirstChild(toyName)
+            warn(string.format("[BSS Kaitun] Toy '%s': %s",
+                toyName, instance and "found in workspace.Toys" or "not in workspace.Toys (remote still fired)"))
+        end
+    end
     for _, toyEntry in ipairs(Config.AutoToys or {}) do
         local toyName = tostring(toyEntry.Name or "")
         if toyName ~= "" and (Runtime.ToyRetryAt[toyName] or 0) <= now then
@@ -2648,14 +2812,28 @@ function Runtime.ClaimFreeToys()
             if remaining > 0 then
                 Runtime.ToyRetryAt[toyName] = now + math.clamp(remaining, 5, 300)
             else
-                Runtime.ToyRetryAt[toyName] = now + cooldown
+                -- Shared pads (field boosters) can be globally busy: the server
+                -- silently drops the fire and our ToyTimes stays empty. So do NOT
+                -- park for the full cooldown - fire, confirm via a fresh stats
+                -- read, and retry every 90s until the server accepts the tap.
+                Runtime.ToyRetryAt[toyName] = now + 90
                 setStatus("Free toy", toyName)
                 if remoteCall("ToyEvent", toyName) then
-                    Runtime.ToysClaimed += 1
-                    if toyEntry.FieldBoost then
-                        task.wait(1)
-                        Runtime.DetectFieldBoost(MaterialSystem.Stats(true), toyEntry.FieldBoost)
-                    end
+                    task.delay(1.5, function()
+                        local fresh = MaterialSystem.Stats(true)
+                        local freshTimes = type(fresh) == "table" and fresh.ToyTimes or nil
+                        if type(freshTimes) == "table" and tonumber(freshTimes[toyName]) then
+                            Runtime.ToysClaimed += 1
+                            Runtime.ToyRetryAt[toyName] = os.clock() + cooldown
+                            warn(string.format("[BSS Kaitun] %s tapped (next in %.0f min)",
+                                toyName, cooldown / 60))
+                            if toyEntry.FieldBoost then
+                                Runtime.DetectFieldBoost(fresh, toyEntry.FieldBoost)
+                            end
+                        else
+                            warn(string.format("[BSS Kaitun] %s busy on server - retrying in 90s", toyName))
+                        end
+                    end)
                 end
             end
         end
@@ -5820,12 +5998,16 @@ local statusLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.55), Size = UDim2.fromOffset(760, 60), BackgroundTransparency = 1,
     Text = "Status: ...", Font = Enum.Font.Gotham, TextSize = 20, TextWrapped = true,
     TextColor3 = Color3.new(1, 1, 1)}, overlay)
+local gearLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.645), Size = UDim2.fromOffset(600, 24), BackgroundTransparency = 1,
+    Text = "Next gear: ...", Font = Enum.Font.Gotham, TextSize = 18,
+    TextColor3 = Color3.new(1, 1, 1)}, overlay)
 local honeyRateLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.63), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
+    Position = UDim2.fromScale(0.5, 0.71), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
     Text = "Honey: 0/h", Font = Enum.Font.Gotham, TextSize = 18,
     TextColor3 = Color3.new(1, 1, 1)}, overlay)
 local uptimeLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.70), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
+    Position = UDim2.fromScale(0.5, 0.775), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
     Text = "Uptime: 00:00:00", Font = Enum.Font.Gotham, TextSize = 18,
     TextColor3 = Color3.new(1, 1, 1)}, overlay)
 
@@ -5861,6 +6043,7 @@ Runtime.UI.Screen = screen
 Runtime.UI.TopScreen = topScreen
 Runtime.UI.Overlay = overlay
 Runtime.UI.Status = statusLabel
+Runtime.UI.Gear = gearLabel
 Runtime.UI.HoneyRate = honeyRateLabel
 Runtime.UI.Uptime = uptimeLabel
 
@@ -5870,6 +6053,8 @@ task.spawn(function()
         local ok, err = pcall(function()
             statusLabel.Text = "Status: " .. Runtime.State
                 .. (Runtime.Detail ~= "" and (" | " .. Runtime.Detail) or "")
+            local gearText = Runtime.GearStatusText()
+            gearLabel.Text = gearText ~= "" and gearText or "Next gear: none (stage gear complete)"
             honeyRateLabel.Text = "Honey: " .. formatNumber(Runtime.HoneyPerHour()) .. "/h"
             uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d",
                 math.floor(elapsed / 3600), math.floor(elapsed / 60) % 60, elapsed % 60)
@@ -6286,17 +6471,21 @@ local function processMilestone(milestone, fastRetry)
                     deferItem(entry, readiness)
                     if not entry.Optional then return false, entry, readiness end
                 elseif readiness == "honey" and not entry.Optional then
+                    Runtime.SetNextGearTarget(entry)
                     return false, entry, "honey"
                 elseif readiness == "honey" then
+                    Runtime.SetNextGearTarget(entry)
                     deferItem(entry, readiness)
                 else
                     setStatus("Progression gear", entry.Item)
                     local purchased, purchaseReason, retryDelay = purchaseAndEquip(entry, fastRetry)
                     if purchased then
                         Runtime.DeferredItems[entry.Type] = nil
+                        Runtime.ClearNextGearTarget()
                     else
                         local after = packageReadiness(entry)
                         if fastRetry and not entry.Optional then
+                            Runtime.SetNextGearTarget(entry)
                             return false, entry, purchaseReason or after, retryDelay
                         elseif not okPackages then
                             -- Mobile fallback cannot distinguish a server gate from
@@ -6367,7 +6556,9 @@ local function progressionWork(reason, allowSideJobs)
     end
     if Config.AutoFarm then
         setStatus("Farm progression", reason or "Saving honey for gear/egg/hive slot")
-        farmStep(10)
+        -- Short bursts: quest turn-ins, conversions and affordable-gear purchases
+        -- are re-evaluated between bursts instead of after one long 10s block.
+        farmStep(math.max(2, tonumber(Config.FarmBurstSeconds) or 5))
     else
         setStatus("Progression waiting", "Enable Auto Farm or add resources")
         task.wait(1)
@@ -6458,12 +6649,14 @@ local function progression()
             continue
         end
         local milestone = nextMilestone(beeCount())
+        if not milestone then Runtime.ClearNextGearTarget() end
         local ready, blockedEntry, blockReason = true, nil, nil
         if milestone then ready, blockedEntry, blockReason = processMilestone(milestone) end
 
         if ready then
             -- Current mandatory gear always wins. Parallel guide goals (guards and
             -- sprinklers) are retried only after that order has been satisfied.
+            Runtime.ClearNextGearTarget()
             local before = beeCount()
             local eggRush = milestone and milestone.EggRushAfter and before < 25
             if eggRush then
