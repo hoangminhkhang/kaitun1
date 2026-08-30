@@ -3837,7 +3837,9 @@ end
 
 function Runtime.FeedQuestTreats(objective)
     if not Config.AutoQuestFeedTasks or Runtime.MeteorPriorityActive then return false end
-    local stats = MaterialSystem.Stats(true)
+    -- Cached stats only: this runs off-thread while the farm moves; the server
+    -- caps the consumption to the real stock, so a stale read is harmless.
+    local stats = MaterialSystem.Stats(false)
     local treatKey, treatLabel = questTreatInfo(objective)
     local treats = questTreatStock(treatKey, stats)
     if treats <= 0 and treatKey == "Treat" then
@@ -3894,7 +3896,7 @@ function Runtime.UseQuestRoyalJelly(objective)
     local used = 0
     local maxUses = math.max(1, math.floor(tonumber(Config.QuestJellyBatchMax) or 5))
     while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
-        local stats = MaterialSystem.Stats(used == 0)
+        local stats = MaterialSystem.Stats(false) -- cached; server caps real use
         if math.floor(MaterialSystem.Amount("RoyalJelly", stats)) <= 0 then
             markQuestTaskCooldown(objective, 90)
             setStatus("Quest jelly", "Out of Royal Jelly - doing other work, retry in 90s")
@@ -4398,19 +4400,9 @@ local function questWork(seconds)
         end
         objectives = filtered
     end
-    -- Feed treat / use Royal Jelly: instant tasks, completed before any
-    -- travel-based tasks (mob/field). Tasks marked out-of-stock stand down on
-    -- a cooldown so the scheduler does other work and retries them later.
-    local questRetryAt = Runtime.QuestFeedRetryAt or {}
-    local questNow = os.clock()
-    for _, objective in ipairs(objectives) do
-        local kind = Runtime.QuestTaskKind(objective)
-        local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
-        if questNow >= (questRetryAt[taskKey] or 0) then
-            if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return true end
-            if kind == "treat" and Runtime.FeedQuestTreats(objective) then return true end
-        end
-    end
+    -- Feed treat / use Royal Jelly moved to a BACKGROUND worker (remote-only,
+    -- no movement needed): questWork no longer blocks on inventory checks, so
+    -- the character keeps farm-moving while feeds happen off-thread.
     local plan = chooseQuestField(objectives)
     local planRank = plan and plan.NPCRank or math.huge
     -- Mob objectives also respect NPC order. E.g. when Science has a farmable
@@ -7038,6 +7030,31 @@ task.spawn(function()
             if not ok then reportError("StarTreat", err) end
         end
         task.wait(3)
+    end
+end)
+
+-- Quest feed/jelly worker: the instant tasks are remote-only, so they run
+-- OFF-THREAD - the farm mover never pauses for inventory checks. Uses cached
+-- stats (no blocking remote per pass); over-reading stock is harmless because
+-- the server caps consumption to what is actually owned.
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoQuest and not Runtime.MeteorPriorityActive then
+            local ok, err = xpcall(function()
+                local retryAt = Runtime.QuestFeedRetryAt or {}
+                local now = os.clock()
+                for _, objective in ipairs(incompleteQuestObjectives(false)) do
+                    local kind = Runtime.QuestTaskKind(objective)
+                    local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
+                    if now >= (retryAt[taskKey] or 0) then
+                        if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return end
+                        if kind == "treat" and Runtime.FeedQuestTreats(objective) then return end
+                    end
+                end
+            end, debug.traceback)
+            if not ok then reportError("QuestFeed", err) end
+        end
+        task.wait(2.5)
     end
 end)
 
