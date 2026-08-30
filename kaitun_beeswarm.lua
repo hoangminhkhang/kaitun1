@@ -127,6 +127,12 @@ local DEFAULT_CONFIG = {
     -- Jelly quests only target non-gifted common bees so event/mythics stay safe.
     CommonBeeTypes = {"Basic", "Bumble", "Cool", "Hasty", "Rascal", "Stubborn"},
     QuestCheckInterval = 3,
+    -- Quest snapshot TTL shared by every background system (feed worker, quest
+    -- router, mob planner). Quest turn-ins always re-scan immediately.
+    QuestScanInterval = 5,
+    -- Mother Bear tasks run LIGHTLY in the background: at most one feed/jelly
+    -- use per this many seconds, so field quests and farming stay the focus.
+    MotherFeedInterval = 10,
     QuestInteractTimeout = 12,
     QuestFarmSeconds = 8,
     -- Farm burst length between quest/purchase checks: shorter bursts let quest
@@ -3171,25 +3177,35 @@ local function questCall(method, ...)
 end
 
 local function activeBearQuests(refresh)
+    -- TTL cache: each scan invokes the quest module twice PER QUEST through an
+    -- identity-2 call - not cheap. All background systems share one snapshot;
+    -- only quest turn-ins (refresh=true) bypass it to see the new quest fast.
+    local now = os.clock()
+    local cache = Runtime.QuestScanCache
+    if not refresh and cache and now - cache.At < (tonumber(Config.QuestScanInterval) or 5) then
+        return cache.List
+    end
     local stats = getStats(refresh)
     local active = stats and stats.Quests and stats.Quests.Active
     local result = {}
-    if type(active) ~= "table" then return result end
-    for _, entry in pairs(active) do
-        local questName = type(entry) == "table" and entry.Name or entry
-        if type(questName) == "string" then
-            local info = questCall("Get", questName)
-            if type(info) == "table" and QUEST_NPC_SET[info.NPC] and not info.Hidden then
-                local progress = questCall("Progress", questName, stats)
-                table.insert(result, {
-                    Name = questName,
-                    NPC = info.NPC,
-                    Info = info,
-                    Progress = type(progress) == "table" and progress or {},
-                })
+    if type(active) == "table" then
+        for _, entry in pairs(active) do
+            local questName = type(entry) == "table" and entry.Name or entry
+            if type(questName) == "string" then
+                local info = questCall("Get", questName)
+                if type(info) == "table" and QUEST_NPC_SET[info.NPC] and not info.Hidden then
+                    local progress = questCall("Progress", questName, stats)
+                    table.insert(result, {
+                        Name = questName,
+                        NPC = info.NPC,
+                        Info = info,
+                        Progress = type(progress) == "table" and progress or {},
+                    })
+                end
             end
         end
     end
+    Runtime.QuestScanCache = {At = now, List = result}
     return result
 end
 
@@ -4405,7 +4421,7 @@ end)
 local function questWork(seconds)
     if not Config.AutoQuest then return false end
     if maintainBearQuests() then return true end
-    local objectives = incompleteQuestObjectives(true)
+    local objectives = incompleteQuestObjectives(false) -- shared TTL snapshot
     -- Do not surface the first objective when it is locked; the UI only shows quests
     -- the scheduler is actually working on.
     Runtime.CurrentQuest = ""
@@ -7061,39 +7077,50 @@ end)
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoQuest and not Runtime.MeteorPriorityActive then
-            local ok, err = xpcall(function()
-                local objectives = incompleteQuestObjectives(false)
-                local retryAt = Runtime.QuestFeedRetryAt or {}
-                local deficitMap = Runtime.QuestFeedDeficit or {}
-                -- Deficits of tasks no longer in the quest list (turned in)
-                -- are pruned.
-                local seen = {}
-                for _, objective in ipairs(objectives) do
-                    seen[tostring(objective.Quest) .. "|" .. tostring(objective.Description)] = true
-                end
-                for key in pairs(deficitMap) do
-                    if not seen[key] then deficitMap[key] = nil end
-                end
-                local now = os.clock()
-                for _, objective in ipairs(objectives) do
-                    local kind = Runtime.QuestTaskKind(objective)
-                    local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
-                    if now >= (retryAt[taskKey] or 0) then
-                        if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return end
-                        if kind == "treat" and Runtime.FeedQuestTreats(objective) then return end
-                    elseif deficitMap[taskKey] then
-                        -- Food arrived while farming: clear the cooldown so the
-                        -- next pass feeds exactly the missing amount.
-                        local deficit = deficitMap[taskKey]
-                        if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(false)) > 0 then
-                            Runtime.QuestFeedRetryAt[taskKey] = nil
+            -- Light pacing: at most ONE feed/jelly use per interval, so Mother
+            -- progresses steadily while field quests and farming dominate.
+            local interval = math.max(3, tonumber(Config.MotherFeedInterval) or 10)
+            if os.clock() >= (Runtime.LastMotherFeedAt or 0) + interval then
+                local ok, err = xpcall(function()
+                    local objectives = incompleteQuestObjectives(false)
+                    local retryAt = Runtime.QuestFeedRetryAt or {}
+                    local deficitMap = Runtime.QuestFeedDeficit or {}
+                    -- Deficits of tasks no longer in the quest list (turned in)
+                    -- are pruned.
+                    local seen = {}
+                    for _, objective in ipairs(objectives) do
+                        seen[tostring(objective.Quest) .. "|" .. tostring(objective.Description)] = true
+                    end
+                    for key in pairs(deficitMap) do
+                        if not seen[key] then deficitMap[key] = nil end
+                    end
+                    local now = os.clock()
+                    for _, objective in ipairs(objectives) do
+                        local kind = Runtime.QuestTaskKind(objective)
+                        local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
+                        if now >= (retryAt[taskKey] or 0) then
+                            if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then
+                                Runtime.LastMotherFeedAt = os.clock()
+                                return
+                            end
+                            if kind == "treat" and Runtime.FeedQuestTreats(objective) then
+                                Runtime.LastMotherFeedAt = os.clock()
+                                return
+                            end
+                        elseif deficitMap[taskKey] then
+                            -- Food arrived while farming: clear the cooldown so the
+                            -- next pass feeds exactly the missing amount.
+                            local deficit = deficitMap[taskKey]
+                            if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(false)) > 0 then
+                                Runtime.QuestFeedRetryAt[taskKey] = nil
+                            end
                         end
                     end
-                end
-            end, debug.traceback)
-            if not ok then reportError("QuestFeed", err) end
+                end, debug.traceback)
+                if not ok then reportError("QuestFeed", err) end
+            end
         end
-        task.wait(2.5)
+        task.wait(5)
     end
 end)
 
