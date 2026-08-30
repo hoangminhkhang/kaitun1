@@ -187,6 +187,10 @@ local DEFAULT_CONFIG = {
     AvoidMobRelocateDistance = 14,
     AvoidMobArrivalDistance = 5,
     AvoidMobRelocateTimeout = 4,
+    -- Mob THREAT zone: only mobs closer than this pause farming and trigger the
+    -- retreat/hold. Farming resumes once no mob sits inside the radius.
+    MobThreatRadius = 16,
+    MobThreatHoldSeconds = 4,
     AutoMaterials = true,
     AutoBlender = true,
     AutoFarmFireflies = true,
@@ -746,6 +750,7 @@ local Runtime = {
     MobRelocating = false,
     MobRelocateTarget = false,
     MobRelocateUntil = 0,
+    MobThreatUntil = 0,
     MobLastHumanoid = false,
     MobLastHealth = false,
     MobLastDamageAt = -math.huge,
@@ -2851,6 +2856,12 @@ local function farmStep(seconds, overrideField, state, detail)
         end
         local ratio = pollenRatio()
         if Config.AutoConvert and ratio >= Config.ConvertPercent then Runtime.Digging = false return true end
+        -- Mob threat active: the avoid worker owns the character (retreat/hold).
+        -- Issuing farm moves now would drag the character back through the mob.
+        if os.clock() < (Runtime.MobThreatUntil or 0) then
+            task.wait(0.15)
+            continue
+        end
         if Config.AutoTokens then
             local remaining = math.max(0, deadline - os.clock())
             if sweepTokens(math.min(Config.TokenSweepDuration, remaining), "FarmToken") > 0 then continue end
@@ -4256,20 +4267,36 @@ local function farmFlowerEffect()
     return moved
 end
 
-local function nearbyLiveMob(field)
+local function nearbyLiveMobs(field)
+    -- ALL live mobs near the character (single pass), not just the first one:
+    -- retreat planning must respect every mob, or it runs straight into one.
     local monsters = workspace:FindFirstChild("Monsters")
     local _, _, root = getCharacter(1)
-    if not monsters or not root then return nil end
+    local list = {}
+    if not monsters or not root then return list end
     for _, object in ipairs(monsters:GetChildren()) do
         local humanoid = object:FindFirstChildOfClass("Humanoid")
         local position = objectPosition(object)
         if humanoid and humanoid.Health > 0 and position
             and (root.Position - position).Magnitude <= Config.MobScanRadius
             and (not field or fieldContainsPosition(field, position, 15)) then
-            return object
+            table.insert(list, {Instance = object, Position = position})
         end
     end
-    return nil
+    return list
+end
+
+local function nearbyLiveMob(field)
+    local _, _, root = getCharacter(1)
+    if not root then return nil end
+    local nearest, nearestDistance
+    for _, mob in ipairs(nearbyLiveMobs(field)) do
+        local distance = (root.Position - mob.Position).Magnitude
+        if not nearestDistance or distance < nearestDistance then
+            nearest, nearestDistance = mob.Instance, distance
+        end
+    end
+    return nearest
 end
 
 Runtime.GetQuestObjectives = function(refresh)
@@ -4282,10 +4309,12 @@ Runtime.ScanMob = function()
     return nearbyLiveMob(field)
 end
 
--- When hit, retreat toward the field center first. If already near center,
--- pick another point inside the FlowerZone farther from the mob so we don't
--- keep jumping on the same dangerous hitbox.
-Runtime.FindMobEscapePosition = function(field, rootPosition, mob)
+-- When hit, retreat toward the field center if it is safe from EVERY mob.
+-- Otherwise pick the candidate point with the largest minimum distance to all
+-- mobs; a point inside any mob's danger zone is rejected outright. Returns nil
+-- when nothing is safe: the caller then HOLDS POSITION instead of running
+-- blindly through mobs (running through them is what caused deaths).
+Runtime.FindMobEscapePosition = function(field, rootPosition, mobs)
     if not field or not rootPosition then return nil end
     local center = objectPosition(field)
     if field:IsA("BasePart") then
@@ -4293,32 +4322,43 @@ Runtime.FindMobEscapePosition = function(field, rootPosition, mob)
     end
     if not center then return nil end
 
-    local arrival = math.max(2, tonumber(Config.AvoidMobArrivalDistance) or 5)
-    if (rootPosition - center).Magnitude > arrival then return center end
+    local safeDistance = math.max(8, tonumber(Config.MobThreatRadius) or 16) + 2
+    local function minMobDistance(position)
+        local best
+        for _, mob in ipairs(mobs or {}) do
+            local distance = (position - mob.Position).Magnitude
+            if not best or distance < best then best = distance end
+        end
+        return best or math.huge
+    end
 
-    local mobPosition = objectPosition(mob)
-    local desiredTravel = math.max(arrival + 1, tonumber(Config.AvoidMobRelocateDistance) or 14)
+    if (rootPosition - center).Magnitude > 4 and minMobDistance(center) >= safeDistance then
+        return center
+    end
+
     local best, bestScore
-    for _ = 1, 7 do
+    for _ = 1, 10 do
         local candidate = fieldPoint(field)
         if candidate then
-            local travel = (candidate - rootPosition).Magnitude
-            local separation = mobPosition and (candidate - mobPosition).Magnitude or 0
-            local score = separation + math.min(travel, desiredTravel * 2) * 0.35
-            if travel >= math.min(desiredTravel * 0.6, 6) and (not bestScore or score > bestScore) then
-                best, bestScore = candidate, score
+            local separation = minMobDistance(candidate)
+            if separation >= safeDistance then
+                local travel = (candidate - rootPosition).Magnitude
+                local score = separation + math.min(travel, 20) * 0.3
+                if not bestScore or score > bestScore then
+                    best, bestScore = candidate, score
+                end
             end
         end
     end
-    return best or center
+    return best
 end
 
 task.spawn(function()
     while Runtime.Running do
+        local threatening = false
         if Config.AvoidMob and Runtime.Digging and not Runtime.MeteorPriorityActive
             and not Runtime.MaterialCombat and Runtime.CurrentField ~= "" then
             local field = findField(Runtime.CurrentField)
-            local mob = nearbyLiveMob(field)
             local _, humanoid, root = getCharacter(1)
             local damaged = false
             if humanoid then
@@ -4332,46 +4372,73 @@ task.spawn(function()
                     Runtime.MobLastHealth = humanoid.Health
                 end
             end
-            Runtime.AvoidingMob = mob ~= nil
-            if mob and humanoid and root and not root.Anchored then
+            local mobs = nearbyLiveMobs(field)
+            -- Threat = a mob inside the small danger radius (not the whole scan
+            -- radius): farming only pauses when the mob can actually reach us.
+            local threatRadius = math.max(8, tonumber(Config.MobThreatRadius) or 16)
+            local nearestDistance
+            if root then
+                for _, mob in ipairs(mobs) do
+                    local distance = (root.Position - mob.Position).Magnitude
+                    if distance <= threatRadius and (not nearestDistance or distance < nearestDistance) then
+                        nearestDistance = distance
+                    end
+                end
+            end
+            threatening = nearestDistance ~= nil and humanoid ~= nil and root ~= nil and not root.Anchored
+            if threatening then
+                -- Renew the hold while danger persists; farmStep pauses meanwhile.
                 local now = os.clock()
+                Runtime.MobThreatUntil = now + math.max(1, tonumber(Config.MobThreatHoldSeconds) or 4)
+                Runtime.AvoidingMob = true
+                -- Kill any in-flight glide/farm move: the retreat owns the character.
+                if damaged then Runtime.Glide = nil end
                 local relocateCooldown = math.max(0.5, tonumber(Config.AvoidMobRelocateCooldown) or 2.5)
-                if damaged and now - Runtime.MobLastDamageAt >= relocateCooldown then
-                    local escape = Runtime.FindMobEscapePosition(field, root.Position, mob)
-                    if escape and (escape - root.Position).Magnitude > 2 then
-                        Runtime.MobLastDamageAt = now
+                if damaged and now - (Runtime.MobLastDamageAt or -math.huge) >= relocateCooldown then
+                    Runtime.MobLastDamageAt = now
+                    Runtime.TweenGeneration += 1
+                    releaseTweenRoot()
+                    local escape = Runtime.FindMobEscapePosition(field, root.Position, mobs)
+                    if escape then
                         Runtime.MobRelocating = true
                         Runtime.MobRelocateTarget = escape
                         Runtime.MobRelocateUntil = now
                             + math.max(1.5, tonumber(Config.AvoidMobRelocateTimeout) or 4)
                         Runtime.MobHoldPosition = nil
                         humanoid:MoveTo(escape)
-                        setStatus("Avoid mob", "Taking damage - relocating within " .. field.Name)
+                        setStatus("Avoid mob", "Hit - retreat to safe point in " .. field.Name)
+                    else
+                        -- Nowhere safe: STAND STILL instead of running through mobs.
+                        Runtime.MobRelocating = false
+                        Runtime.MobRelocateTarget = nil
+                        Runtime.MobHoldPosition = root.Position
+                        humanoid:Move(Vector3.zero, false)
+                        humanoid:MoveTo(root.Position)
+                        setStatus("Avoid mob", "Hit - no safe point, holding still in " .. field.Name)
                     end
                 end
 
                 if Runtime.MobRelocating and typeof(Runtime.MobRelocateTarget) == "Vector3" then
-                    local arrived = (root.Position - Runtime.MobRelocateTarget).Magnitude
+                    if (root.Position - Runtime.MobRelocateTarget).Magnitude
                         <= math.max(2, tonumber(Config.AvoidMobArrivalDistance) or 5)
-                    if arrived or now >= Runtime.MobRelocateUntil then
+                        or now >= Runtime.MobRelocateUntil then
                         Runtime.MobRelocating = false
                         Runtime.MobRelocateTarget = nil
                         Runtime.MobRelocateUntil = 0
-                        Runtime.MobHoldPosition = root.Position
-                        humanoid:Move(Vector3.zero, false)
-                        humanoid:MoveTo(Runtime.MobHoldPosition)
-                        if humanoid.FloorMaterial ~= Enum.Material.Air then humanoid.Jump = true end
                     else
-                        -- Retreating from the hit point: walk only; jump again once safe.
+                        -- Walk to the safe point only; NO jump spam (jumping next
+                        -- to a mob just eats another hit).
                         humanoid:MoveTo(Runtime.MobRelocateTarget)
                     end
-                else
+                end
+                if not Runtime.MobRelocating then
+                    -- Hold position while threatened.
                     Runtime.MobHoldPosition = Runtime.MobHoldPosition or root.Position
                     humanoid:Move(Vector3.zero, false)
                     humanoid:MoveTo(Runtime.MobHoldPosition)
-                    if humanoid.FloorMaterial ~= Enum.Material.Air then humanoid.Jump = true end
                 end
-            else
+            elseif os.clock() >= (Runtime.MobThreatUntil or 0) then
+                Runtime.AvoidingMob = false
                 Runtime.MobHoldPosition = nil
                 Runtime.MobRelocating = false
                 Runtime.MobRelocateTarget = nil
@@ -4388,7 +4455,7 @@ task.spawn(function()
         end
         -- CPU saver: tick fast only while dodging a mob; normally
         -- 0.25s still detects new mobs quickly.
-        task.wait(Runtime.AvoidingMob and math.max(0.08, Config.MobJumpInterval) or 0.25)
+        task.wait(threatening and 0.12 or 0.25)
     end
 end)
 
@@ -5856,7 +5923,9 @@ local function applyLowGraphics(enabled)
                     pcall(function() object.TextureID = "" end)
                 end
             elseif object:IsA("PartOperation") then
-                pcall(function() object.RenderFidelity = Enum.RenderFidelity.Performance end)
+                -- SolidModel/unions BLOCK RenderFidelity changes at run-time and
+                -- print a console warning per attempt (thousands of unions -> the
+                -- warning spam stalled the whole script). Leave them untouched.
             end
         elseif object:IsA("SpecialMesh") then
             if Config.FixLagRemoveTextures and not playerVisual then object.TextureId = "" end
