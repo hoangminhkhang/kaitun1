@@ -2552,10 +2552,37 @@ function Runtime.ClaimWealthClock()
 
     Runtime.LastWealthClockAttempt = now
     setStatus("Wealth Clock", "Auto claim reward every hour")
+    -- Walk to the clock like a real player (quest-NPC style), then claim.
+    -- Falls back to the pure remote claim if the toy is not replicated.
+    local clockToy = workspace:FindFirstChild("Toys")
+    clockToy = clockToy and clockToy:FindFirstChild("Wealth Clock")
+    local anchor = clockToy and (clockToy:FindFirstChild("Platform", true) or clockToy)
+    local clockPosition = anchor and objectPosition(anchor)
+    if clockPosition and not Runtime.MeteorPriorityActive then
+        setStatus("Wealth Clock", "Walking to the clock")
+        tweenTo(CFrame.new(clockPosition + Vector3.new(0, 3, 0)), Config.TweenSpeed, "WealthClock")
+        task.wait(0.3)
+    end
+    if Runtime.MeteorPriorityActive then
+        Runtime.LastWealthClockAttempt = 0 -- retried as soon as the meteor ends
+        return false
+    end
     local ok = remoteCall("ToyEvent", "Wealth Clock")
     if ok then
         Runtime.WealthClockClaims += 1
         Runtime.NextWealthClockCheck = now + interval
+        task.delay(2, function()
+            -- Confirm via ToyTimes so the hourly claim is visible in the log.
+            local fresh = getStats(true)
+            local toyTimes = type(fresh) == "table" and fresh.ToyTimes or nil
+            if type(toyTimes) == "table" and tonumber(toyTimes["Wealth Clock"]) then
+                warn(string.format("[BSS Kaitun] Wealth Clock claimed (%d total)",
+                    Runtime.WealthClockClaims))
+            else
+                warn("[BSS Kaitun] Wealth Clock claim unconfirmed - retrying in 90s")
+                Runtime.NextWealthClockCheck = os.clock() + 90
+            end
+        end)
         task.defer(function() getStats(true) end)
         return true
     end
