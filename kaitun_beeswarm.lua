@@ -3805,8 +3805,17 @@ function Runtime.FeedQuestTreats(objective)
         setStatus("Quest feed", "No bee found to feed")
         return false
     end
-    -- Feed EVERY unit in stock in a single remote call (fast, no batching).
-    local batch = treats
+    -- Feed only what the quest still NEEDS: parse the goal from the task text
+    -- ("Feed 1 Sunflower Seed to your Bees") scaled by quest progress, so a
+    -- 1-seed task does not burn the whole 46-seed stock in one call.
+    local taskText = string.lower(tostring(objective and objective.Description or ""))
+    local goal = tonumber(string.match(taskText, "feed%s+(%d+)"))
+    local ratio = tonumber(type(objective.Progress) == "table" and objective.Progress[1]) or 0
+    local batch = treats -- unknown goal: keep the feed-everything behaviour
+    if goal and goal >= 1 then
+        local remaining = math.max(1, math.ceil(goal * (1 - math.clamp(ratio, 0, 0.99))))
+        batch = math.min(treats, remaining)
+    end
     Runtime.CurrentQuest = objective.Quest
     setStatus("Quest feed", string.format("Feed %d %s | %s (%d,%d)",
         batch, treatLabel, bee.Type, bee.X, bee.Y))
