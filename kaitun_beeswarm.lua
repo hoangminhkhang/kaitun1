@@ -49,6 +49,12 @@ local DEFAULT_CONFIG = {
     SmartWalkDistance = 10,
     SmartArrivalDistance = 6,
     SmartFieldWalkTimeout = 12,
+    -- SmartMove stuck recovery: after ~1.2s without progress inside a field
+    -- (tree/rock/hedge), compute ONE PathfindingService route around the
+    -- obstacle, walk its waypoints, then resume direct walking. Zero cost
+    -- while walking freely; cooldown caps the ComputeAsync spend.
+    SmartFieldPathfind = true,
+    FieldPathfindCooldown = 6,
     FarmStepDelay = 0.25,
     DigInterval = 0.22,
     TokenMaxChaseDistance = 115,
@@ -160,8 +166,12 @@ local DEFAULT_CONFIG = {
     RJStockResyncEvery = 25,
     -- Star Treat: 100% gifts a bee; event bees can ONLY be gifted this way.
     -- Used on the first non-gifted event bee in this order, keep going until
-    -- every one of them is gifted (never stops early).
+    -- every one of them is gifted (never stops early). When the stock is empty
+    -- the script BUYS one from the Ticket Tent with tickets - but only after
+    -- the whole event-bee egg queue is done (bees outrank gifting for tickets).
     AutoStarTreat = true,
+    AutoBuyStarTreat = true,
+    StarTreatTicketCost = 1000,
     StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
     -- Mondo Chick: spawns hourly on Mountain Top, drops Bitterberry/Neonberry.
     AutoFarmMondoChick = true,
@@ -613,6 +623,7 @@ end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
@@ -1148,6 +1159,44 @@ local function ensureGlideRunner()
     Runtime.GlideRunnerConnection = connect(RunService.Heartbeat, glideRunnerStep)
 end
 
+-- Field pathfinding (SmartMove stuck recovery): computes ONE route around
+-- obstacles and walks its waypoints. Engaged only by the stuck watchdog inside
+-- tweenTo, so free-walking never pays the ComputeAsync cost.
+local function walkFieldPath(humanoid, root, position, generation)
+    local ok, path = pcall(function()
+        local pathObject = PathfindingService:CreatePath({
+            AgentRadius = 2.5,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            WaypointSpacing = 4,
+        })
+        pathObject:ComputeAsync(root.Position, position)
+        return pathObject
+    end)
+    if not ok or not path or path.Status ~= Enum.PathStatus.Success then return false end
+    local okWaypoints, waypoints = pcall(path.GetWaypoints, path)
+    if not okWaypoints or #waypoints < 2 then return false end
+    for index = 2, #waypoints do
+        local waypoint = waypoints[index]
+        if waypoint.Action == Enum.PathWaypointAction.Jump then
+            humanoid.Jump = true
+        end
+        humanoid:MoveTo(waypoint.Position)
+        local waypointDeadline = os.clock() + 2.5
+        while Runtime.Running and Runtime.TweenGeneration == generation
+            and humanoid.Health > 0 and not Runtime.AvoidingMob
+            and (root.Position - waypoint.Position).Magnitude > 3.5
+            and os.clock() < waypointDeadline do
+            task.wait(0.05)
+        end
+        if Runtime.TweenGeneration ~= generation then return false end
+        -- A mob engaged mid-path: hand control back to the walk loop (it holds
+        -- position while threatened and resumes direct walking afterwards).
+        if Runtime.AvoidingMob then return false end
+    end
+    return (root.Position - position).Magnitude <= math.max(4, Config.SmartArrivalDistance + 2)
+end
+
 local function tweenTo(target, speed, owner, forceWalk)
     local position
     local targetCFrame
@@ -1212,6 +1261,8 @@ local function tweenTo(target, speed, owner, forceWalk)
         )
         local mobPaused = false
         local lastWalkTick = os.clock()
+        local lastWalkDistance = (root.Position - position).Magnitude
+        local stuckTicks = 0
         while Runtime.Running and Runtime.TweenGeneration == generation and humanoid.Health > 0
             and (root.Position - position).Magnitude > Config.SmartArrivalDistance and os.clock() < walkDeadline do
             local now = os.clock()
@@ -1232,6 +1283,32 @@ local function tweenTo(target, speed, owner, forceWalk)
                 mobPaused = false
                 Runtime.MobHoldPosition = nil
                 humanoid:MoveTo(position)
+            end
+            -- Stuck watchdog: walking against a tree/rock/hedge makes no progress.
+            -- One pathfinding detour is computed (cooldown-gated), then SmartMove
+            -- resumes straight at the target.
+            if Config.SmartFieldPathfind and walkingInsideField
+                and not mobPaused and not Runtime.AvoidingMob then
+                local distanceNow = (root.Position - position).Magnitude
+                if distanceNow < lastWalkDistance - 0.5 then
+                    lastWalkDistance = distanceNow
+                    stuckTicks = 0
+                else
+                    stuckTicks += 1
+                end
+                if stuckTicks >= 24 and os.clock() >= (Runtime.LastFieldPathfindAt or 0)
+                    + math.max(2, tonumber(Config.FieldPathfindCooldown) or 6) then
+                    Runtime.LastFieldPathfindAt = os.clock()
+                    stuckTicks = 0
+                    setStatus("Smart move", "Stuck - pathfinding around obstacle")
+                    local pathStartedAt = os.clock()
+                    walkFieldPath(humanoid, root, position, generation)
+                    -- Detour time does not burn the walk timeout (same rule as
+                    -- mob dodging); otherwise a good path still ends in a glide.
+                    walkDeadline += os.clock() - pathStartedAt
+                    lastWalkDistance = (root.Position - position).Magnitude
+                    humanoid:MoveTo(position)
+                end
             end
             lastWalkTick = now
             task.wait(0.05)
@@ -3443,7 +3520,8 @@ local function interactQuestNPC(name)
     end
     setStatus("Going to NPC", name)
     if not tweenTo(CFrame.new(platform.Position + Vector3.new(0, 5, 0)), Config.TweenSpeed, "QuestNPC") then return false end
-    task.wait(1)
+    -- Short settle only: the arrival check below gates the interaction anyway.
+    task.wait(0.3)
     if Runtime.MeteorPriorityActive then return false end
     local _, _, root = getCharacter(1)
     local distance = root and (root.Position - platform.Position).Magnitude or math.huge
@@ -3488,7 +3566,7 @@ local function interactQuestNPC(name)
         incrementNPCDialogue()
         RunService.Stepped:Wait()
     end
-    task.wait(0.5)
+    task.wait(0.2)
     getStats(true)
     Runtime.NPCModuleError = ""
     return true
@@ -4373,19 +4451,24 @@ task.spawn(function()
                 end
             end
             local mobs = nearbyLiveMobs(field)
-            -- Threat = a mob inside the small danger radius (not the whole scan
-            -- radius): farming only pauses when the mob can actually reach us.
+            -- Jump trigger = ANY mob inside the scan radius (mobs only connect
+            -- while the character is grounded, so hopping starts early).
+            -- Threat (retreat + farm pause) still requires the mob inside the
+            -- small danger radius, so mob-heavy fields keep farming while hopping.
             local threatRadius = math.max(8, tonumber(Config.MobThreatRadius) or 16)
-            local nearestDistance
+            local mobNear, nearestDistance = false, nil
             if root then
                 for _, mob in ipairs(mobs) do
                     local distance = (root.Position - mob.Position).Magnitude
-                    if distance <= threatRadius and (not nearestDistance or distance < nearestDistance) then
+                    if not nearestDistance or distance < nearestDistance then
                         nearestDistance = distance
                     end
                 end
+                mobNear = nearestDistance ~= nil
+                    and nearestDistance <= (tonumber(Config.MobScanRadius) or 55)
             end
-            threatening = nearestDistance ~= nil and humanoid ~= nil and root ~= nil and not root.Anchored
+            threatening = nearestDistance ~= nil and nearestDistance <= threatRadius
+                and humanoid ~= nil and root ~= nil and not root.Anchored
             if threatening then
                 -- Renew the hold while danger persists; farmStep pauses meanwhile.
                 local now = os.clock()
@@ -4426,8 +4509,7 @@ task.spawn(function()
                         Runtime.MobRelocateTarget = nil
                         Runtime.MobRelocateUntil = 0
                     else
-                        -- Walk to the safe point only; NO jump spam (jumping next
-                        -- to a mob just eats another hit).
+                        -- Walk to the safe point; airborne hits miss (game mechanic).
                         humanoid:MoveTo(Runtime.MobRelocateTarget)
                     end
                 end
@@ -4444,6 +4526,12 @@ task.spawn(function()
                 Runtime.MobRelocateTarget = nil
                 Runtime.MobRelocateUntil = 0
             end
+            -- Jump-dodge: mobs only connect while the character is grounded, so
+            -- keep hopping whenever ANY mob is around (threat or not).
+            if mobNear and humanoid and root and not root.Anchored
+                and humanoid.FloorMaterial ~= Enum.Material.Air then
+                humanoid.Jump = true
+            end
         else
             Runtime.AvoidingMob = false
             Runtime.MobHoldPosition = nil
@@ -4453,9 +4541,9 @@ task.spawn(function()
             Runtime.MobLastHumanoid = nil
             Runtime.MobLastHealth = nil
         end
-        -- CPU saver: tick fast only while dodging a mob; normally
-        -- 0.25s still detects new mobs quickly.
-        task.wait(threatening and 0.12 or 0.25)
+        -- CPU saver: tick at jump cadence while any mob is around, 0.25s otherwise.
+        task.wait((threatening or mobNear)
+            and math.max(0.08, tonumber(Config.MobJumpInterval) or 0.12) or 0.25)
     end
 end)
 
@@ -5918,14 +6006,13 @@ local function applyLowGraphics(enabled)
                 end
             end)
             if object:IsA("MeshPart") then
-                pcall(function() object.RenderFidelity = Enum.RenderFidelity.Performance end)
+                -- RenderFidelity is EDIT-ONLY: writing it at run-time is blocked
+                -- by the engine for MeshParts AND SolidModels alike, printing a
+                -- console warning per attempt (that warning spam stalled the
+                -- script). Never touch it; texture stripping stays.
                 if hidden or (Config.FixLagRemoveTextures and not playerVisual) then
                     pcall(function() object.TextureID = "" end)
                 end
-            elseif object:IsA("PartOperation") then
-                -- SolidModel/unions BLOCK RenderFidelity changes at run-time and
-                -- print a console warning per attempt (thousands of unions -> the
-                -- warning spam stalled the whole script). Leave them untouched.
             end
         elseif object:IsA("SpecialMesh") then
             if Config.FixLagRemoveTextures and not playerVisual then object.TextureId = "" end
@@ -6160,36 +6247,74 @@ if oldTop then oldTop:Destroy() end
 local screen = create("ScreenGui", {Name = "BSSKaitunUI", ResetOnSpawn = false,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = -100}, guiParent)
 
--- CPU-saver UI: full-screen black overlay + minimal white text (hub, player,
--- status, uptime). No panel/drag/RichText; only 2 dynamic labels update
--- every 0.5s so the UI costs almost no CPU.
+-- CPU-saver UI: full-screen black overlay + a centered honey-themed card.
+-- Every visual element (corners, strokes, row backgrounds, accent bars) is
+-- created ONCE - the 0.5s update loop only writes .Text, so the CPU cost is
+-- unchanged while the layout looks structured instead of floating text.
+local THEME = {
+    Accent = Color3.fromRGB(255, 200, 61),  -- honey amber
+    Card = Color3.fromRGB(15, 17, 26),
+    RowBg = Color3.fromRGB(24, 27, 40),
+    BoxBg = Color3.fromRGB(10, 12, 18),
+    Muted = Color3.fromRGB(148, 153, 170),
+    Value = Color3.fromRGB(235, 238, 245),
+}
 local overlay = create("Frame", {Name = "BlackScreen", Size = UDim2.fromScale(1, 1),
     BackgroundColor3 = Color3.new(), BorderSizePixel = 0,
     Visible = Config.BlackScreen ~= false}, screen)
-local hubLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.34), Size = UDim2.fromOffset(600, 46), BackgroundTransparency = 1,
-    Text = "BEE KAITUN", Font = Enum.Font.GothamBold, TextSize = 32,
-    TextColor3 = Color3.new(1, 1, 1)}, overlay)
-local userLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.45), Size = UDim2.fromOffset(600, 26), BackgroundTransparency = 1,
-    Text = "Player: " .. Player.Name, Font = Enum.Font.Gotham, TextSize = 20,
-    TextColor3 = Color3.new(1, 1, 1)}, overlay)
-local statusLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.55), Size = UDim2.fromOffset(760, 60), BackgroundTransparency = 1,
-    Text = "Status: ...", Font = Enum.Font.Gotham, TextSize = 20, TextWrapped = true,
-    TextColor3 = Color3.new(1, 1, 1)}, overlay)
-local gearLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.645), Size = UDim2.fromOffset(600, 24), BackgroundTransparency = 1,
-    Text = "Next gear: ...", Font = Enum.Font.Gotham, TextSize = 18,
-    TextColor3 = Color3.new(1, 1, 1)}, overlay)
-local honeyRateLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.71), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
-    Text = "Honey: 0/h", Font = Enum.Font.Gotham, TextSize = 18,
-    TextColor3 = Color3.new(1, 1, 1)}, overlay)
-local uptimeLabel = create("TextLabel", {AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.775), Size = UDim2.fromOffset(400, 24), BackgroundTransparency = 1,
-    Text = "Uptime: 00:00:00", Font = Enum.Font.Gotham, TextSize = 18,
-    TextColor3 = Color3.new(1, 1, 1)}, overlay)
+
+local card = create("Frame", {Name = "Card",
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.47),
+    Size = UDim2.new(0.46, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundColor3 = THEME.Card, BorderSizePixel = 0}, overlay)
+create("UICorner", {CornerRadius = UDim.new(0, 14)}, card)
+create("UIStroke", {Color = THEME.Accent, Thickness = 1.2, Transparency = 0.55}, card)
+create("UIPadding", {PaddingTop = UDim.new(0, 18), PaddingBottom = UDim.new(0, 18),
+    PaddingLeft = UDim.new(0, 20), PaddingRight = UDim.new(0, 20)}, card)
+create("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center}, card)
+
+create("TextLabel", {Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1,
+    LayoutOrder = 1, Text = "BEE KAITUN", Font = Enum.Font.GothamBold, TextSize = 30,
+    TextColor3 = THEME.Accent}, card)
+create("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+    LayoutOrder = 2, Text = "A U T O   F A R M", Font = Enum.Font.Gotham, TextSize = 11,
+    TextColor3 = THEME.Muted}, card)
+create("Frame", {Size = UDim2.new(0.55, 0, 0, 2), BackgroundColor3 = THEME.Accent,
+    BackgroundTransparency = 0.45, BorderSizePixel = 0, LayoutOrder = 3}, card)
+
+local function infoRow(order, caption, initialText)
+    local row = create("Frame", {Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = THEME.RowBg, BackgroundTransparency = 0.35,
+        BorderSizePixel = 0, LayoutOrder = order}, card)
+    create("UICorner", {CornerRadius = UDim.new(0, 8)}, row)
+    create("TextLabel", {Size = UDim2.new(0.4, -12, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1, Text = caption, Font = Enum.Font.GothamBold,
+        TextSize = 12, TextColor3 = THEME.Muted, TextXAlignment = Enum.TextXAlignment.Left}, row)
+    return create("TextLabel", {Size = UDim2.new(0.6, -12, 1, 0), Position = UDim2.new(0.4, 0, 0, 0),
+        BackgroundTransparency = 1, Text = initialText, Font = Enum.Font.Gotham,
+        TextSize = 14, TextColor3 = THEME.Value, TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd}, row)
+end
+
+infoRow(4, "PLAYER", Player.Name)
+local uptimeLabel = infoRow(5, "UPTIME", "00:00:00")
+local honeyRateLabel = infoRow(6, "HONEY", "0/h")
+local gearLabel = infoRow(7, "NEXT GEAR", "...")
+
+local statusBox = create("Frame", {Size = UDim2.new(1, 0, 0, 88),
+    BackgroundColor3 = THEME.BoxBg, BackgroundTransparency = 0.25,
+    BorderSizePixel = 0, LayoutOrder = 8}, card)
+create("UICorner", {CornerRadius = UDim.new(0, 10)}, statusBox)
+create("Frame", {Size = UDim2.new(0, 3, 1, -20), Position = UDim2.new(0, 10, 0, 10),
+    BackgroundColor3 = THEME.Accent, BackgroundTransparency = 0.3, BorderSizePixel = 0}, statusBox)
+create("TextLabel", {Size = UDim2.new(1, -34, 0, 14), Position = UDim2.new(0, 22, 0, 10),
+    BackgroundTransparency = 1, Text = "STATUS", Font = Enum.Font.GothamBold, TextSize = 11,
+    TextColor3 = THEME.Muted, TextXAlignment = Enum.TextXAlignment.Left}, statusBox)
+local statusLabel = create("TextLabel", {Size = UDim2.new(1, -34, 1, -34), Position = UDim2.new(0, 22, 0, 26),
+    BackgroundTransparency = 1, Text = "...", Font = Enum.Font.Gotham, TextSize = 14,
+    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = THEME.Value}, statusBox)
 
 -- Black screen toggle: on-screen button (mobile/tablet) + F7 (PC).
 -- The button lives in its own top DisplayOrder ScreenGui so it is never
@@ -6198,11 +6323,12 @@ local overlayVisible = Config.BlackScreen ~= false
 local topScreen = create("ScreenGui", {Name = "BSSKaitunUITop", ResetOnSpawn = false,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, guiParent)
 local toggleButton = create("TextButton", {Name = "ScreenToggle",
-    Size = UDim2.fromOffset(130, 34), Position = UDim2.new(1, -142, 0, 8),
-    BackgroundColor3 = Color3.fromRGB(28, 33, 48), BorderSizePixel = 0,
-    Text = "", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14,
+    Size = UDim2.fromOffset(132, 32), Position = UDim2.new(1, -144, 0, 8),
+    BackgroundColor3 = Color3.fromRGB(24, 27, 40), BorderSizePixel = 0,
+    Text = "", TextColor3 = Color3.fromRGB(235, 238, 245), Font = Enum.Font.GothamBold, TextSize = 13,
     AutoButtonColor = true}, topScreen)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, toggleButton)
+create("UIStroke", {Color = Color3.fromRGB(255, 200, 61), Thickness = 1, Transparency = 0.5}, toggleButton)
 local function setBlackScreen(visible)
     overlayVisible = visible
     Config.BlackScreen = visible
@@ -6231,12 +6357,12 @@ task.spawn(function()
     while Runtime.Running and screen.Parent do
         local elapsed = math.max(0, math.floor(os.clock() - Runtime.StartedAt))
         local ok, err = pcall(function()
-            statusLabel.Text = "Status: " .. Runtime.State
+            statusLabel.Text = Runtime.State
                 .. (Runtime.Detail ~= "" and (" | " .. Runtime.Detail) or "")
             local gearText = Runtime.GearStatusText()
-            gearLabel.Text = gearText ~= "" and gearText or "Next gear: none (stage gear complete)"
-            honeyRateLabel.Text = "Honey: " .. formatNumber(Runtime.HoneyPerHour()) .. "/h"
-            uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d",
+            gearLabel.Text = gearText ~= "" and gearText or "none (stage gear complete)"
+            honeyRateLabel.Text = formatNumber(Runtime.HoneyPerHour()) .. "/h"
+            uptimeLabel.Text = string.format("%02d:%02d:%02d",
                 math.floor(elapsed / 3600), math.floor(elapsed / 60) % 60, elapsed % 60)
         end)
         if not ok then
@@ -6512,6 +6638,55 @@ end
 -- Star Treat worker step: first non-gifted event bee in config order gets
 -- star treats until gifted; keeps going through the whole list - never stops
 -- early while star treats remain and a target is missing.
+local function starTreatPendingCount()
+    local cells = hiveBeeCells()
+    local pending = 0
+    for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
+        local wanted = Runtime.NormalizeEventBeeName(beeName)
+        for _, cell in ipairs(cells) do
+            if not cell.Locked and Runtime.NormalizeEventBeeName(cell.Type) == wanted and not cell.Gifted then
+                pending += 1
+                break
+            end
+        end
+    end
+    return pending
+end
+
+-- Buy one Star Treat from the Ticket Tent with tickets. The package is read
+-- from the replicated shop item (ItemType/ItemCategory StringValues, same as
+-- every other shop) so the real Category/Type is used instead of a guess.
+local function buyStarTreat()
+    local package
+    local shops = workspace:FindFirstChild("Shops")
+    if shops then
+        for _, shop in ipairs(shops:GetDescendants()) do
+            if shop:IsA("BasePart") or shop:IsA("Model") then
+                if Runtime.NormalizeEventBeeName(shop.Name) == "startreat" then
+                    local itemType = shop:FindFirstChild("ItemType")
+                    local itemCategory = shop:FindFirstChild("ItemCategory")
+                    if itemType and itemCategory and itemType:IsA("ValueBase") and itemCategory:IsA("ValueBase") then
+                        package = {Category = tostring(itemCategory.Value), Type = tostring(itemType.Value)}
+                    end
+                    break
+                end
+            end
+        end
+    end
+    package = package or {Category = "Treats", Type = "StarTreat"}
+    local ok = remoteCall("ItemPackageEvent", "Purchase",
+        {Category = package.Category, Type = package.Type, Amount = 1})
+    if ok then
+        task.defer(function() getStats(true) end)
+        setStatus("Star Treat", "Bought Star Treat from Ticket Tent")
+        return true
+    end
+    Runtime.StarTreatRetryAt = os.clock() + 60
+    setStatus("Star Treat", string.format("Star Treat purchase failed (%s/%s) - retry in 60s",
+        tostring(package.Category), tostring(package.Type)))
+    return false
+end
+
 function Runtime.StarTreatStep()
     if not Config.AutoStarTreat then return "off" end
     if os.clock() < (Runtime.StarTreatRetryAt or 0) then return "cooldown" end
@@ -6529,7 +6704,28 @@ function Runtime.StarTreatStep()
     findTreat(stats, 0)
     starTreats = math.floor(starTreats or 0)
     if starTreats <= 0 then
-        setStatus("Star Treat", "No Star Treat in inventory - waiting for rewards")
+        -- Empty stock: Mother Bear quests deliver them passively, but spare
+        -- tickets can buy one right away once the bee-egg queue is finished
+        -- (bees outrank gifting for tickets).
+        local pending = starTreatPendingCount()
+        if pending > 0 and Config.AutoBuyStarTreat
+            and (type(Runtime.NextEventBee) ~= "function" or Runtime.NextEventBee(false) == nil) then
+            local tickets = Runtime.TicketCount(stats)
+            local cost = math.max(1, tonumber(Config.StarTreatTicketCost) or 1000)
+            if tickets >= cost then
+                if buyStarTreat() then
+                    task.wait(1.5)
+                    return "bought"
+                end
+                return "wait"
+            end
+            setStatus("Star Treat", string.format("Saving tickets: %s/%s (%d event bee(s) waiting)",
+                formatNumber(tickets), formatNumber(cost), pending))
+        elseif pending > 0 then
+            setStatus("Star Treat", "No Star Treat - waiting for Mother Bear quest rewards")
+        else
+            setStatus("Star Treat", "No Star Treat needed (no non-gifted event bee in hive)")
+        end
         return "wait"
     end
     local cells = hiveBeeCells()
@@ -6631,10 +6827,37 @@ task.spawn(function()
     end
 end)
 
--- Dig loop: this is the exact remote the game's LocalCollect calls.
+-- Dig: ToolCollect only does anything while a collector is HELD. After a
+-- rejoin the collector sits in the backpack unequipped and the remote no-ops,
+-- so keep the best owned collector equipped using the game's own
+-- stats.EquippedCollector tracking.
+function Runtime.EnsureCollectorEquipped()
+    local stats = getStats(false)
+    local equipped = type(stats) == "table" and tostring(stats.EquippedCollector or "") or ""
+    if equipped ~= "" then return false end
+    -- Later milestones hold better collectors: keep the LAST owned match.
+    local best
+    for _, milestone in ipairs(Config.ProgressionMilestones or {}) do
+        for _, entry in ipairs(milestone.Items or {}) do
+            if entry.Category == "Collector" and entryEnabled(entry) and playerHas(entry, false) then
+                best = entry
+            end
+        end
+    end
+    if not best then return false end
+    remoteCall("ItemPackageEvent", "Equip",
+        {Mute = true, Category = "Collector", Type = best.Type})
+    setStatus("Dig", "Equipped collector: " .. tostring(best.Item))
+    return true
+end
+
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoFarm and (Runtime.Digging or Runtime.State == "Auto meteor") then
+            if os.clock() >= (Runtime.NextCollectorEquipCheck or 0) then
+                Runtime.NextCollectorEquipCheck = os.clock() + 10
+                pcall(Runtime.EnsureCollectorEquipped)
+            end
             remoteCall("ToolCollect")
         end
         task.wait(math.max(0.08, Config.DigInterval))
@@ -7109,7 +7332,7 @@ local function progression()
         for _ = 1, #Config.QuestNPCs do
             Runtime.LastQuestCheck = -math.huge
             if not maintainBearQuests() then break end
-            task.wait(0.5)
+            task.wait(0.15)
         end
     end
 
