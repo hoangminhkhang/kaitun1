@@ -3859,9 +3859,28 @@ function Runtime.FeedQuestTreats(objective)
             treatKey, treatLabel, treats = bestKey, bestLabel, bestStock
         end
     end
+    -- Goal + remaining computed UP FRONT so shortages are remembered exactly.
+    local taskText = string.lower(tostring(objective and objective.Description or ""))
+    local goal = tonumber(string.match(taskText, "feed%s+(%d+)"))
+    local ratio = tonumber(type(objective.Progress) == "table" and objective.Progress[1]) or 0
+    local remaining
+    if goal and goal >= 1 then
+        remaining = math.max(1, math.ceil(goal * (1 - math.clamp(ratio, 0, 0.99))))
+    end
+    Runtime.QuestFeedDeficit = Runtime.QuestFeedDeficit or {}
+    local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
     if treats <= 0 then
         markQuestTaskCooldown(objective, 90)
-        setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 90s", treatLabel))
+        if remaining then
+            -- Remember EXACTLY how many are missing: the worker auto-feeds the
+            -- moment this much food arrives from farming.
+            Runtime.QuestFeedDeficit[taskKey] =
+                {TreatKey = treatKey, Label = treatLabel, Missing = remaining}
+            setStatus("Quest feed", string.format("Missing %d %s - farming, auto-feed when it arrives",
+                remaining, treatLabel))
+        else
+            setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 90s", treatLabel))
+        end
         return false
     end
     local bee = Runtime.FindQuestTargetBee(false)
@@ -3869,23 +3888,24 @@ function Runtime.FeedQuestTreats(objective)
         setStatus("Quest feed", "No bee found to feed")
         return false
     end
-    -- Feed only what the quest still NEEDS: parse the goal from the task text
-    -- ("Feed 1 Sunflower Seed to your Bees") scaled by quest progress, so a
-    -- 1-seed task does not burn the whole 46-seed stock in one call.
-    local taskText = string.lower(tostring(objective and objective.Description or ""))
-    local goal = tonumber(string.match(taskText, "feed%s+(%d+)"))
-    local ratio = tonumber(type(objective.Progress) == "table" and objective.Progress[1]) or 0
+    -- Feed only what the quest still NEEDS: a 1-seed task never burns the
+    -- whole stock, and a partially-fed task tops up just the remainder.
     local batch = treats -- unknown goal: keep the feed-everything behaviour
-    if goal and goal >= 1 then
-        local remaining = math.max(1, math.ceil(goal * (1 - math.clamp(ratio, 0, 0.99))))
+    if remaining then
         batch = math.min(treats, remaining)
+        if batch < remaining then
+            Runtime.QuestFeedDeficit[taskKey] =
+                {TreatKey = treatKey, Label = treatLabel, Missing = remaining - batch}
+        else
+            Runtime.QuestFeedDeficit[taskKey] = nil -- fully covered
+        end
     end
     Runtime.CurrentQuest = objective.Quest
     setStatus("Quest feed", string.format("Feed %d %s | %s (%d,%d)",
         batch, treatLabel, bee.Type, bee.X, bee.Y))
-    local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
+    local ok, remoteRemaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
         "ConstructHiveCellFromEgg", bee.X, bee.Y, treatKey, batch)
-    applyHatchResponse(treatKey, remaining, success, honeycomb, discoveredBees, eggUses)
+    applyHatchResponse(treatKey, remoteRemaining, success, honeycomb, discoveredBees, eggUses)
     task.wait(0.4)
     task.defer(function() MaterialSystem.Stats(true) end)
     return ok
@@ -7036,19 +7056,38 @@ end)
 -- Quest feed/jelly worker: the instant tasks are remote-only, so they run
 -- OFF-THREAD - the farm mover never pauses for inventory checks. Uses cached
 -- stats (no blocking remote per pass); over-reading stock is harmless because
--- the server caps consumption to what is actually owned.
+-- the server caps consumption to what is actually owned. Remembered deficits
+-- (missing food) unlock EARLY the moment enough food arrives from farming.
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoQuest and not Runtime.MeteorPriorityActive then
             local ok, err = xpcall(function()
+                local objectives = incompleteQuestObjectives(false)
                 local retryAt = Runtime.QuestFeedRetryAt or {}
+                local deficitMap = Runtime.QuestFeedDeficit or {}
+                -- Deficits of tasks no longer in the quest list (turned in)
+                -- are pruned.
+                local seen = {}
+                for _, objective in ipairs(objectives) do
+                    seen[tostring(objective.Quest) .. "|" .. tostring(objective.Description)] = true
+                end
+                for key in pairs(deficitMap) do
+                    if not seen[key] then deficitMap[key] = nil end
+                end
                 local now = os.clock()
-                for _, objective in ipairs(incompleteQuestObjectives(false)) do
+                for _, objective in ipairs(objectives) do
                     local kind = Runtime.QuestTaskKind(objective)
                     local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
                     if now >= (retryAt[taskKey] or 0) then
                         if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return end
                         if kind == "treat" and Runtime.FeedQuestTreats(objective) then return end
+                    elseif deficitMap[taskKey] then
+                        -- Food arrived while farming: clear the cooldown so the
+                        -- next pass feeds exactly the missing amount.
+                        local deficit = deficitMap[taskKey]
+                        if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(false)) > 0 then
+                            Runtime.QuestFeedRetryAt[taskKey] = nil
+                        end
                     end
                 end
             end, debug.traceback)
