@@ -322,7 +322,10 @@ local DEFAULT_CONFIG = {
     -- Lag fix never Destroys token/bee/field logic; Atlas preset only removes visual-only
     -- SurfaceAppearance and decorations are filtered, so scanners keep working.
     -- Black screen UI: false = start without the dark overlay (F7 can still enable it).
+    -- BlackScreenTransparency: 0 = opaque black, 0.3 = dimmed night-mode veil
+    -- (default), up to 0.85 = very faint.
     BlackScreen = true,
+    BlackScreenTransparency = 0.3,
     LowGraphics = true,
     FixLagAtlasMode = true,
     FixLagHideBees = true,
@@ -717,6 +720,7 @@ local Runtime = {
     Glide = nil,
     GlideRunnerConnection = nil,
     ToyRetryAt = {},
+    ToyConsecutiveBusy = {},
     ToysClaimed = 0,
     RJGiftedTypes = {},
     RJGiftedCount = 0,
@@ -3018,19 +3022,50 @@ function Runtime.ClaimFreeToys()
                 Runtime.ToyRetryAt[toyName] = now + 90
                 setStatus("Free toy", toyName)
                 if remoteCall("ToyEvent", toyName) then
-                    task.delay(1.5, function()
-                        local fresh = MaterialSystem.Stats(true)
-                        local freshTimes = type(fresh) == "table" and fresh.ToyTimes or nil
-                        if type(freshTimes) == "table" and tonumber(freshTimes[toyName]) then
+                    task.delay(2, function()
+                        -- Two-chance confirmation: the stats refresh is async and
+                        -- can still be stale 2s after the tap.
+                        local function confirmed()
+                            local fresh = MaterialSystem.Stats(true)
+                            local freshTimes = type(fresh) == "table" and fresh.ToyTimes or nil
+                            if type(freshTimes) == "table" then
+                                return tonumber(freshTimes[toyName])
+                            end
+                            return nil
+                        end
+                        local recorded = confirmed()
+                        if not recorded then
+                            task.wait(6)
+                            recorded = confirmed()
+                        end
+                        if recorded then
+                            Runtime.ToyConsecutiveBusy[toyName] = nil
                             Runtime.ToysClaimed += 1
                             Runtime.ToyRetryAt[toyName] = os.clock() + cooldown
                             warn(string.format("[BSS Kaitun] %s tapped (next in %.0f min)",
                                 toyName, cooldown / 60))
                             if toyEntry.FieldBoost then
-                                Runtime.DetectFieldBoost(fresh, toyEntry.FieldBoost)
+                                Runtime.DetectFieldBoost(MaterialSystem.Stats(false), toyEntry.FieldBoost)
                             end
                         else
-                            warn(string.format("[BSS Kaitun] %s busy on server - retrying in 90s", toyName))
+                            -- Unconfirmed taps: the server may be busy OR the
+                            -- ToyTimes key may not match. Either way it gates
+                            -- duplicate taps itself, so after 3 tries park for
+                            -- the full cooldown and warn only every 3rd attempt.
+                            local busy = (Runtime.ToyConsecutiveBusy[toyName] or 0) + 1
+                            Runtime.ToyConsecutiveBusy[toyName] = busy
+                            if busy >= 3 then
+                                Runtime.ToyRetryAt[toyName] = os.clock() + cooldown
+                                if busy % 3 == 0 then
+                                    warn(string.format(
+                                        "[BSS Kaitun] %s unconfirmed after %d taps - parking %.0f min",
+                                        toyName, busy, cooldown / 60))
+                                end
+                            else
+                                Runtime.ToyRetryAt[toyName] = os.clock() + 90
+                                warn(string.format("[BSS Kaitun] %s busy on server - retrying in 90s (%d/3)",
+                                    toyName, busy))
+                            end
                         end
                     end)
                 end
@@ -6259,13 +6294,17 @@ local THEME = {
     Muted = Color3.fromRGB(148, 153, 170),
     Value = Color3.fromRGB(235, 238, 245),
 }
+-- Dimmed veil instead of solid black: a deep navy tint at partial opacity so
+-- the world shows through faintly (night-mode look). 0 = opaque, 1 = invisible.
 local overlay = create("Frame", {Name = "BlackScreen", Size = UDim2.fromScale(1, 1),
-    BackgroundColor3 = Color3.new(), BorderSizePixel = 0,
+    BackgroundColor3 = Color3.fromRGB(8, 10, 16),
+    BackgroundTransparency = math.clamp(tonumber(Config.BlackScreenTransparency) or 0.3, 0, 0.85),
+    BorderSizePixel = 0,
     Visible = Config.BlackScreen ~= false}, screen)
 
 local card = create("Frame", {Name = "Card",
-    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.47),
-    Size = UDim2.new(0.46, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.42),
+    Size = UDim2.new(0.5, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
     BackgroundColor3 = THEME.Card, BorderSizePixel = 0}, overlay)
 create("UICorner", {CornerRadius = UDim.new(0, 14)}, card)
 create("UIStroke", {Color = THEME.Accent, Thickness = 1.2, Transparency = 0.55}, card)
@@ -6690,6 +6729,9 @@ end
 function Runtime.StarTreatStep()
     if not Config.AutoStarTreat then return "off" end
     if os.clock() < (Runtime.StarTreatRetryAt or 0) then return "cooldown" end
+    -- Nothing to gift: stay SILENT so this worker never overwrites the status
+    -- of active systems (farm/RJ/treat).
+    if starTreatPendingCount() <= 0 then return "done" end
     local stats = getStats(false)
     local starTreats
     local visited = {}
@@ -6723,8 +6765,6 @@ function Runtime.StarTreatStep()
                 formatNumber(tickets), formatNumber(cost), pending))
         elseif pending > 0 then
             setStatus("Star Treat", "No Star Treat - waiting for Mother Bear quest rewards")
-        else
-            setStatus("Star Treat", "No Star Treat needed (no non-gifted event bee in hive)")
         end
         return "wait"
     end
@@ -6755,8 +6795,7 @@ function Runtime.StarTreatStep()
             end
         end
     end
-    setStatus("Star Treat", "All event bees gifted (or none owned)")
-    return "done"
+    return "done" -- all event bees gifted (or none owned): silent
 end
 
 -- Two dedicated workers: the RJ roll loop keeps the tested standalone pace
