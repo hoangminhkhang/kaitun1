@@ -164,6 +164,13 @@ local DEFAULT_CONFIG = {
     RJMinStock = 20,
     RJRollDelay = 0.03,
     RJStockResyncEvery = 25,
+    -- Auto RJ on NON-GIFTED BASIC bees only: Royal Jelly never rolls commons
+    -- (0%), so every use upgrades a Basic into a Rare+ roll (1/250 gifts it).
+    -- Basics are targeted exclusively because they carry no useful token; the
+    -- other commons keep theirs, and quest jelly keeps RJQuestReserve. When
+    -- stock is short the worker stands down and re-checks every 60s. Once the
+    -- RJ Gifted Farmer's gate passes, it owns all RJ spending instead.
+    AutoRJUpgradeBasic = true,
     -- Star Treat: 100% gifts a bee; event bees can ONLY be gifted this way.
     -- Used on the first non-gifted event bee in this order, keep going until
     -- every one of them is gifted (never stops early). When the stock is empty
@@ -3818,13 +3825,41 @@ local function questTreatStock(key, stats)
     return math.floor(found or 0)
 end
 
+-- Out-of-stock quest tasks stand down for a while (go farm/do other work)
+-- but are REMEMBERED: after the cooldown they retry automatically, so rewards
+-- or sprout drops resume the feed as soon as food appears.
+local function markQuestTaskCooldown(objective, seconds)
+    Runtime.QuestFeedRetryAt = Runtime.QuestFeedRetryAt or {}
+    Runtime.QuestFeedRetryAt[tostring(objective and objective.Quest)
+        .. "|" .. tostring(objective and objective.Description)] = os.clock()
+        + (seconds or 90)
+end
+
 function Runtime.FeedQuestTreats(objective)
     if not Config.AutoQuestFeedTasks or Runtime.MeteorPriorityActive then return false end
     local stats = MaterialSystem.Stats(true)
     local treatKey, treatLabel = questTreatInfo(objective)
     local treats = questTreatStock(treatKey, stats)
+    if treats <= 0 and treatKey == "Treat" then
+        -- Generic "feed X treats" quests count EVERY treat-family food. When
+        -- plain Treats are out, fall back to whatever food is actually in
+        -- stock instead of standing idle waiting for rewards.
+        local bestKey, bestLabel, bestStock
+        for _, entry in ipairs(QUEST_TREAT_KEYS) do
+            if entry.Key ~= "Treat" then
+                local count = questTreatStock(entry.Key, stats)
+                if count > 0 and (not bestStock or count > bestStock) then
+                    bestKey, bestLabel, bestStock = entry.Key, entry.Label, count
+                end
+            end
+        end
+        if bestKey then
+            treatKey, treatLabel, treats = bestKey, bestLabel, bestStock
+        end
+    end
     if treats <= 0 then
-        setStatus("Quest feed", string.format("Out of %s - wait for rewards/sprouts", treatLabel))
+        markQuestTaskCooldown(objective, 90)
+        setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 90s", treatLabel))
         return false
     end
     local bee = Runtime.FindQuestTargetBee(false)
@@ -3861,7 +3896,8 @@ function Runtime.UseQuestRoyalJelly(objective)
     while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
         local stats = MaterialSystem.Stats(used == 0)
         if math.floor(MaterialSystem.Amount("RoyalJelly", stats)) <= 0 then
-            setStatus("Quest jelly", "Out of Royal Jelly - wait for rewards/blender")
+            markQuestTaskCooldown(objective, 90)
+            setStatus("Quest jelly", "Out of Royal Jelly - doing other work, retry in 90s")
             break
         end
         local bee = Runtime.FindQuestTargetBee(true)
@@ -4363,11 +4399,17 @@ local function questWork(seconds)
         objectives = filtered
     end
     -- Feed treat / use Royal Jelly: instant tasks, completed before any
-    -- travel-based tasks (mob/field).
+    -- travel-based tasks (mob/field). Tasks marked out-of-stock stand down on
+    -- a cooldown so the scheduler does other work and retries them later.
+    local questRetryAt = Runtime.QuestFeedRetryAt or {}
+    local questNow = os.clock()
     for _, objective in ipairs(objectives) do
         local kind = Runtime.QuestTaskKind(objective)
-        if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return true end
-        if kind == "treat" and Runtime.FeedQuestTreats(objective) then return true end
+        local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
+        if questNow >= (questRetryAt[taskKey] or 0) then
+            if kind == "jelly" and Runtime.UseQuestRoyalJelly(objective) then return true end
+            if kind == "treat" and Runtime.FeedQuestTreats(objective) then return true end
+        end
     end
     local plan = chooseQuestField(objectives)
     local planRank = plan and plan.NPCRank or math.huge
@@ -6591,7 +6633,7 @@ local function rjIsEventBeeType(value)
     return RJ_EVENT_TYPES[Runtime.NormalizeEventBeeName(value)] == true
 end
 
-function Runtime.RJGatePassed()
+function Runtime.RJGatePassed(quiet)
     local owned = {}
     local visited = {}
     local function scan(value, depth)
@@ -6628,7 +6670,7 @@ function Runtime.RJGatePassed()
             if owned[itemName] then satisfied = true break end
         end
         if not satisfied then
-            if Runtime.RJLastGateReport ~= table.concat(line, "/") then
+            if not quiet and Runtime.RJLastGateReport ~= table.concat(line, "/") then
                 Runtime.RJLastGateReport = table.concat(line, "/")
                 setStatus("RJ Gifted gate", "Missing one of: " .. table.concat(line, " / "))
             end
@@ -6922,6 +6964,50 @@ function Runtime.StarTreatStep()
     return "done" -- all event bees gifted (or none owned): silent
 end
 
+-- Auto RJ on NON-GIFTED BASIC bees only: Royal Jelly never rolls commons, so
+-- every use upgrades a Basic into a Rare+ roll (1/250 gifts it). Basics carry
+-- no useful token, other commons keep theirs. Quest jelly keeps its reserve;
+-- when stock runs short the worker stands down (other work continues) and
+-- re-checks every 60s; the RJ Gifted Farmer takes over once its gate passes.
+function Runtime.RJUpgradeBasicStep()
+    if Runtime.MeteorPriorityActive then return end
+    -- Hand-off: once the RJ Gifted Farmer is gated in, it owns all RJ spending.
+    if Config.AutoRJGiftedFarm and os.clock() >= (Runtime.RJGateCheckAt or 0) then
+        Runtime.RJGateCheckAt = os.clock() + 120
+        Runtime.RJGateActive = Runtime.RJGatePassed(true)
+    end
+    if Config.AutoRJGiftedFarm and Runtime.RJGateActive then return end
+    local reserve = math.max(1, tonumber(Config.RJQuestReserve) or 5)
+    if Runtime.RJUpgradeStock == nil or Runtime.RJUpgradeStock <= reserve
+        or (Runtime.RJUpgradeSyncs or 0) >= 20 then
+        Runtime.RJUpgradeSyncs = 0
+        getStats(true)
+        Runtime.RJUpgradeStock = rawEggCount("RoyalJelly")
+    end
+    if Runtime.RJUpgradeStock <= reserve then
+        -- Not enough above the quest reserve: stand down, remember, re-check.
+        Runtime.RJUpgradeRetryAt = os.clock() + 60
+        return
+    end
+    for _, cell in ipairs(hiveBeeCells()) do
+        if not cell.Locked and not cell.Gifted
+            and Runtime.NormalizeEventBeeName(cell.Type) == "basic" then
+            remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "RoyalJelly", 1)
+            Runtime.RJUpgradeStock -= 1
+            Runtime.RJUpgradeSyncs = (Runtime.RJUpgradeSyncs or 0) + 1
+            setStatus("RJ upgrade", string.format("Royal Jelly on %s (%d,%d) | stock %d",
+                cell.Type, cell.X, cell.Y, Runtime.RJUpgradeStock))
+            task.wait(0.3)
+            return
+        end
+    end
+    -- No non-gifted Basic left: STOP entirely (per request). A script restart
+    -- re-arms the worker.
+    Runtime.RJUpgradeExhausted = true
+    setStatus("RJ upgrade", "No non-gifted Basic bee left - stopped")
+    warn("[BSS Kaitun] RJ upgrade stopped: no non-gifted Basic bees in hive")
+end
+
 -- Two dedicated workers: the RJ roll loop keeps the tested standalone pace
 -- (one request per roll, tiny yield), while Star Treat fires at most once per
 -- 3s pass. Both yield to Meteor immediately and never stop until done.
@@ -6952,6 +7038,32 @@ task.spawn(function()
             if not ok then reportError("StarTreat", err) end
         end
         task.wait(3)
+    end
+end)
+
+-- Auto RJ on Basic bees: one use per pass, stands down politely when the
+-- stock is needed for quests or the RJ Gifted Farmer takes over. Stops when
+-- the hive has no non-gifted Basic bee left, but a cheap local hive scan
+-- every 5s re-arms it the moment a newly hatched Basic appears.
+task.spawn(function()
+    while Runtime.Running do
+        if Runtime.RJUpgradeExhausted then
+            -- Cheap detection pass (workspace only, zero remotes).
+            for _, cell in ipairs(hiveBeeCells()) do
+                if not cell.Locked and not cell.Gifted
+                    and Runtime.NormalizeEventBeeName(cell.Type) == "basic" then
+                    Runtime.RJUpgradeExhausted = false
+                    Runtime.RJUpgradeRetryAt = 0
+                    break
+                end
+            end
+        elseif Config.Enabled and Config.AutoRJUpgradeBasic
+            and not Runtime.MeteorPriorityActive
+            and os.clock() >= (Runtime.RJUpgradeRetryAt or 0) then
+            local ok, err = xpcall(Runtime.RJUpgradeBasicStep, debug.traceback)
+            if not ok then reportError("RJUpgrade", err) end
+        end
+        task.wait(0.5)
     end
 end)
 
