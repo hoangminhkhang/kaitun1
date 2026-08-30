@@ -145,6 +145,24 @@ local DEFAULT_CONFIG = {
     },
     -- Boosts only count for the 3 main blue fields; boosts on other fields are ignored.
     BoostedFieldWhitelist = {"Pine Tree Forest", "Blue Flower Field", "Bamboo Field"},
+    -- RJ Gifted Farmer (tested standalone as rj_gifted_farm_test.lua v4): rolls
+    -- Royal Jelly on one sacrifice cell with ONE request per roll - the exact
+    -- call the game's auto-jelly spams (no Settings/toggle clicking needed).
+    -- Gated on full Mountain Top gear + Bubble Mask, honey budget capped,
+    -- quest reserve kept, stops at the gifted-type target.
+    AutoRJGiftedFarm = true,
+    RJShopHoneyBudget = 5000000000,
+    RJQuestReserve = 5,
+    RJTargetGiftedTypes = 15,
+    RJBuyChunk = 100,
+    RJMinStock = 20,
+    RJRollDelay = 0.03,
+    RJStockResyncEvery = 25,
+    -- Star Treat: 100% gifts a bee; event bees can ONLY be gifted this way.
+    -- Used on the first non-gifted event bee in this order, keep going until
+    -- every one of them is gifted (never stops early).
+    AutoStarTreat = true,
+    StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
     -- Mondo Chick: spawns hourly on Mountain Top, drops Bitterberry/Neonberry.
     AutoFarmMondoChick = true,
     MondoChickFightTimeout = 120,
@@ -634,6 +652,8 @@ local Runtime = {
     MeteorHandling = false,
     MeteorLockedField = "",
     RedeemedThisRun = {},
+    RedeemedCodes = {},      -- persistent per-account set (file-backed)
+    RedeemedCodesLoaded = false,
     TeleRewardsDone = false,
     TeleRewardsCollected = 0,
     CompletedGear = {},
@@ -683,6 +703,17 @@ local Runtime = {
     GlideRunnerConnection = nil,
     ToyRetryAt = {},
     ToysClaimed = 0,
+    RJGiftedTypes = {},
+    RJGiftedCount = 0,
+    RJHoneySpent = 0,
+    RJStock = 0,
+    RJRollsSinceSync = 0,
+    RJRollsTotal = 0,
+    RJRollsThisCell = 0,
+    RHSacrificeKey = nil,
+    RJStopReason = "",
+    RJLastWork = -math.huge,
+    StarTreatsUsed = 0,
     BoostedField = nil,
     BoostedFieldUntil = 0,
     MondoChickPending = false,
@@ -1709,14 +1740,52 @@ end
 
 local function redeemCodes()
     if not Config.RedeemCodes then return end
+    -- Codes are ONE-TIME per account: the redeemed set is persisted to an
+    -- executor file per UserId, so rejoining or re-running never re-fires
+    -- already-used codes (each one costs ~0.5s of remote + wait time).
+    if not Runtime.RedeemedCodesLoaded then
+        Runtime.RedeemedCodesLoaded = true
+        local readfileFn = rawget(ENV, "readfile") or (type(readfile) == "function" and readfile)
+        if type(readfileFn) == "function" then
+            local ok, content = pcall(readfileFn,
+                "bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt")
+            if ok and type(content) == "string" then
+                for code in string.gmatch(content, "[^\r\n]+") do
+                    local trimmed = code:match("^%s*(.-)%s*$")
+                    if trimmed ~= "" then Runtime.RedeemedCodes[trimmed] = true end
+                end
+            end
+        end
+    end
+    local function persistCode(code)
+        Runtime.RedeemedCodes[code] = true
+        local readfileFn = rawget(ENV, "readfile") or (type(readfile) == "function" and readfile)
+        local writefileFn = rawget(ENV, "writefile") or (type(writefile) == "function" and writefile)
+        if type(writefileFn) ~= "function" then return end
+        local existing = ""
+        if type(readfileFn) == "function" then
+            local okRead, content = pcall(readfileFn,
+                "bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt")
+            if okRead and type(content) == "string" then existing = content end
+        end
+        pcall(writefileFn, "bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt",
+            existing .. code .. "\n")
+    end
     local function redeemList(codes, label)
         for index, code in ipairs(codes) do
             if not Runtime.Running then return end
             while Runtime.Running and Runtime.MeteorPriorityActive do task.wait(0.05) end
-            if type(code) == "string" and code ~= "" and not Runtime.RedeemedThisRun[code] then
+            if type(code) == "string" and code ~= ""
+                and not Runtime.RedeemedCodes[code]
+                and not Runtime.RedeemedThisRun[code] then
                 setStatus("Redeem code", string.format("%s %d/%d - %s", label, index, #codes, code))
-                remoteCall("PromoCodeEvent", code)
+                local ok = remoteCall("PromoCodeEvent", code)
                 Runtime.RedeemedThisRun[code] = true
+                -- Only persist on a successful fire: a failed send must retry
+                -- next run; a server-side "already used" answer is impossible
+                -- to distinguish from success, but firing a used code once more
+                -- is harmless and still gets marked done.
+                if ok ~= false then persistCode(code) end
                 task.wait(0.45)
             end
         end
@@ -1748,6 +1817,14 @@ end
 -- map reward point on game entry, BEFORE claiming hive/hatching. Each point: set
 -- CFrame directly onto the reward, stand still + nudge up/down via CFrame
 -- to trigger the touch pickup. No tweening, no flying up. Meteor stays top priority.
+--
+-- AUTO-DETECTION: the Collectibles folder spawns ON DEMAND (absent until the
+-- first pickup exists - verified in-game), so each spot re-scans it instead of
+-- using one upfront snapshot. A spot is only visited when a live collectible
+-- actually sits within 8 studs of its coordinates: seasonal rewards removed
+-- after Beesmas cost nothing (no tele, no dwell). Teleports to the instance's
+-- real position and deduplicates shared instances; if the folder never appears
+-- the sweep falls back to the legacy blind pass.
 function Runtime.CollectWorldRewards()
     if not Config.AutoTeleRewards or Runtime.TeleRewardsDone then return false end
     local spots = Config.TeleRewardSpots or {}
@@ -1770,27 +1847,61 @@ function Runtime.CollectWorldRewards()
         end)
     end
 
+    -- Short grace window: the folder spawns once the first reward replicates.
+    local collectiblesFolder = workspace:FindFirstChild("Collectibles")
+    local graceDeadline = os.clock() + 3
+    while not collectiblesFolder and Runtime.Running
+        and not Runtime.MeteorPriorityActive and os.clock() < graceDeadline do
+        task.wait(0.25)
+        collectiblesFolder = workspace:FindFirstChild("Collectibles")
+    end
+
+    local visitedInstances = {}
+    local skipped = 0
     for index, spot in ipairs(spots) do
         if not Runtime.Running then break end
         while Runtime.Running and Runtime.MeteorPriorityActive do task.wait(0.1) end
         if not Runtime.Running then break end
         local _, _, root = getCharacter(8)
         if not root then continue end
+        local targetCFrame = spot.CFrame
+        if collectiblesFolder then
+            -- Nearest live collectible within 8 studs of the known coordinates.
+            local best, bestPosition, bestDistance
+            for _, object in ipairs(collectiblesFolder:GetChildren()) do
+                if not visitedInstances[object] then
+                    local position = objectPosition(object)
+                    if position then
+                        local distance = (position - spot.CFrame.Position).Magnitude
+                        if distance <= 8 and (not bestDistance or distance < bestDistance) then
+                            best, bestPosition, bestDistance = object, position, distance
+                        end
+                    end
+                end
+            end
+            if not best then
+                skipped += 1
+                continue -- reward removed (e.g. Beesmas ended) - zero time spent
+            end
+            visitedInstances[best] = true
+            targetCFrame = CFrame.new(bestPosition)
+        end
         setStatus("Tele reward", string.format("%d/%d %s", index, #spots, tostring(spot.Label or "reward")))
-        pin(root, spot.CFrame)
+        pin(root, targetCFrame)
         -- Stand on the reward point, nudging up/down to trigger the touch pickup.
         local deadline = os.clock() + dwell
         while Runtime.Running and not Runtime.MeteorPriorityActive and os.clock() < deadline do
             local _, _, currentRoot = getCharacter(2)
             if not currentRoot then break end
-            pin(currentRoot, spot.CFrame + Vector3.new(0, 1, 0))
+            pin(currentRoot, targetCFrame + Vector3.new(0, 1, 0))
             task.wait(0.12)
-            pin(currentRoot, spot.CFrame)
+            pin(currentRoot, targetCFrame)
             task.wait(0.12)
         end
         Runtime.TeleRewardsCollected += 1
     end
-    setStatus("Tele reward", string.format("Done %d/%d spots - moving to hive claim", Runtime.TeleRewardsCollected, #spots))
+    setStatus("Tele reward", string.format("Done %d/%d spots (%d empty) - moving to hive claim",
+        Runtime.TeleRewardsCollected, #spots, skipped))
     Runtime.MarkTeleRewardsDone()
     task.wait(0.2)
     return true
@@ -6104,6 +6215,315 @@ task.spawn(function()
             end
         end
         task.wait(math.max(2, tonumber(Config.TreatWorkerInterval) or 5))
+    end
+end)
+
+-- RJ Gifted Farmer + Star Treat (ported from the tested standalone v4) --------
+-- Mechanic (remote-spy verified): ConstructHiveCellFromEgg(x, y, "RoyalJelly", 1)
+-- is exactly what the game's own Auto-Jelly loop spams; one request per roll.
+-- Gated on full Mountain Top gear + Bubble Mask, honey budget capped, quest
+-- reserve kept. Star Treats (100% gift) go to event bees in config order -
+-- event bees can ONLY be gifted that way, and they are NEVER RJ-sacrificed.
+local RJ_EVENT_TYPES = {}
+for _, eventEntry in ipairs(Config.EventBeeSequence or {}) do
+    RJ_EVENT_TYPES[Runtime.NormalizeEventBeeName(eventEntry.Type)] = true
+end
+
+local function rjIsEventBeeType(value)
+    return RJ_EVENT_TYPES[Runtime.NormalizeEventBeeName(value)] == true
+end
+
+function Runtime.RJGatePassed()
+    local owned = {}
+    local visited = {}
+    local function scan(value, depth)
+        if type(value) ~= "table" or visited[value] or depth > 6 then return end
+        visited[value] = true
+        for key, child in pairs(value) do
+            if type(key) == "string" then owned[key] = true end
+            if type(child) == "string" then owned[child] = true end
+            if type(child) == "table" then scan(child, depth + 1) end
+        end
+    end
+    scan(getStats(false), 0)
+    local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
+    for _, container in ipairs(containers) do
+        if container then
+            for _, object in ipairs(container:GetDescendants()) do
+                if object:IsA("Tool") or object:IsA("Accessory") then
+                    owned[object.Name] = true
+                end
+            end
+        end
+    end
+    -- Every line needs one owned item: mask, belt, boots, collector, hive.
+    local gateLines = {
+        {"Bubble Mask", "Diamond Mask"},
+        {"Mondo Belt Bag", "Honeycomb Belt", "Petal Belt", "Coconut Belt"},
+        {"Beekeeper's Boots", "Coconut Clogs", "Gummy Boots"},
+        {"Porcelain Dipper", "Petal Wand", "Tide Popper"},
+        {"Porcelain Port-O-Hive", "Coconut Canister"},
+    }
+    for _, line in ipairs(gateLines) do
+        local satisfied = false
+        for _, itemName in ipairs(line) do
+            if owned[itemName] then satisfied = true break end
+        end
+        if not satisfied then
+            if Runtime.RJLastGateReport ~= table.concat(line, "/") then
+                Runtime.RJLastGateReport = table.concat(line, "/")
+                setStatus("RJ Gifted gate", "Missing one of: " .. table.concat(line, " / "))
+            end
+            return false
+        end
+    end
+    return true
+end
+
+local function rjDiscoverPackage()
+    local shops = workspace:FindFirstChild("Shops")
+    if shops then
+        for _, shop in ipairs(shops:GetDescendants()) do
+            if shop:IsA("BasePart") or shop:IsA("Model") then
+                local itemName = string.lower(tostring(shop.Name)):gsub("%s", "")
+                if itemName == "royaljelly" or itemName == "royaljellyshop" then
+                    local itemType = shop:FindFirstChild("ItemType")
+                    local itemCategory = shop:FindFirstChild("ItemCategory")
+                    if itemType and itemCategory and itemType:IsA("ValueBase") and itemCategory:IsA("ValueBase") then
+                        return {Category = tostring(itemCategory.Value), Type = tostring(itemType.Value)}
+                    end
+                end
+            end
+        end
+    end
+    return {Category = "Eggs", Type = "RoyalJelly"}
+end
+
+local function rjBuy()
+    if Runtime.RJStock >= (tonumber(Config.RJMinStock) or 20) + (tonumber(Config.RJQuestReserve) or 5) then return end
+    if Runtime.RJHoneySpent >= (tonumber(Config.RJShopHoneyBudget) or 5e9) then
+        if Runtime.RJStopReason == "" then
+            Runtime.RJStopReason = "budget"
+            setStatus("RJ Gifted", string.format("Honey budget spent (%s) - rolling stops",
+                formatNumber(Runtime.RJHoneySpent)))
+        end
+        return
+    end
+    local honey = liveCoreValue("Honey")
+    if honey and honey <= 1000000 then
+        setStatus("RJ Gifted", "Honey too low for RJ purchase - farming")
+        return
+    end
+    local package = rjDiscoverPackage()
+    local before = liveCoreValue("Honey") or 0
+    local bought = 0
+    for _, amount in ipairs({tonumber(Config.RJBuyChunk) or 100, 10, 1}) do
+        local ok, result = remoteCall("ItemPackageEvent", "Purchase",
+            {Category = package.Category, Type = package.Type, Amount = amount})
+        if ok and type(result) ~= "string" then
+            bought = amount
+            break
+        end
+        task.wait(0.2)
+    end
+    task.wait(0.5)
+    local after = liveCoreValue("Honey") or before
+    Runtime.RJHoneySpent += math.max(0, before - after)
+    if bought > 0 then
+        Runtime.RJStock += bought
+        setStatus("RJ Gifted", string.format("Bought %d RJ | budget %s/%s",
+            bought, formatNumber(Runtime.RJHoneySpent), formatNumber(Config.RJShopHoneyBudget or 5e9)))
+    else
+        setStatus("RJ Gifted", "Purchase failed - retrying later")
+        Runtime.RJNextBuy = os.clock() + 30
+    end
+end
+
+local function rjSeedGiftedTypes()
+    for _, cell in ipairs(hiveBeeCells()) do
+        if cell.Gifted and not Runtime.RJGiftedTypes[cell.Type] then
+            Runtime.RJGiftedTypes[cell.Type] = true
+            Runtime.RJGiftedCount += 1
+        end
+    end
+end
+
+local function rjPickSacrifice()
+    local cells = hiveBeeCells()
+    local byKey = {}
+    local commonFallback, anyFallback, duplicateGifted
+    for _, cell in ipairs(cells) do
+        byKey[cell.X .. "," .. cell.Y] = cell
+        -- Event bees are NEVER sacrificed: they are only replaceable with money
+        -- (tickets) and are the Star Treat targets.
+        if rjIsEventBeeType(cell.Type) then continue end
+        if cell.Locked then continue end
+        if not cell.Gifted then
+            anyFallback = anyFallback or cell
+            if Runtime.IsCommonBeeType(cell.Type) then
+                commonFallback = commonFallback or cell
+            end
+        elseif Runtime.RJGiftedTypes[cell.Type] then
+            duplicateGifted = duplicateGifted or cell
+        end
+    end
+    if Runtime.RHSacrificeKey and byKey[Runtime.RHSacrificeKey] then
+        local current = byKey[Runtime.RHSacrificeKey]
+        if not rjIsEventBeeType(current.Type) and not current.Locked
+            and (not current.Gifted or Runtime.RJGiftedTypes[current.Type]) then
+            return current
+        end
+    end
+    local chosen = commonFallback or anyFallback or duplicateGifted
+    if chosen then Runtime.RHSacrificeKey = chosen.X .. "," .. chosen.Y end
+    return chosen
+end
+
+function Runtime.RJRollStep()
+    if Runtime.MeteorPriorityActive then return "yield" end
+    local target = tonumber(Config.RJTargetGiftedTypes) or 15
+    if Runtime.RJGiftedCount >= target then
+        if Runtime.RJStopReason == "" then
+            Runtime.RJStopReason = "target"
+            setStatus("RJ Gifted", string.format("Target reached: %d gifted types", Runtime.RJGiftedCount))
+        end
+        return "done"
+    end
+    if not Runtime.RJGatePassed() then
+        task.wait(30)
+        return "wait"
+    end
+    local sacrifice = rjPickSacrifice()
+    if not sacrifice then
+        setStatus("RJ Gifted", "No sacrifice cell available")
+        task.wait(10)
+        return "wait"
+    end
+    if os.clock() >= (Runtime.RJNextBuy or 0)
+        and Runtime.RJStock <= (tonumber(Config.RJQuestReserve) or 5) + (tonumber(Config.RJMinStock) or 20) then
+        rjBuy()
+    end
+    if Runtime.RJStock <= (tonumber(Config.RJQuestReserve) or 5) then
+        if Runtime.RJStopReason == "budget" then return "done" end
+        setStatus("RJ Gifted", "Waiting for honey to buy more RJ")
+        task.wait(5)
+        return "wait"
+    end
+    remoteCall("ConstructHiveCellFromEgg", sacrifice.X, sacrifice.Y, "RoyalJelly", 1)
+    Runtime.RJStock -= 1
+    Runtime.RJRollsSinceSync += 1
+    Runtime.RJRollsThisCell += 1
+    Runtime.RJRollsTotal += 1
+    task.wait(math.max(0.01, tonumber(Config.RJRollDelay) or 0.03))
+    for _, cell in ipairs(hiveBeeCells()) do
+        if cell.X == sacrifice.X and cell.Y == sacrifice.Y then
+            if cell.Gifted then
+                if not Runtime.RJGiftedTypes[cell.Type] then
+                    Runtime.RJGiftedTypes[cell.Type] = true
+                    Runtime.RJGiftedCount += 1
+                    Runtime.RHSacrificeKey = nil
+                    setStatus("RJ Gifted", string.format("*** NEW GIFTED TYPE: %s (%d/%d) | %d rolls ***",
+                        cell.Type, Runtime.RJGiftedCount, target, Runtime.RJRollsThisCell))
+                else
+                    setStatus("RJ Gifted", string.format("Gifted duplicate %s after %d rolls - same cell",
+                        cell.Type, Runtime.RJRollsThisCell))
+                end
+                Runtime.RJRollsThisCell = 0
+            elseif Runtime.RJRollsSinceSync >= (tonumber(Config.RJStockResyncEvery) or 25) then
+                Runtime.RJRollsSinceSync = 0
+                getStats(true)
+                Runtime.RJStock = rawEggCount("RoyalJelly")
+            end
+            break
+        end
+    end
+    return "rolling"
+end
+
+-- Star Treat worker step: first non-gifted event bee in config order gets
+-- star treats until gifted; keeps going through the whole list - never stops
+-- early while star treats remain and a target is missing.
+function Runtime.StarTreatStep()
+    if not Config.AutoStarTreat then return "off" end
+    if os.clock() < (Runtime.StarTreatRetryAt or 0) then return "cooldown" end
+    local stats = getStats(false)
+    local starTreats
+    local visited = {}
+    local function findTreat(value, depth)
+        if starTreats or type(value) ~= "table" or visited[value] or depth > 4 then return end
+        visited[value] = true
+        for key, child in pairs(value) do
+            if key == "StarTreat" and tonumber(child) then starTreats = tonumber(child) return end
+            if type(child) == "table" then findTreat(child, depth + 1) end
+        end
+    end
+    findTreat(stats, 0)
+    starTreats = math.floor(starTreats or 0)
+    if starTreats <= 0 then
+        setStatus("Star Treat", "No Star Treat in inventory - waiting for rewards")
+        return "wait"
+    end
+    local cells = hiveBeeCells()
+    for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
+        local wanted = Runtime.NormalizeEventBeeName(beeName)
+        for _, cell in ipairs(cells) do
+            if not cell.Locked and Runtime.NormalizeEventBeeName(cell.Type) == wanted and not cell.Gifted then
+                setStatus("Star Treat", string.format("Using on %s (%d,%d) | stock %d",
+                    cell.Type, cell.X, cell.Y, starTreats))
+                local ok = remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "StarTreat", 1)
+                if ok then
+                    Runtime.StarTreatsUsed += 1
+                    task.wait(1)
+                    for _, fresh in ipairs(hiveBeeCells()) do
+                        if fresh.X == cell.X and fresh.Y == cell.Y and fresh.Gifted then
+                            setStatus("Star Treat", string.format("*** %s is now GIFTED ***", fresh.Type))
+                            break
+                        end
+                    end
+                    return "used"
+                end
+                -- Wrong remote signature or server refusal: back off so the
+                -- worker never spams rejected calls.
+                Runtime.StarTreatRetryAt = os.clock() + 60
+                setStatus("Star Treat", "Remote rejected StarTreat - retry in 60s")
+                return "reject"
+            end
+        end
+    end
+    setStatus("Star Treat", "All event bees gifted (or none owned)")
+    return "done"
+end
+
+-- Two dedicated workers: the RJ roll loop keeps the tested standalone pace
+-- (one request per roll, tiny yield), while Star Treat fires at most once per
+-- 3s pass. Both yield to Meteor immediately and never stop until done.
+task.spawn(function()
+    task.wait(5) -- let bootstrap stats land first
+    rjSeedGiftedTypes()
+    while Runtime.Running do
+        local result = "off"
+        if Config.Enabled and not Runtime.MeteorPriorityActive and Config.AutoRJGiftedFarm then
+            local ok, err = xpcall(function() result = Runtime.RJRollStep() end, debug.traceback)
+            if not ok then
+                reportError("RJGifted", err)
+                task.wait(3)
+            end
+        end
+        if result == "done" then
+            task.wait(30)
+        elseif result ~= "rolling" then
+            task.wait(2)
+        end
+    end
+end)
+
+task.spawn(function()
+    while Runtime.Running do
+        if Config.Enabled and not Runtime.MeteorPriorityActive then
+            local ok, err = xpcall(Runtime.StarTreatStep, debug.traceback)
+            if not ok then reportError("StarTreat", err) end
+        end
+        task.wait(3)
     end
 end)
 
