@@ -2185,6 +2185,9 @@ local function markBeeHatched(x, y)
     Runtime.ReservedHiveCells[hiveCellKey(x, y)] = true
     consumeBasicEgg()
     Runtime.WaitingForEggFunds = false
+    -- The next main-loop iteration may skip its blocking stats refresh: the
+    -- authoritative hatch response already proves the new bee.
+    Runtime.SkipStatsBlockUntil = os.clock() + 2
     task.defer(function() getStats(true) end)
 end
 
@@ -2204,7 +2207,7 @@ local function hatchOneBasicEgg()
         -- A successful RemoteFunction response carrying the updated Honeycomb is
         -- authoritative. Do not wait for the same change to replicate a second time.
         if (ok and success == true and type(honeycomb) == "table")
-            or waitForHatchConfirmation(beforeBees, 3, 3, accepted and 0.9 or 0.45) then
+            or waitForHatchConfirmation(beforeBees, 3, 3, accepted and 0.5 or 0.45) then
             markBeeHatched(3, 3)
             return true
         end
@@ -2230,7 +2233,7 @@ local function hatchOneBasicEgg()
             applyHatchResponse("Basic", remaining, success, honeycomb, discoveredBees, eggUses)
             local accepted = hatchResponseAccepted(ok, beforeEggs, remaining, success)
             if (ok and success == true and type(honeycomb) == "table")
-                or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 0.9 or 0.45) then
+                or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 0.5 or 0.45) then
                 markBeeHatched(cell[1], cell[2])
                 return true
             end
@@ -2432,10 +2435,11 @@ function Runtime.HatchNextEventBee()
                     applyHatchResponse(eggType, remaining, success, honeycomb, discoveredBees, eggUses)
                     local accepted = hatchResponseAccepted(ok, amount, remaining, success)
                     if (ok and success == true and type(honeycomb) == "table")
-                        or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 1.2 or 0.6) then
+                        or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 0.8 or 0.6) then
                         Runtime.ReservedHiveCells[key] = true
                         Runtime.EventBeePurchased[entry.Type] = true
                         Runtime.EventBeesHatched += 1
+                        Runtime.SkipStatsBlockUntil = os.clock() + 2
                         task.defer(function() MaterialSystem.Stats(true) end)
                         return true
                     end
@@ -3715,10 +3719,17 @@ function Runtime.QuestTaskKind(objective)
     local taskData = type(objective) == "table" and objective.Task or {}
     local text = string.lower(tostring(taskData.Type or "") .. " " .. tostring(objective and objective.Description or ""))
     if text:find("collect", 1, true) then return nil end
-    local jelly = text:find("jelly", 1, true) ~= nil
-    local treat = text:find("treat", 1, true) ~= nil
+    local jelly = text:find("jelly", 1, true) ~= nil or text:find("jelli", 1, true) ~= nil
     local feed = text:find("feed", 1, true) ~= nil
     local use = text:find("use", 1, true) ~= nil
+    -- Treat-family tasks include the SPECIFIC foods Mother Bear asks for
+    -- ("Feed X Strawberries/Blueberries/Pineapples/Sunflower Seeds"), not just
+    -- the generic word "treat".
+    local treat = text:find("treat", 1, true) ~= nil
+        or text:find("strawberr", 1, true) ~= nil
+        or text:find("blueberr", 1, true) ~= nil
+        or text:find("pineapple", 1, true) ~= nil
+        or text:find("sunflower seed", 1, true) ~= nil
     if jelly and (use or feed) then return "jelly" end
     if treat and (feed or use) then return "treat" end
     return nil
@@ -3735,12 +3746,58 @@ function Runtime.QuestTaskStillIncomplete(objective)
     return false
 end
 
+-- Quest treat identification: Mother Bear tasks can require SPECIFIC foods
+-- ("Feed X Strawberries/Blueberries/Pineapples/Sunflower Seeds"). The specific
+-- food is parsed from the task text and matched to its inventory key; generic
+-- "Treats" fall back to "Treat". Checked longest-first so "Sunflower Seeds"
+-- never matches the shorter words inside other names.
+local QUEST_TREAT_KEYS = {
+    {Pattern = "sunflowerseed", Key = "SunflowerSeed", Label = "Sunflower Seeds"},
+    {Pattern = "strawberry", Key = "Strawberry", Label = "Strawberries"},
+    {Pattern = "blueberry", Key = "Blueberry", Label = "Blueberries"},
+    {Pattern = "pineapple", Key = "Pineapple", Label = "Pineapples"},
+    {Pattern = "treat", Key = "Treat", Label = "Treats"},
+}
+
+local function questTreatInfo(objective)
+    local taskData = type(objective) == "table" and objective.Task or {}
+    local text = string.lower(tostring(taskData.Type or "") .. " " .. tostring(objective and objective.Description or ""))
+        :gsub("[^%w]", "")
+    for _, entry in ipairs(QUEST_TREAT_KEYS) do
+        if text:find(entry.Pattern, 1, true) then
+            return entry.Key, entry.Label
+        end
+    end
+    return "Treat", "Treats"
+end
+
+local function questTreatStock(key, stats)
+    -- Treats live in stats.Treats on live builds; scan defensively because the
+    -- exact table name has varied across game versions.
+    if type(stats) ~= "table" then return 0 end
+    local direct = type(stats.Treats) == "table" and tonumber(stats.Treats[key]) or nil
+    if direct then return math.floor(direct) end
+    local found
+    local visited = {}
+    local function scan(value, depth)
+        if found or type(value) ~= "table" or visited[value] or depth > 4 then return end
+        visited[value] = true
+        for k, child in pairs(value) do
+            if k == key and tonumber(child) then found = tonumber(child) return end
+            if type(child) == "table" then scan(child, depth + 1) end
+        end
+    end
+    scan(stats, 0)
+    return math.floor(found or 0)
+end
+
 function Runtime.FeedQuestTreats(objective)
     if not Config.AutoQuestFeedTasks or Runtime.MeteorPriorityActive then return false end
     local stats = MaterialSystem.Stats(true)
-    local treats = math.floor(MaterialSystem.Amount("Treat", stats))
+    local treatKey, treatLabel = questTreatInfo(objective)
+    local treats = questTreatStock(treatKey, stats)
     if treats <= 0 then
-        setStatus("Quest feed", "Out of treats - wait for rewards/quests")
+        setStatus("Quest feed", string.format("Out of %s - wait for rewards/sprouts", treatLabel))
         return false
     end
     local bee = Runtime.FindQuestTargetBee(false)
@@ -3748,13 +3805,14 @@ function Runtime.FeedQuestTreats(objective)
         setStatus("Quest feed", "No bee found to feed")
         return false
     end
-    -- Feed EVERY treat in stock in a single remote call (fast, no batching).
+    -- Feed EVERY unit in stock in a single remote call (fast, no batching).
     local batch = treats
     Runtime.CurrentQuest = objective.Quest
-    setStatus("Quest feed", string.format("Feed %d treat | %s (%d,%d)", batch, bee.Type, bee.X, bee.Y))
+    setStatus("Quest feed", string.format("Feed %d %s | %s (%d,%d)",
+        batch, treatLabel, bee.Type, bee.X, bee.Y))
     local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
-        "ConstructHiveCellFromEgg", bee.X, bee.Y, "Treat", batch)
-    applyHatchResponse("Treat", remaining, success, honeycomb, discoveredBees, eggUses)
+        "ConstructHiveCellFromEgg", bee.X, bee.Y, treatKey, batch)
+    applyHatchResponse(treatKey, remaining, success, honeycomb, discoveredBees, eggUses)
     task.wait(0.4)
     task.defer(function() MaterialSystem.Stats(true) end)
     return ok
@@ -4826,7 +4884,9 @@ function MaterialSystem.Field(material)
         SunflowerSeed = {"Sunflower Field"},
         Strawberry = {"Strawberry Field", "Mushroom Field"},
         Blueberry = {"Bamboo Field", "Blue Flower Field"},
-        Pineapple = {"Pineapple Patch", "Sunflower Field"},
+        -- Pineapple tokens exist ONLY in Pineapple Patch; farming elsewhere can
+        -- never produce them.
+        Pineapple = {"Pineapple Patch"},
         Honeysuckle = {"Sunflower Field", "Blue Flower Field", "Rose Field"},
         Coconut = {"Coconut Field"},
         MagicBean = {"Clover Field", "Sunflower Field"},
@@ -4842,8 +4902,31 @@ function MaterialSystem.Field(material)
     for _, name in ipairs(candidates[material] or {}) do
         if fieldUnlocked(name) then return findField(name) end
     end
+    -- The material HAS known sources but every one of them is still locked at
+    -- this hive size: report nil instead of farming a field that can never
+    -- drop it (the caller defers the gear instead of blocking hive growth).
+    if candidates[material] then return nil end
     local fallback = selectedFieldName()
     return fieldUnlocked(fallback) and findField(fallback) or findField("Sunflower Field")
+end
+
+-- TRUE when at least one missing material of a gear entry can be progressed
+-- right now: via a special source (mob/sprout/firefly/NPC), a blender recipe,
+-- or an unlocked farm field. If FALSE the milestone defers the gear instead of
+-- stalling hive growth (eggs) on an impossible material.
+function MaterialSystem.HasGatherableMaterial(deficits)
+    local special = {
+        Stinger = true, MoonCharm = true, MagicBean = true, RoyalJelly = true,
+        Neonberry = true, Bitterberry = true, DiamondEgg = true, SpiritPetal = true,
+        ComfortingVial = true, RefreshingVial = true,
+    }
+    for material in pairs(deficits or {}) do
+        local canonical = MaterialSystem.Canonical(material) or material
+        if special[canonical] or special[material] then return true end
+        if MaterialSystem.Recipes[canonical] then return true end -- blender-craftable
+        if MaterialSystem.Field(material) ~= nil then return true end
+    end
+    return false
 end
 
 function MaterialSystem.FindSprout()
@@ -5539,6 +5622,11 @@ function MaterialSystem.FarmSource(action, entry)
         and MaterialSystem.FarmSprout() then return true end
     if material == "MoonCharm" and farmFlowerEffect() then return true end
     local field = MaterialSystem.Field(material)
+    if field == nil then
+        -- Every source field for this material is still locked: nothing useful
+        -- to do here (the milestone defers the gear until a source unlocks).
+        return false
+    end
     if MaterialSystem.PlanterWork(material, field, MaterialSystem.Stats(false)) then return true end
     if MaterialSystem.TryCondenser(material) then return true end
     if material == "DiamondEgg" or material == "SpiritPetal"
@@ -7209,6 +7297,14 @@ local function processMilestone(milestone, fastRetry)
                     local stats = MaterialSystem.Stats(os.clock() - Runtime.LastMaterialStats >= Config.MaterialStatsInterval)
                     local deficits = MaterialSystem.Deficits(entry, stats)
                     if next(deficits) then
+                        if not MaterialSystem.HasGatherableMaterial(deficits) then
+                            -- Every source is locked at this hive size (e.g.
+                            -- Pineapples before 10 bees): defer without blocking
+                            -- so hive growth (eggs) continues. Resumed
+                            -- automatically once a source field unlocks.
+                            deferItem(entry, "locked")
+                            continue
+                        end
                         deferItem(entry, "material")
                         if not entry.Optional then return false, entry, "material" end
                         continue
@@ -7393,7 +7489,14 @@ local function progression()
             continue
         end
 
-        getStats(true)
+        -- Right after a CONFIRMED hatch (authoritative server response) the new
+        -- bee is already proven: don't block this iteration on a stats refresh.
+        -- The async refresh still lands in the background.
+        if os.clock() < (Runtime.SkipStatsBlockUntil or 0) then
+            getStats(false)
+        else
+            getStats(true)
+        end
         if eggFundingBlocked() then
             Runtime.ProgressStage = "Saving honey for Basic Egg"
             progressionWork("Farm honey for Basic Egg")
