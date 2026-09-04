@@ -207,7 +207,6 @@ local DEFAULT_CONFIG = {
     MobJumpInterval = 0.12,
     AvoidMobDamageThreshold = 0.5,
     AvoidMobRelocateCooldown = 2.5,
-    AvoidMobRelocateDistance = 14,
     AvoidMobArrivalDistance = 5,
     AvoidMobRelocateTimeout = 4,
     -- Mob THREAT zone: only mobs closer than this pause farming and trigger the
@@ -638,7 +637,6 @@ end
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 local PathfindingService = game:GetService("PathfindingService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -673,7 +671,6 @@ local Runtime = {
     Detail = "Waiting for character",
     StartedAt = os.clock(),
     Connections = {},
-    ActiveTween = nil,
     MovementOwner = nil,
     TweenRoot = nil,
     TweenRootWasAnchored = false,
@@ -833,6 +830,16 @@ local function setStatus(state, detail)
     if Runtime.MeteorPriorityActive and Runtime.MeteorHandling and state ~= "Auto meteor" then return end
     Runtime.State = state or Runtime.State
     Runtime.Detail = detail or ""
+end
+
+-- Background workers refresh the status line at most once per interval so the
+-- UI keeps showing the FOREGROUND activity (farm/quest) instead of flickering
+-- between systems every pass.
+local function setStatusBackground(state, detail, seconds)
+    if os.clock() >= (Runtime.BackgroundStatusAt or 0) then
+        Runtime.BackgroundStatusAt = os.clock() + (seconds or 30)
+        setStatus(state, detail)
+    end
 end
 
 local function reportError(scope, err)
@@ -3892,8 +3899,9 @@ function Runtime.FeedQuestTreats(objective)
             -- moment this much food arrives from farming.
             Runtime.QuestFeedDeficit[taskKey] =
                 {TreatKey = treatKey, Label = treatLabel, Missing = remaining}
-            setStatus("Quest feed", string.format("Missing %d %s - farming, auto-feed when it arrives",
-                remaining, treatLabel))
+            setStatusBackground("Quest feed", string.format(
+                "Missing %d %s - farming, auto-feed when it arrives", remaining, treatLabel))
+        else
         else
             setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 90s", treatLabel))
         end
@@ -4668,6 +4676,17 @@ task.spawn(function()
             end
             threatening = nearestDistance ~= nil and nearestDistance <= threatRadius
                 and humanoid ~= nil and root ~= nil and not root.Anchored
+            -- While GLIDING the root is anchored, so the threat branch above can
+            -- never run - without this, a glide path straight through a mob eats
+            -- every hit. Cancel the glide on damage: the root unanchors and the
+            -- normal jump-dodge/retreat takes over on the next tick.
+            if damaged and nearestDistance ~= nil and nearestDistance <= threatRadius
+                and humanoid ~= nil and root ~= nil and root.Anchored then
+                Runtime.Glide = nil
+                releaseTweenRoot()
+                Runtime.MobThreatUntil = os.clock()
+                    + math.max(1, tonumber(Config.MobThreatHoldSeconds) or 4)
+            end
             if threatening then
                 -- Renew the hold while danger persists; farmStep pauses meanwhile.
                 local now = os.clock()
@@ -6955,10 +6974,10 @@ function Runtime.StarTreatStep()
                 end
                 return "wait"
             end
-            setStatus("Star Treat", string.format("Saving tickets: %s/%s (%d event bee(s) waiting)",
+            setStatusBackground("Star Treat", string.format("Saving tickets: %s/%s (%d event bee(s) waiting)",
                 formatNumber(tickets), formatNumber(cost), pending))
         elseif pending > 0 then
-            setStatus("Star Treat", "No Star Treat - waiting for Mother Bear quest rewards")
+            setStatusBackground("Star Treat", "No Star Treat - waiting for Mother Bear quest rewards")
         end
         return "wait"
     end
