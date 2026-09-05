@@ -37,9 +37,65 @@ if ENV.__BSS_BEAR_QUEST and type(ENV.__BSS_BEAR_QUEST.Shutdown) == "function" th
     task.wait(0.2)
 end
 
-local DEFAULT_CONFIG = {
+-- ==========================================================================
+--  USER SETTINGS - the keys players actually flip. One per line.
+--  Everything below keeps safe internal defaults; no need to edit further.
+-- ==========================================================================
+local USER_DEFAULTS = {
     Enabled = true,
+    AutoFarm = true,
+    AutoConvert = true,
+    AutoTokens = true,
+    AutoQuest = true,
+    AutoQuestFeedTasks = true,
+    AutoQuestJellyTasks = true,
+    AutoQuestMobs = true,
+    AutoTreatBees = true,
+    AutoCompareAmulets = true,
+    AutoRJGiftedFarm = true,
+    AutoRJUpgradeBasic = true,
+    AutoStarTreat = true,
+    AutoBuyStarTreat = true,
+    AutoMeteor = true,
+    AutoTriggerMeteor = true,
+    AutoFarmMondoChick = true,
+    AutoFarmLeaves = true,
+    AutoFarmSparkles = true,
+    AutoFarmFireflies = true,
+    AutoFarmSprouts = true,
+    AutoFarmVicious = true,
+    AutoFarmViciousAlways = true,
+    AutoMaterials = true,
+    AutoBlender = true,
+    AutoPlanters = true,
+    AutoMaterialPlanters = true,
+    AutoNectarCondenser = true,
+    AutoClaimBadges = true,
+    AutoWealthClock = true,
+    AutoFreeToys = true,
+    AutoProgression = true,
+    AutoBuyHiveSlots = true,
+    AutoBuyBasicEggs = true,
+    AutoBuyEventBees = true,
+    AutoHatchEventBees = true,
+    AutoTeleRewards = true,
+    AutoUnlockBlueHQ = true,
+    AutoBuySprinklers = true,
+    AutoPlaceSprinkler = true,
     FarmField = "Sunflower Field",
+    RedeemCodes = true,
+    StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
+    RJShopHoneyBudget = 5000000000,
+    RJTargetGiftedTypes = 15,
+    TreatBudgetPercent = 10,
+    BlackScreenTransparency = 0.3,
+}
+
+-- ==========================================================================
+--  INTERNAL DEFAULTS - intervals, cooldowns, thresholds, positions and data
+--  tables. Leave untouched; override at runtime with getgenv().KaitunConfig.
+-- ==========================================================================
+local DEFAULT_CONFIG = {
     ConvertPercent = 1,
     ConvertFinishPercent = 0.01,
     TweenSpeed = 85,
@@ -49,10 +105,6 @@ local DEFAULT_CONFIG = {
     SmartWalkDistance = 10,
     SmartArrivalDistance = 6,
     SmartFieldWalkTimeout = 12,
-    -- SmartMove stuck recovery: after ~1.2s without progress inside a field
-    -- (tree/rock/hedge), compute ONE PathfindingService route around the
-    -- obstacle, walk its waypoints, then resume direct walking. Zero cost
-    -- while walking freely; cooldown caps the ComputeAsync spend.
     SmartFieldPathfind = true,
     FieldPathfindCooldown = 6,
     FarmStepDelay = 0.25,
@@ -71,27 +123,17 @@ local DEFAULT_CONFIG = {
     TokenLookaheadDiscount = 0.84,
     TokenTravelPenalty = 0.22,
     TokenUrgencyBonus = 0.45,
-    AutoFarm = true,
-    AutoConvert = true,
-    AutoTokens = true,
-    AutoMeteor = true,
-    AutoTriggerMeteor = true,
     MeteorPartFallback = false,
     MeteorRequiredMythicTypes = 3,
+    -- Seconds (79200 = 22h).
     MeteorSummonerCooldown = 79200,
     MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
-    AutoQuest = true,
     QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
     QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
     QuestNPCBeeRequirements = {["Science Bear"] = 10, ["Polar Bear"] = 25},
-    -- Stop Black Bear right after the Diamond Egg quest ("Quest Of Legends").
-    -- The line is strictly sequential, so an ACTIVE quest past that point proves
-    -- the Diamond Egg was already claimed - detection works even for accounts
-    -- that finished it long before running this script (no script history needed).
+    -- Stop Black Bear once this quest is active: any later quest proves the Diamond Egg is claimed.
     BlackBearStopAfterQuest = "Quest Of Legends",
-    -- Compact list of quests AFTER the Diamond Egg quest (Star Jelly + Mythic
-    -- lines). Any of these active - or a repeatable "Black Bear: ..." quest -
-    -- proves the Diamond Egg is already claimed. Parsed into a lookup set once.
+    -- Pipe-separated Black Bear quests past the Diamond Egg; parsed into a lookup set once.
     BlackBearPastQuests = "High Altitude|Blissfully Blue|Rouge Round-up|White As Snow"
         .. "|Solo On The Stump|Colorful Craving|Pumpkins, Please!|Smorgasbord"
         .. "|Pollen Fetcher 5|White Clover Redux|Strawberry Field Forever|Tasting The Sky"
@@ -102,92 +144,35 @@ local DEFAULT_CONFIG = {
         .. "|Okey-Pokey|Pollen Fetcher 6|Capsaicin Collector|Mountain Mix|You Blue It"
         .. "|Variety Fetcher 2|Getting Stumped|Weed Wacker 3|All-Whitey Then"
         .. "|Red Delicacy|Boss Battles|Myth In The Making",
-    AutoQuestFeedTasks = true,
-    AutoQuestJellyTasks = true,
-    -- Auto treat: spend 10% of earned honey on treats and feed the lowest-level
-    -- bee until the whole hive shares one level.
-    AutoTreatBees = true,
-    TreatBudgetPercent = 10,
     TreatCycleHours = 1,
     TreatHoneyCost = 10,
     TreatBuyChunk = 100,
     TreatWorkerInterval = 5,
-    -- GIFTED RULES (wiki-verified, for the future gifted hunter):
-    -- Only SPECIFIC treats can roll gifted, and only when fed to a bee whose
-    -- favorite it is: Strawberries / Blueberries / Sunflower Seeds / Pineapples
-    -- (bond 25, x2 = 50 when favorite; gifted odds 1/8000 rare, 1/10000 epic,
-    -- 1/12000 common+legendary, 1/24000 mythic). Event bees only via Star Treat
-    -- (100%). The generic "Treat" (bond 10, what this leveling system buys) is
-    -- NO bee's favorite and can NEVER trigger gifted.
-    -- Auto amulet: compares EACH STAT against the equipped amulet of the same type.
-    -- Only replace when no stat is worse and at least one is better (strict win);
-    -- otherwise (mixed or identical) -> keep. No made-up weights.
-    AutoCompareAmulets = true,
     QuestJellyBatchMax = 5,
-    -- Jelly quests only target non-gifted common bees so event/mythics stay safe.
     CommonBeeTypes = {"Basic", "Bumble", "Cool", "Hasty", "Rascal", "Stubborn"},
     QuestCheckInterval = 3,
-    -- Quest snapshot TTL shared by every background system (feed worker, quest
-    -- router, mob planner). Quest turn-ins always re-scan immediately.
     QuestScanInterval = 5,
-    -- Mother Bear tasks run LIGHTLY in the background: at most one feed/jelly
-    -- use per this many seconds, so field quests and farming stay the focus.
     MotherFeedInterval = 10,
     QuestInteractTimeout = 12,
     QuestFarmSeconds = 8,
-    -- Farm burst length between quest/purchase checks: shorter bursts let quest
-    -- turn-ins and affordable-gear purchases interleave sooner while farming.
     FarmBurstSeconds = 5,
     ScienceQuestConfirmTimeout = 6,
-    AutoQuestMobs = true,
     QuestMobFightTimeout = 24,
     QuestMobSpawnWait = 12,
     QuestMobSpawnGrace = 15,
     QuestMobRecheckInterval = 20,
-    AutoClaimBadges = true,
     BadgeClaimInterval = 1.25,
-    AutoWealthClock = true,
-    -- Free toys: only tap Free Ant Pass + Blue Field Booster (no Royal Jelly
-    -- dispenser and no Red/Top booster by request). When a Blue boost is active,
-    -- kaitun farms the boosted field.
-    AutoFreeToys = true,
     AutoToys = {
         {Name = "Free Ant Pass Dispenser", Cooldown = 7200},
         {Name = "Blue Field Booster", Cooldown = 7200, FieldBoost = "Blue"},
     },
-    -- Boosts only count for the 3 main blue fields; boosts on other fields are ignored.
     BoostedFieldWhitelist = {"Pine Tree Forest", "Blue Flower Field", "Bamboo Field"},
-    -- RJ Gifted Farmer (tested standalone as rj_gifted_farm_test.lua v4): rolls
-    -- Royal Jelly on one sacrifice cell with ONE request per roll - the exact
-    -- call the game's auto-jelly spams (no Settings/toggle clicking needed).
-    -- Gated on full Mountain Top gear + Bubble Mask, honey budget capped,
-    -- quest reserve kept, stops at the gifted-type target.
-    AutoRJGiftedFarm = true,
-    RJShopHoneyBudget = 5000000000,
     RJQuestReserve = 5,
-    RJTargetGiftedTypes = 15,
     RJBuyChunk = 100,
     RJMinStock = 20,
     RJRollDelay = 0.03,
     RJStockResyncEvery = 25,
-    -- Auto RJ on NON-GIFTED BASIC bees only: Royal Jelly never rolls commons
-    -- (0%), so every use upgrades a Basic into a Rare+ roll (1/250 gifts it).
-    -- Basics are targeted exclusively because they carry no useful token; the
-    -- other commons keep theirs, and quest jelly keeps RJQuestReserve. When
-    -- stock is short the worker stands down and re-checks every 60s. Once the
-    -- RJ Gifted Farmer's gate passes, it owns all RJ spending instead.
-    AutoRJUpgradeBasic = true,
-    -- Star Treat: 100% gifts a bee; event bees can ONLY be gifted this way.
-    -- Used on the first non-gifted event bee in this order, keep going until
-    -- every one of them is gifted (never stops early). When the stock is empty
-    -- the script BUYS one from the Ticket Tent with tickets - but only after
-    -- the whole event-bee egg queue is done (bees outrank gifting for tickets).
-    AutoStarTreat = true,
-    AutoBuyStarTreat = true,
     StarTreatTicketCost = 1000,
-    StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
-    -- Mondo Chick: spawns hourly on Mountain Top, drops Bitterberry/Neonberry.
-    AutoFarmMondoChick = true,
     MondoChickFightTimeout = 120,
     WealthClockInterval = 3600,
     WealthClockCheckInterval = 15,
@@ -197,8 +182,6 @@ local DEFAULT_CONFIG = {
         "Sunflower", "Dandelion", "Mushroom", "Blue Flower", "Clover", "Spider",
         "Bamboo", "Strawberry", "Pineapple", "Pumpkin", "Cactus", "Rose", "Pine Tree", "Stump",
     },
-    AutoFarmLeaves = true,
-    AutoFarmSparkles = true,
     SpecialEffectScanInterval = 1,
     SpecialEffectPriorityInterval = 20,
     SpecialEffectMaxDistance = 180,
@@ -209,58 +192,54 @@ local DEFAULT_CONFIG = {
     AvoidMobRelocateCooldown = 2.5,
     AvoidMobArrivalDistance = 5,
     AvoidMobRelocateTimeout = 4,
-    -- Mob THREAT zone: only mobs closer than this pause farming and trigger the
-    -- retreat/hold. Farming resumes once no mob sits inside the radius.
     MobThreatRadius = 16,
     MobThreatHoldSeconds = 4,
-    AutoMaterials = true,
-    AutoBlender = true,
-    AutoFarmFireflies = true,
     FireflyScanInterval = 0.25,
     FireflyLandingVelocity = 0.15,
     FireflyMaxFieldHeight = 4,
-    -- 8 fireflies/formation: nudging all 8 + collecting the center reward needs a
-    -- bigger budget than the old 9s.
     FireflyFarmBudget = 18,
     FireflyTouchTimeout = 2.5,
     FireflyTokenWindow = 3,
     FireflyRetryCooldown = 1.25,
-    AutoFarmSprouts = true,
     SproutScanInterval = 0.25,
     SproutFarmSlice = 3,
     SproutMaxFarmSeconds = 180,
     SproutDropWindow = 20,
-    AutoFarmVicious = true,
-    -- Damage-avoid strategy: fly above the Vicious (its spikes come from the ground)
-    -- and hover there while bees attack.
     ViciousHoverHeight = 14,
-    -- Always farm Vicious whenever one spawns (night), without waiting for the
-    -- material planner. Only fight vic whose level is BELOW the hive average.
-    AutoFarmViciousAlways = true,
     ViciousRespectHiveLevel = true,
-    AutoMaterialPlanters = true,
-    AutoNectarCondenser = true,
     MaterialFarmSeconds = 10,
     MaterialCombatSeconds = 18,
     MaterialStatsInterval = 2,
     MaterialPlanterHarvestPercent = 0.98,
     MaterialPlanterActionCooldown = 5,
+    PlanterHarvestPercent = 0.98,
+    PlanterRescanInterval = 60,
+    -- Bees = hive size needed to enter the field; the spread covers all five nectar types.
+    PlanterFieldPlan = {
+        {Field = "Bamboo Field", Bees = 0},
+        {Field = "Blue Flower Field", Bees = 0},
+        {Field = "Sunflower Field", Bees = 0},
+        {Field = "Clover Field", Bees = 0},
+        {Field = "Spider Field", Bees = 0},
+        {Field = "Strawberry Field", Bees = 5},
+        {Field = "Pineapple Patch", Bees = 10},
+        {Field = "Pumpkin Patch", Bees = 10},
+        {Field = "Pine Tree Forest", Bees = 15},
+        {Field = "Cactus Field", Bees = 15},
+        {Field = "Rose Field", Bees = 20},
+        {Field = "Mountain Top Field", Bees = 25},
+        {Field = "Coconut Field", Bees = 25},
+        {Field = "Pepper Patch", Bees = 35},
+    },
     NectarCondenserCooldown = 10,
     BlenderCheckInterval = 2,
     BlenderMovePosition = Vector3.new(-431.53, 68.78, 41.02),
-    AutoProgression = true,
     ProgressionTargetBees = 45,
-    AutoBuyHiveSlots = true,
-    AutoBuyBasicEggs = true,
-    AutoBuyEventBees = true,
-    AutoHatchEventBees = true,
     EventBeeCheckInterval = 0.5,
     EventBeeStatsRefreshInterval = 2,
     EventBeeRetryCooldown = 12,
+    -- PackageTypes verified from Workspace.Shops.TicketShop.Items; extras cover strict executors.
     EventBeeSequence = {
-        -- Package Types verified directly from Workspace.Shops.TicketShop.Items
-        -- from the BSS place: {Category = "Eggs", Type = "TabbyBee"} ... Verified name
-        -- first so executors that cannot require ItemPackages still buy correctly.
         {Shop = "Ticket Tent", Item = "Tabby Bee Egg", Category = "Eggs", Type = "Tabby", TicketCost = 500,
             PackageTypes = {"TabbyBee", "Tabby Bee", "Tabby"}},
         {Shop = "Ticket Tent", Item = "Photon Bee Egg", Category = "Eggs", Type = "Photon", TicketCost = 500,
@@ -270,9 +249,6 @@ local DEFAULT_CONFIG = {
         {Shop = "Ticket Tent", Item = "Crimson Bee Egg", Category = "Eggs", Type = "Crimson", TicketCost = 250,
             PackageTypes = {"CrimsonBee", "Crimson Bee", "Crimson"}},
     },
-    -- Tele rewards (from telebss rewards.txt): on game entry, instantly teleport
-    -- to each map reward point before claiming hive/hatching. Coordinates hand-tested.
-    AutoTeleRewards = true,
     TeleRewardDwellSeconds = 2,
     TeleRewardSpots = {
         {Label = "Diamond Egg", CFrame = CFrame.new(42, 149, -531)},
@@ -316,7 +292,6 @@ local DEFAULT_CONFIG = {
         {Label = "Gumdrop", CFrame = CFrame.new(32.6508674621582, 13.400006294250488, 405.8634033203125)},
         {Label = "Pine Tree", CFrame = CFrame.new(43.54356384277344, 13.86900520324707, 373.79779052734375)},
     },
-    AutoUnlockBlueHQ = true,
     BlueHQRequiredDiscoveries = 4,
     BlueBeeTypes = {
         "Bumble", "Cool", "Bubble", "Bucko", "Frosty", "Ninja", "Diamond",
@@ -325,19 +300,11 @@ local DEFAULT_CONFIG = {
     BlueJellyRollsPerPass = 8,
     BlueJellyRollDelay = 0.2,
     BlueJellyCheckInterval = 1,
-    AutoBuySprinklers = true,
-    AutoPlaceSprinkler = true,
     MinSprinklerBees = 25,
     DynamicField = true,
     MacroMode = true,
     SafeMaterialMode = true,
-    -- Lag fix never Destroys token/bee/field logic; Atlas preset only removes visual-only
-    -- SurfaceAppearance and decorations are filtered, so scanners keep working.
-    -- Black screen UI: false = start without the dark overlay (F7 can still enable it).
-    -- BlackScreenTransparency: 0 = opaque black, 0.3 = dimmed night-mode veil
-    -- (default), up to 0.85 = very faint.
     BlackScreen = true,
-    BlackScreenTransparency = 0.3,
     LowGraphics = true,
     FixLagAtlasMode = true,
     FixLagHideBees = true,
@@ -356,10 +323,8 @@ local DEFAULT_CONFIG = {
     FixLagScanBatch = 350,
     FixLagHideSky = true,
     FixLagBrightness = 0.65,
-    RedeemCodes = true,
+    -- Early material codes only; boost codes stay in BoostCodes to avoid wasting field boosts.
     PromoCodes = {
-        -- Material codes the progression guide recommends using right at the start.
-        -- Boost/event codes are not redeemed early to avoid wasting field boosts.
         "BeesBuzz123", "38217", "BopMaster", "Connoisseur",
         "Crawlers", "Nectar", "Roof", "Wax",
     },
@@ -383,13 +348,10 @@ local DEFAULT_CONFIG = {
     },
     ProgressionMilestones = {
         {TargetBees = 5, Items = {
-            -- These two prices are fixed in the Basic Shop. Keep them here so a fresh
-            -- account never stalls when executor ItemPackages/GetCost returns an empty cache.
             {Shop = "BasicShop", Item = "Clippers", Category = "Collector", Type = "Clippers", HoneyCost = 2200},
             {Shop = "BasicShop", Item = "Backpack", Category = "Accessory", Type = "Backpack", HoneyCost = 5500},
         }},
         {TargetBees = 10, Items = {
-            -- Numbers 1 and 2 on the slide: capacity first, collector second.
             {Shop = "BasicShop", Item = "Canister", Category = "Accessory", Type = "Canister", HoneyCost = 22000},
             {Shop = "BasicShop", Item = "Vacuum", Category = "Collector", Type = "Vacuum", HoneyCost = 14000},
             {Shop = "BasicShop", Item = "Basic Boots", Category = "Accessory", Type = "Basic Boots", HoneyCost = 4400, RequiresMaterials = true, SupersededBy = {"Hiking Boots", "Beekeeper's Boots", "Coconut Clogs"}},
@@ -397,30 +359,22 @@ local DEFAULT_CONFIG = {
             {Shop = "BasicShop", Item = "Helmet", Category = "Accessory", Type = "Helmet", HoneyCost = 30000, RequiresMaterials = true, SupersededBy = {"Propeller Hat", "Beekeeper's Mask", "Bubble Mask", "Diamond Mask"}},
         }},
         {TargetBees = 15, Items = {
-            -- Pulsar is #1; the Pro Shop container set is #2 on the slide.
             {Shop = "ProShop", Item = "Pulsar", Category = "Collector", Type = "Pulsar", HoneyCost = 125000},
             {Shop = "ProShop", Item = "Mega-Jug", Category = "Accessory", Type = "Mega-Jug", HoneyCost = 50000},
             {Shop = "ProShop", Item = "Compressor", Category = "Accessory", Type = "Compressor", HoneyCost = 160000},
             {Shop = "ProShop", Item = "Elite Barrel", Category = "Accessory", Type = "Elite Barrel", HoneyCost = 650000},
         }},
         {TargetBees = 20, EggRushAfter = true, Items = {
-            -- After Port-O-Hive, finish this order then freeze side gear
-            -- to save all honey for Basic Egg/Hive Slot up to 25 bees.
             {Shop = "ProShop", Item = "Port-O-Hive", Category = "Accessory", Type = "Port-O-Hive", HoneyCost = 1250000},
             {Shop = "ProShop", Item = "Propeller Hat", Category = "Accessory", Type = "Propeller Hat", HoneyCost = 2500000, RequiresMaterials = true, SupersededBy = {"Beekeeper's Mask", "Bubble Mask", "Diamond Mask"}},
             {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
-            -- Pro Shop guards (prices per BSS wiki): Looker 300K + 25 Sunflower Seed,
-            -- Brave 300K + 3 Stinger.
             {Shop = "ProShop", Item = "Looker Guard", Category = "Accessory", Type = "Looker Guard", HoneyCost = 300000, RequiresMaterials = true,
                 SupersededBy = {"Elite Blue Guard", "Elite Red Guard", "Cobalt Guard", "Crimson Guard"}},
             {Shop = "ProShop", Item = "Brave Guard", Category = "Accessory", Type = "Brave Guard", HoneyCost = 300000, RequiresMaterials = true,
                 SupersededBy = {"Elite Blue Guard", "Elite Red Guard", "Cobalt Guard", "Crimson Guard"}},
         }},
         {TargetBees = 25, EggRushAfter = true, Items = {
-            -- Retry Bubble Wand while hatching: if Blue HQ just opened after one
-            -- Royal Jelly roll, buy immediately; if still locked continue the egg rush.
             {Shop = "BlueHQ", Item = "Bubble Wand", Category = "Collector", Type = "Bubble Wand", HoneyCost = 3500000, SupersededBy = {"Porcelain Dipper", "Petal Wand", "Tide Popper"}},
-            -- Elite Guards moved from the 33-bee milestone to 25 bees by request.
             {Shop = "BlueHQ", Item = "Elite Blue Guard", Category = "Accessory", Type = "Elite Blue Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Cobalt Guard"}},
             {Shop = "RedHQ", Item = "Elite Red Guard", Category = "Accessory", Type = "Elite Red Guard", HoneyCost = 5000000, RequiresMaterials = true, SupersededBy = {"Crimson Guard"}},
         }},
@@ -437,14 +391,11 @@ local DEFAULT_CONFIG = {
             {Shop = "Mountaintop", Item = "Porcelain Port-O-Hive", Category = "Accessory", Type = "Porcelain Port-O-Hive", HoneyCost = 250000000, RequiresMaterials = true},
         }},
         {TargetBees = 40, Items = {
-            -- 40-bee milestone: farm materials and buy in exact order blue guard,
-            -- red guard, then Diamond Mask. All three are mandatory.
             {Shop = "MasterRoomShop", Item = "Cobalt Guard", Category = "Accessory", Type = "Cobalt Guard", HoneyCost = 200000000, RequiresMaterials = true},
             {Shop = "MasterRoomShop", Item = "Crimson Guard", Category = "Accessory", Type = "Crimson Guard", HoneyCost = 200000000, RequiresMaterials = true},
             {Shop = "DiamondMaskShop", Item = "Diamond Mask", Category = "Accessory", Type = "Diamond Mask", HoneyCost = 5000000000, RequiresMaterials = true},
         }},
         {TargetBees = 45, Items = {
-            -- Parallel goals after finishing the 40-bee set.
             {Shop = "Petal Shop", Item = "Petal Belt", Category = "Accessory", Type = "Petal Belt", HoneyCost = 15000000000, RequiresMaterials = true, Optional = true},
             {Shop = "Coconut Cave", Item = "Coconut Canister", Category = "Accessory", Type = "Coconut Canister", HoneyCost = 25000000000, RequiresMaterials = true, Optional = true},
         }},
@@ -509,7 +460,19 @@ local function merge(target, source)
     return target
 end
 
-local Config = merge(deepCopy(DEFAULT_CONFIG), ENV.BSS_KAITUN_CONFIG or {})
+local Config = {}
+for key, value in pairs(DEFAULT_CONFIG) do Config[key] = value end
+for key, value in pairs(USER_DEFAULTS) do Config[key] = value end
+if type(ENV.BSS_KAITUN_CONFIG) == "table" then
+    -- Legacy override hook kept for existing loaders.
+    merge(Config, ENV.BSS_KAITUN_CONFIG)
+end
+do
+    local ok, overrides = pcall(function() return getgenv().KaitunConfig end)
+    if ok and type(overrides) == "table" then
+        for key, value in pairs(overrides) do Config[key] = value end
+    end
+end
 -- Mother Bear returns to the kaitun: "Feed Treats" and "Use Royal Jelly" tasks now have
 -- automatic handlers; pollen/mob tasks go through the quest router like other bears.
 -- Polar Bear joined last: run when the other bears have nothing to do.
@@ -735,7 +698,9 @@ local Runtime = {
     RJGiftedTypes = {},
     RJGiftedCount = 0,
     RJHoneySpent = 0,
+    RJUnitCost = nil,
     RJStock = 0,
+    PlanterHarvests = 0,
     RJRollsSinceSync = 0,
     RJRollsTotal = 0,
     RJRollsThisCell = 0,
@@ -1154,6 +1119,10 @@ local function glideRunnerStep(deltaTime)
         Runtime.Glide = nil
         Runtime.TweenRootReleaseAt = nil
         releaseTweenRoot()
+        if Runtime.GlideRunnerConnection then
+            pcall(Runtime.GlideRunnerConnection.Disconnect, Runtime.GlideRunnerConnection)
+            Runtime.GlideRunnerConnection = nil
+        end
         return
     end
     local glide = Runtime.Glide
@@ -1175,6 +1144,12 @@ local function glideRunnerStep(deltaTime)
     if releaseAt and os.clock() >= releaseAt then
         Runtime.TweenRootReleaseAt = nil
         releaseTweenRoot()
+        -- Idle: disconnect so idle accounts pay zero Heartbeat dispatches.
+        -- ensureGlideRunner() reconnects automatically on the next glide.
+        if Runtime.GlideRunnerConnection then
+            pcall(Runtime.GlideRunnerConnection.Disconnect, Runtime.GlideRunnerConnection)
+            Runtime.GlideRunnerConnection = nil
+        end
     end
 end
 
@@ -3902,7 +3877,6 @@ function Runtime.FeedQuestTreats(objective)
             setStatusBackground("Quest feed", string.format(
                 "Missing %d %s - farming, auto-feed when it arrives", remaining, treatLabel))
         else
-        else
             setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 90s", treatLabel))
         end
         return false
@@ -4014,6 +3988,18 @@ function Runtime.TreatCycleRollover()
         formatNumber(Runtime.TreatCycleBudget), percent))
 end
 
+-- Treats earmarked by pending quest-feed deficits: bee leveling must leave
+-- this many in stock or the quest worker starves behind it.
+local function questTreatReserve(treatKey)
+    local reserve = 0
+    for _, entry in pairs(Runtime.QuestFeedDeficit or {}) do
+        if entry and entry.TreatKey == treatKey and tonumber(entry.Missing) then
+            reserve += entry.Missing
+        end
+    end
+    return reserve
+end
+
 function Runtime.BuyTreatsForCycle()
     local unitCost = math.max(1, tonumber(Config.TreatHoneyCost) or 10)
     local budget = Runtime.TreatCycleBudget or 0
@@ -4037,32 +4023,35 @@ function Runtime.BuyTreatsForCycle()
     local ok, result = remoteCall("ItemPackageEvent", "Purchase",
         {Category = "Eggs", Type = "Treat", Amount = chunk})
     task.wait(0.5)
-    local treatsAfter = math.floor(MaterialSystem.Amount("Treat", MaterialSystem.Stats(true)))
+    -- Blocking refresh: the purchase must be confirmed by the REAL inventory
+    -- delta, otherwise a denied chunk still burns the hourly budget.
+    MaterialSystem.Stats(true)
+    local treatsAfter = math.floor(MaterialSystem.Amount("Treat"))
     local gained = treatsAfter - treatsBefore
-    if (ok and result ~= false) or gained > 0 then
-        local bought = gained > 0 and gained or chunk
-        Runtime.TreatCycleBoughtHoney = boughtHoney + bought * unitCost
+    if gained > 0 then
+        Runtime.TreatCycleBoughtHoney = boughtHoney + gained * unitCost
         Runtime.PurchaseRetryAt[purchaseKey] = nil
-        task.defer(function() MaterialSystem.Stats(true) end)
-        return bought
+        return gained
     end
     -- Server rejected the chunk purchase: fall back to single buys (max 10/pass).
     local bought = 0
     for _ = 1, math.min(chunk, 10) do
-        local okOne, resultOne = remoteCall("ItemPackageEvent", "Purchase",
+        local okOne = remoteCall("ItemPackageEvent", "Purchase",
             {Category = "Eggs", Type = "Treat", Amount = 1})
-        if okOne and resultOne ~= false then
-            bought += 1
-            Runtime.TreatCycleBoughtHoney = boughtHoney + bought * unitCost
-        else
-            break
-        end
+        if not okOne then break end
+        bought += 1
+        task.wait(0.15)
     end
     if bought > 0 then
-        Runtime.PurchaseRetryAt[purchaseKey] = nil
-        task.defer(function() MaterialSystem.Stats(true) end)
+        MaterialSystem.Stats(true)
+        local verified = math.floor(MaterialSystem.Amount("Treat")) - treatsAfter
+        if verified > 0 then
+            Runtime.TreatCycleBoughtHoney = boughtHoney + verified * unitCost
+            Runtime.PurchaseRetryAt[purchaseKey] = nil
+            return verified
+        end
     end
-    return bought
+    return 0
 end
 
 function Runtime.TreatLowestBee()
@@ -4117,12 +4106,22 @@ function Runtime.TreatLowestBee()
 
     Runtime.TreatBusy = true
     local handled = false
-    -- Feed all treats in stock; only buy more within the hour's budget when empty.
+    -- Pending quest feed outranks bee leveling: never dip into the treats the
+    -- quest worker is still waiting for.
+    local reserve = questTreatReserve("Treat")
     local treats = math.floor(MaterialSystem.Amount("Treat"))
+    if reserve > 0 and treats <= reserve then
+        Runtime.TreatBusy = false
+        return false
+    end
     if treats <= 0 then treats = Runtime.BuyTreatsForCycle() end
     if treats > 0 then
-        -- Feed EVERY treat in stock in a single remote call.
-        local batch = treats
+        -- Feed everything ABOVE the quest reserve in a single remote call.
+        local batch = reserve > 0 and (treats - reserve) or treats
+        if batch <= 0 then
+            Runtime.TreatBusy = false
+            return false
+        end
         setStatus("Treat bee", focusMode
             and string.format("Focus feed %d treats | %s lv.%d | hive equal, keep until level up",
                 batch, target.Type, targetLevel)
@@ -4416,9 +4415,13 @@ function Runtime.HandleAmuletGui()
     return true
 end
 
+-- GUI fallback for amulet offers: only polled when the server does NOT deliver
+-- offers through LocalAmuletEvent (a connected remote makes this full PlayerGui
+-- scan per second pure waste).
 task.spawn(function()
     while Runtime.Running do
-        if Config.Enabled and Config.AutoCompareAmulets then
+        if Config.Enabled and Config.AutoCompareAmulets
+            and not (amuletOfferRemote and amuletOfferRemote:IsA("RemoteEvent")) then
             local ok, err = xpcall(Runtime.HandleAmuletGui, debug.traceback)
             if not ok then reportError("AmuletGui", err) end
         end
@@ -5531,7 +5534,7 @@ end
 
 function MaterialSystem.PlanterData()
     local planters = MaterialSystem.LocalPlanters
-    if not Config.AutoMaterialPlanters or type(planters) ~= "table"
+    if type(planters) ~= "table"
         or type(planters.LoadPlanter) ~= "function" then return {} end
     local getUpvalues = (debug and debug.getupvalues) or rawget(ENV, "getupvalues")
     if type(getUpvalues) ~= "function" then return {} end
@@ -6762,26 +6765,44 @@ local function rjBuy()
         return
     end
     local package = rjDiscoverPackage()
-    local before = liveCoreValue("Honey") or 0
-    local bought = 0
+    -- Verify the purchase by the REAL inventory delta (a fired RemoteEvent says
+    -- nothing about whether the server accepted it), and count honey with a
+    -- per-jelly floor: honey keeps GROWING while we wait, so a naive
+    -- before/after read undercounts and silently blows the budget.
+    getStats(true)
+    local beforeRJ = rawEggCount("RoyalJelly")
+    local beforeHoney = liveCoreValue("Honey") or 0
+    local fired = false
     for _, amount in ipairs({tonumber(Config.RJBuyChunk) or 100, 10, 1}) do
-        local ok, result = remoteCall("ItemPackageEvent", "Purchase",
+        local ok = remoteCall("ItemPackageEvent", "Purchase",
             {Category = package.Category, Type = package.Type, Amount = amount})
-        if ok and type(result) ~= "string" then
-            bought = amount
+        if ok then
+            fired = true
             break
         end
         task.wait(0.2)
     end
-    task.wait(0.5)
-    local after = liveCoreValue("Honey") or before
-    Runtime.RJHoneySpent += math.max(0, before - after)
+    if not fired then
+        setStatus("RJ Gifted", "Purchase failed - retrying later")
+        Runtime.RJNextBuy = os.clock() + 30
+        return
+    end
+    task.wait(0.6)
+    getStats(true)
+    local bought = math.max(0, rawEggCount("RoyalJelly") - beforeRJ)
+    local afterHoney = liveCoreValue("Honey") or beforeHoney
+    local measured = math.max(0, beforeHoney - afterHoney)
     if bought > 0 then
+        if measured > 0 then
+            -- Learn the real unit cost whenever the window shows a net drop.
+            Runtime.RJUnitCost = measured / bought
+        end
+        Runtime.RJHoneySpent += math.max(measured, bought * (Runtime.RJUnitCost or 0))
         Runtime.RJStock += bought
         setStatus("RJ Gifted", string.format("Bought %d RJ | budget %s/%s",
             bought, formatNumber(Runtime.RJHoneySpent), formatNumber(Config.RJShopHoneyBudget or 5e9)))
     else
-        setStatus("RJ Gifted", "Purchase failed - retrying later")
+        setStatus("RJ Gifted", "Purchase not confirmed - retrying later")
         Runtime.RJNextBuy = os.clock() + 30
     end
 end
@@ -6840,7 +6861,31 @@ function Runtime.RJRollStep()
         task.wait(30)
         return "wait"
     end
-    local sacrifice = rjPickSacrifice()
+    if not Runtime.RJGateWasActive then
+        -- Gate just flipped on: the basic-upgrader and quest jelly consume the
+        -- SAME stash - re-anchor the shared counter to the real inventory.
+        Runtime.RJGateWasActive = true
+        getStats(true)
+        Runtime.RJStock = rawEggCount("RoyalJelly")
+    end
+    -- Reuse the live sacrifice cell across rolls: a full hive rescan per roll
+    -- (rjPickSacrifice) at 30+ rolls/second was the hottest scan in the script.
+    -- The instance read below (GiftedCell/CellType/Locked) is O(1).
+    local sacrifice
+    local cached = Runtime.RHSacrificeInstance
+    if cached and cached.Parent and not cached:FindFirstChild("GiftedCell") then
+        local locked = cached:FindFirstChild("CellLocked")
+        if not (locked and locked:IsA("ValueBase") and locked.Value == true) then
+            local x, y = cached.Name:match("^C(%d+),(%d+)$")
+            if x then
+                sacrifice = {X = tonumber(x), Y = tonumber(y), Instance = cached}
+            end
+        end
+    end
+    if not sacrifice then
+        sacrifice = rjPickSacrifice()
+        Runtime.RHSacrificeInstance = sacrifice and sacrifice.Instance or nil
+    end
     if not sacrifice then
         setStatus("RJ Gifted", "No sacrifice cell available")
         task.wait(10)
@@ -6856,32 +6901,53 @@ function Runtime.RJRollStep()
         task.wait(5)
         return "wait"
     end
-    remoteCall("ConstructHiveCellFromEgg", sacrifice.X, sacrifice.Y, "RoyalJelly", 1)
+    local ok = remoteCall("ConstructHiveCellFromEgg", sacrifice.X, sacrifice.Y, "RoyalJelly", 1)
+    if not ok then
+        -- Fire rejected: do not burn the counter on a phantom roll - re-sync
+        -- from the live inventory and back off briefly.
+        Runtime.RJStock = rawEggCount("RoyalJelly")
+        Runtime.RJNextBuy = os.clock() + 10
+        task.wait(1)
+        return "wait"
+    end
     Runtime.RJStock -= 1
     Runtime.RJRollsSinceSync += 1
     Runtime.RJRollsThisCell += 1
     Runtime.RJRollsTotal += 1
     task.wait(math.max(0.01, tonumber(Config.RJRollDelay) or 0.03))
-    for _, cell in ipairs(hiveBeeCells()) do
-        if cell.X == sacrifice.X and cell.Y == sacrifice.Y then
-            if cell.Gifted then
-                if not Runtime.RJGiftedTypes[cell.Type] then
-                    Runtime.RJGiftedTypes[cell.Type] = true
-                    Runtime.RJGiftedCount += 1
-                    Runtime.RHSacrificeKey = nil
-                    setStatus("RJ Gifted", string.format("*** NEW GIFTED TYPE: %s (%d/%d) | %d rolls ***",
-                        cell.Type, Runtime.RJGiftedCount, target, Runtime.RJRollsThisCell))
-                else
-                    setStatus("RJ Gifted", string.format("Gifted duplicate %s after %d rolls - same cell",
-                        cell.Type, Runtime.RJRollsThisCell))
-                end
-                Runtime.RJRollsThisCell = 0
-            elseif Runtime.RJRollsSinceSync >= (tonumber(Config.RJStockResyncEvery) or 25) then
-                Runtime.RJRollsSinceSync = 0
+    -- Direct instance read instead of a full hive rescan: GiftedCell appearing
+    -- (and the new CellType) is the entire result we need.
+    local sacInstance = sacrifice.Instance
+    if sacInstance and sacInstance.Parent then
+        local cellType = sacInstance:FindFirstChild("CellType") or sacInstance:FindFirstChild("BeeType")
+        local freshType = cellType and cellType:IsA("ValueBase") and tostring(cellType.Value) or sacrifice.Type
+        if sacInstance:FindFirstChild("GiftedCell") then
+            if not freshType then
+                -- Rare: gifted flag without a readable CellType (the cached
+                -- instance path carries no Type) - one full scan registers it.
+                rjSeedGiftedTypes()
+                Runtime.RHSacrificeKey = nil
+                Runtime.RHSacrificeInstance = nil
+                setStatus("RJ Gifted", "New gifted bee registered (full rescan)")
+            elseif not Runtime.RJGiftedTypes[freshType] then
+                Runtime.RJGiftedTypes[freshType] = true
+                Runtime.RJGiftedCount += 1
+                Runtime.RHSacrificeKey = nil
+                Runtime.RHSacrificeInstance = nil
+                setStatus("RJ Gifted", string.format("*** NEW GIFTED TYPE: %s (%d/%d) | %d rolls ***",
+                    freshType, Runtime.RJGiftedCount, target, Runtime.RJRollsThisCell))
+            else
+                setStatus("RJ Gifted", string.format("Gifted duplicate %s after %d rolls - same cell",
+                    freshType, Runtime.RJRollsThisCell))
+            end
+            Runtime.RJRollsThisCell = 0
+        elseif Runtime.RJRollsSinceSync >= (tonumber(Config.RJStockResyncEvery) or 25) then
+            Runtime.RJRollsSinceSync = 0
+            -- Off-thread refresh; the defer writes the corrected count back.
+            task.defer(function()
                 getStats(true)
                 Runtime.RJStock = rawEggCount("RoyalJelly")
-            end
-            break
+            end)
         end
     end
     return "rolling"
@@ -6890,8 +6956,8 @@ end
 -- Star Treat worker step: first non-gifted event bee in config order gets
 -- star treats until gifted; keeps going through the whole list - never stops
 -- early while star treats remain and a target is missing.
-local function starTreatPendingCount()
-    local cells = hiveBeeCells()
+local function starTreatPendingCount(cells)
+    cells = cells or hiveBeeCells()
     local pending = 0
     for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
@@ -6908,6 +6974,24 @@ end
 -- Buy one Star Treat from the Ticket Tent with tickets. The package is read
 -- from the replicated shop item (ItemType/ItemCategory StringValues, same as
 -- every other shop) so the real Category/Type is used instead of a guess.
+-- Deep-find a numeric counter anywhere in the stats payload (Star Treat and
+-- similar special items do not always live under stats.Eggs).
+local function deepFindNumber(value, key, depth, visited)
+    depth = depth or 0
+    visited = visited or {}
+    if type(value) ~= "table" or visited[value] or depth > 4 then return nil end
+    visited[value] = true
+    local direct = tonumber(value[key])
+    if direct then return direct end
+    for _, child in pairs(value) do
+        if type(child) == "table" then
+            local found = deepFindNumber(child, key, depth + 1, visited)
+            if found then return found end
+        end
+    end
+    return nil
+end
+
 local function buyStarTreat()
     local package
     local shops = workspace:FindFirstChild("Shops")
@@ -6926,12 +7010,18 @@ local function buyStarTreat()
         end
     end
     package = package or {Category = "Treats", Type = "StarTreat"}
+    local before = deepFindNumber(getStats(false), "StarTreat") or 0
     local ok = remoteCall("ItemPackageEvent", "Purchase",
         {Category = package.Category, Type = package.Type, Amount = 1})
     if ok then
-        task.defer(function() getStats(true) end)
-        setStatus("Star Treat", "Bought Star Treat from Ticket Tent")
-        return true
+        task.wait(0.6)
+        getStats(true)
+        -- Confirmed by the real stock delta: a fired-but-denied purchase must
+        -- not report success (the caller would burn the next pass on nothing).
+        if (deepFindNumber(getStats(false), "StarTreat") or 0) > before then
+            setStatus("Star Treat", "Bought Star Treat from Ticket Tent")
+            return true
+        end
     end
     Runtime.StarTreatRetryAt = os.clock() + 60
     setStatus("Star Treat", string.format("Star Treat purchase failed (%s/%s) - retry in 60s",
@@ -6942,27 +7032,18 @@ end
 function Runtime.StarTreatStep()
     if not Config.AutoStarTreat then return "off" end
     if os.clock() < (Runtime.StarTreatRetryAt or 0) then return "cooldown" end
+    -- ONE hive scan per pass, shared by the pending check and the gifting loop.
+    local cells = hiveBeeCells()
     -- Nothing to gift: stay SILENT so this worker never overwrites the status
     -- of active systems (farm/RJ/treat).
-    if starTreatPendingCount() <= 0 then return "done" end
+    if starTreatPendingCount(cells) <= 0 then return "done" end
     local stats = getStats(false)
-    local starTreats
-    local visited = {}
-    local function findTreat(value, depth)
-        if starTreats or type(value) ~= "table" or visited[value] or depth > 4 then return end
-        visited[value] = true
-        for key, child in pairs(value) do
-            if key == "StarTreat" and tonumber(child) then starTreats = tonumber(child) return end
-            if type(child) == "table" then findTreat(child, depth + 1) end
-        end
-    end
-    findTreat(stats, 0)
-    starTreats = math.floor(starTreats or 0)
+    local starTreats = math.floor(deepFindNumber(stats, "StarTreat") or 0)
     if starTreats <= 0 then
         -- Empty stock: Mother Bear quests deliver them passively, but spare
         -- tickets can buy one right away once the bee-egg queue is finished
         -- (bees outrank gifting for tickets).
-        local pending = starTreatPendingCount()
+        local pending = starTreatPendingCount(cells)
         if pending > 0 and Config.AutoBuyStarTreat
             and (type(Runtime.NextEventBee) ~= "function" or Runtime.NextEventBee(false) == nil) then
             local tickets = Runtime.TicketCount(stats)
@@ -6992,11 +7073,10 @@ function Runtime.StarTreatStep()
                 if ok then
                     Runtime.StarTreatsUsed += 1
                     task.wait(1)
-                    for _, fresh in ipairs(hiveBeeCells()) do
-                        if fresh.X == cell.X and fresh.Y == cell.Y and fresh.Gifted then
-                            setStatus("Star Treat", string.format("*** %s is now GIFTED ***", fresh.Type))
-                            break
-                        end
+                    -- Direct instance read for the gifted confirmation.
+                    if cell.Instance and cell.Instance.Parent
+                        and cell.Instance:FindFirstChild("GiftedCell") then
+                        setStatus("Star Treat", string.format("*** %s is now GIFTED ***", cell.Type))
                     end
                     return "used"
                 end
@@ -7024,14 +7104,15 @@ function Runtime.RJUpgradeBasicStep()
         Runtime.RJGateActive = Runtime.RJGatePassed(true)
     end
     if Config.AutoRJGiftedFarm and Runtime.RJGateActive then return end
+    -- ONE shared pool with the RJ farmer and quest jelly: two independent
+    -- counters drifted apart (double-spend) during the 120s gate-check window.
     local reserve = math.max(1, tonumber(Config.RJQuestReserve) or 5)
-    if Runtime.RJUpgradeStock == nil or Runtime.RJUpgradeStock <= reserve
-        or (Runtime.RJUpgradeSyncs or 0) >= 20 then
+    if Runtime.RJStock <= reserve or (Runtime.RJUpgradeSyncs or 0) >= 20 then
         Runtime.RJUpgradeSyncs = 0
         getStats(true)
-        Runtime.RJUpgradeStock = rawEggCount("RoyalJelly")
+        Runtime.RJStock = rawEggCount("RoyalJelly")
     end
-    if Runtime.RJUpgradeStock <= reserve then
+    if Runtime.RJStock <= reserve then
         -- Not enough above the quest reserve: stand down, remember, re-check.
         Runtime.RJUpgradeRetryAt = os.clock() + 60
         return
@@ -7039,11 +7120,13 @@ function Runtime.RJUpgradeBasicStep()
     for _, cell in ipairs(hiveBeeCells()) do
         if not cell.Locked and not cell.Gifted
             and Runtime.NormalizeEventBeeName(cell.Type) == "basic" then
-            remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "RoyalJelly", 1)
-            Runtime.RJUpgradeStock -= 1
-            Runtime.RJUpgradeSyncs = (Runtime.RJUpgradeSyncs or 0) + 1
-            setStatus("RJ upgrade", string.format("Royal Jelly on %s (%d,%d) | stock %d",
-                cell.Type, cell.X, cell.Y, Runtime.RJUpgradeStock))
+            local ok = remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "RoyalJelly", 1)
+            if ok then
+                Runtime.RJStock -= 1
+                Runtime.RJUpgradeSyncs = (Runtime.RJUpgradeSyncs or 0) + 1
+                setStatus("RJ upgrade", string.format("Royal Jelly on %s (%d,%d) | stock %d",
+                    cell.Type, cell.X, cell.Y, Runtime.RJStock))
+            end
             task.wait(0.3)
             return
         end
@@ -7061,6 +7144,9 @@ end
 task.spawn(function()
     task.wait(5) -- let bootstrap stats land first
     rjSeedGiftedTypes()
+    -- Seed the local stock counter from the real inventory: an account with a
+    -- full RJ stash must not trigger an immediate purchase.
+    Runtime.RJStock = rawEggCount("RoyalJelly")
     while Runtime.Running do
         local result = "off"
         if Config.Enabled and not Runtime.MeteorPriorityActive and Config.AutoRJGiftedFarm then
@@ -7166,6 +7252,103 @@ task.spawn(function()
             if not ok then reportError("RJUpgrade", err) end
         end
         task.wait(0.5)
+    end
+end)
+
+-- AUTO PLANTER -----------------------------------------------------------------
+-- Independent of the material farm: keeps up to 3 planters (the game's cap)
+-- growing in plan-worthy fields, harvests at full growth (drops only pay out
+-- while growth advances; ~2h for a Plastic Planter, 1h for Paper), then
+-- replants. Planter type/nectar facts: one planter per type AND per field, the
+-- nectar harvested is decided by the FIELD, and planters return to the
+-- inventory after harvest (they are permanent items).
+function Runtime.PlanterCycleStep()
+    if not Config.Enabled or Runtime.MeteorPriorityActive then return "yield" end
+    local stats = MaterialSystem.Stats(false)
+    local active = MaterialSystem.PlanterData()
+
+    -- 1) Harvest anything at (or effectively at) full growth.
+    for _, data in ipairs(active) do
+        local progress = MaterialSystem.PlanterProgress(data)
+        if progress >= (tonumber(Config.PlanterHarvestPercent) or 0.98) then
+            local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
+            local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
+            Runtime.PlanterBusy = true
+            setStatus("Planter", string.format("Harvest %s @ %s (%d%% grown)",
+                MaterialSystem.PlanterName(data), field and field.Name or "?",
+                math.floor(progress * 100 + 0.5)))
+            local ok = false
+            if position then
+                tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Planter")
+                ok = remoteCall("PlanterModelCollect", data.ActorID)
+                if ok then
+                    Runtime.PlanterHarvests += 1
+                    task.wait(1)
+                    sweepTokens(3, "PlanterDrop")
+                end
+            end
+            Runtime.PlanterBusy = false
+            return ok and "harvested" or "harvest-failed"
+        end
+    end
+
+    -- 2) Fill the free slots: walk the plan in order, plant into the first
+    -- field that is free and unlocked for this hive size.
+    if #active >= 3 then return "full" end
+    local occupied = {}
+    for _, data in ipairs(active) do
+        local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
+        local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
+        if field then occupied[field.Name] = true end
+    end
+    local beeCount = #hiveBeeCells()
+    local zones = workspace:FindFirstChild("FlowerZones")
+    for _, entry in ipairs(Config.PlanterFieldPlan or {}) do
+        local fieldName = type(entry) == "table" and tostring(entry.Field) or tostring(entry)
+        local required = type(entry) == "table" and (tonumber(entry.Bees) or 0) or 0
+        local field = zones and zones:FindFirstChild(fieldName) or nil
+        local point = field and not occupied[fieldName] and beeCount >= required
+            and fieldPoint(field) or nil
+        local planterName = point and MaterialSystem.ChoosePlanter(stats, active) or nil
+        if point and planterName then
+            Runtime.PlanterBusy = true
+            setStatus("Planter", string.format("Plant %s @ %s (%d/3 active)",
+                planterName, fieldName, #active + 1))
+            tweenTo(CFrame.new(point), Config.TweenSpeed, "Planter")
+            task.wait(0.35)
+            local ok = remoteCall("PlayerActivesCommand", {Name = planterName})
+            Runtime.PlanterBusy = false
+            if ok then
+                task.wait(1)
+                return "planted"
+            end
+            return "plant-failed"
+        end
+    end
+    return "idle"
+end
+
+task.spawn(function()
+    task.wait(10) -- let LocalPlanters load and bootstrap stats land first
+    while Runtime.Running do
+        if Config.Enabled and Config.AutoPlanters and not Runtime.PlanterBusy
+            and os.clock() >= (Runtime.PlanterScanAt or 0) then
+            local ok, result = xpcall(Runtime.PlanterCycleStep, debug.traceback)
+            if not ok then
+                reportError("PlanterCycle", result)
+                -- The step may have died between setting and clearing its busy
+                -- flag; clear it here or the worker blocks forever.
+                Runtime.PlanterBusy = false
+                Runtime.PlanterScanAt = os.clock() + (tonumber(Config.PlanterRescanInterval) or 60)
+            elseif result == "harvested" or result == "planted" then
+                -- An action just landed: re-check quickly so the remaining
+                -- slots/harvests fill without waiting a full scan cycle.
+                Runtime.PlanterScanAt = os.clock() + 6
+            else
+                Runtime.PlanterScanAt = os.clock() + (tonumber(Config.PlanterRescanInterval) or 60)
+            end
+        end
+        task.wait(1)
     end
 end)
 
