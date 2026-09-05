@@ -6936,7 +6936,9 @@ function Runtime.RJRollStep()
         return "done"
     end
     if not Runtime.RJGatePassed() then
-        task.wait(30)
+        -- Cheap local scan (cached stats + backpack): re-check quickly so the
+        -- roll loop starts within seconds of the last gear item landing.
+        task.wait(10)
         return "wait"
     end
     if not Runtime.RJGateWasActive then
