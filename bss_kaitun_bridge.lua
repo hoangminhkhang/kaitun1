@@ -496,5 +496,14 @@ Bridge.Running = true
 ENV.__BSS_KAITUN_BRIDGE = Bridge
 task.spawn(postLoop)
 if Bridge.Http then
-    print("[Kaitun Bridge] started -> " .. CFG.Url .. " | mỗi " .. tostring(CFG.Interval) .. "s")
+    -- log trang thai config de debug: thieu config -> mac dinh 127.0.0.1 (Roblox co the bi chan loopback)
+    if type(cfgIn) == "table" then
+        print("[Kaitun Bridge] config: DA TIM THAY BSS_KAITUN_BRIDGE_CONFIG")
+    else
+        warn("[Kaitun Bridge] config: KHONG thay BSS_KAITUN_BRIDGE_CONFIG - dung mac dinh. Paste config + loadstring trong CUNG 1 lan Execute")
+    end
+    local keyState = (CFG.ApiKey ~= "" and not CFG.ApiKey:find("dán API key", 1, true))
+        and ("OK (" .. #CFG.ApiKey .. " ky tu)") or "CHUA CO"
+    print("[Kaitun Bridge] started -> " .. CFG.Url .. " | moi " .. tostring(CFG.Interval)
+        .. "s | ApiKey: " .. keyState)
 end
