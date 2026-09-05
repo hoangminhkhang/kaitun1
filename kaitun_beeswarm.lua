@@ -3838,6 +3838,10 @@ local function questTreatInfo(objective)
     local taskData = type(objective) == "table" and objective.Task or {}
     local text = string.lower(tostring(taskData.Type or "") .. " " .. tostring(objective and objective.Description or ""))
         :gsub("[^%w]", "")
+        -- Plural fix: "blueberries"/"strawberries" do NOT contain the singular
+        -- pattern ("blueberry"/"strawberry" - y vs i), so without this the
+        -- match fell through to the "Treat" default and fed the WRONG food.
+        :gsub("berries", "berry")
     for _, entry in ipairs(QUEST_TREAT_KEYS) do
         if text:find(entry.Pattern, 1, true) then
             return entry.Key, entry.Label
@@ -3888,25 +3892,12 @@ function Runtime.FeedQuestTreats(objective)
     -- Cached stats only: this runs off-thread while the farm moves; the server
     -- caps the consumption to the real stock, so a stale read is harmless.
     local stats = MaterialSystem.Stats(false)
+    -- Feed EXACTLY the food the objective names: the game counts "Feed 30
+    -- Treats" ONLY for plain Treats (Blueberries/Pineapples/etc. have their
+    -- own objectives) - substituting another food just burns resources.
+    -- Out of the right food -> deficit memory + other work until it arrives.
     local treatKey, treatLabel = questTreatInfo(objective)
     local treats = questTreatStock(treatKey, stats)
-    if treats <= 0 and treatKey == "Treat" then
-        -- Generic "feed X treats" quests count EVERY treat-family food. When
-        -- plain Treats are out, fall back to whatever food is actually in
-        -- stock instead of standing idle waiting for rewards.
-        local bestKey, bestLabel, bestStock
-        for _, entry in ipairs(QUEST_TREAT_KEYS) do
-            if entry.Key ~= "Treat" then
-                local count = questTreatStock(entry.Key, stats)
-                if count > 0 and (not bestStock or count > bestStock) then
-                    bestKey, bestLabel, bestStock = entry.Key, entry.Label, count
-                end
-            end
-        end
-        if bestKey then
-            treatKey, treatLabel, treats = bestKey, bestLabel, bestStock
-        end
-    end
     -- Goal + remaining computed UP FRONT so shortages are remembered exactly.
     local taskText = string.lower(tostring(objective and objective.Description or ""))
     local goal = tonumber(string.match(taskText, "feed%s+(%d+)"))
