@@ -99,14 +99,18 @@ local DEFAULT_CONFIG = {
     ConvertPercent = 1,
     ConvertFinishPercent = 0.01,
     TweenSpeed = 85,
-    TokenTweenSpeed = 145,
+    TokenTweenSpeed = 120,
     SmartMove = true,
-    FieldMoveSpeed = 120,
+    FieldMoveSpeed = 100,
     SmartWalkDistance = 10,
     SmartArrivalDistance = 6,
     SmartFieldWalkTimeout = 12,
     SmartFieldPathfind = true,
     FieldPathfindCooldown = 6,
+    -- Atlas-style corner avoidance: no hopping - when the walk gets near one
+    -- of the field's 4 corners, glide back toward the field center instead.
+    FieldCornerAvoid = true,
+    FieldCornerDistance = 18,
     FarmStepDelay = 0.25,
     DigInterval = 0.22,
     TokenMaxChaseDistance = 115,
@@ -205,7 +209,6 @@ local DEFAULT_CONFIG = {
     SproutFarmSlice = 3,
     SproutMaxFarmSeconds = 180,
     SproutDropWindow = 20,
-    ViciousHoverHeight = 14,
     ViciousRespectHiveLevel = true,
     MaterialFarmSeconds = 10,
     MaterialCombatSeconds = 18,
@@ -1083,7 +1086,47 @@ local function flowerFieldAtPosition(position, padding)
     return nil
 end
 
-local function releaseTweenRoot()
+    local function fieldBoundsOf(field)
+        if not field then return nil, nil end
+        if field:IsA("BasePart") then
+            return field.CFrame, field.Size
+        elseif field:IsA("Model") then
+            local ok, cf, size = pcall(field.GetBoundingBox, field)
+            if ok then return cf, size end
+            return nil, nil
+        end
+        local part = field:FindFirstChildWhichIsA("BasePart", true)
+        if part then return part.CFrame, part.Size end
+        return nil, nil
+    end
+
+    -- Distance (XZ plane) from a position to the NEAREST of the field's 4
+    -- corners: the corners hold the boundary wall + prop piles, so movement
+    -- steers away from them instead of walking into a stall.
+    local function fieldCornerDistance(field, position)
+        local cf, size = fieldBoundsOf(field)
+        if not cf or not size then return nil end
+        local halfX = math.max(1, size.X * 0.5)
+        local halfZ = math.max(1, size.Z * 0.5)
+        local flat = Vector3.new(position.X, 0, position.Z)
+        local best
+        for _, signX in ipairs({1, -1}) do
+            for _, signZ in ipairs({1, -1}) do
+                local world = cf:PointToWorldSpace(Vector3.new(halfX * signX, 0, halfZ * signZ))
+                local d = (Vector3.new(world.X, 0, world.Z) - flat).Magnitude
+                if not best or d < best then best = d end
+            end
+        end
+        return best
+    end
+
+    local function fieldCenterPosition(field, atY)
+        local cf = fieldBoundsOf(field)
+        if not cf then return nil end
+        return Vector3.new(cf.Position.X, atY or cf.Position.Y, cf.Position.Z)
+    end
+
+    local function releaseTweenRoot()
     local root = Runtime.TweenRoot
     if root then
         pcall(function()
@@ -1149,7 +1192,13 @@ local function glideRunnerStep(deltaTime)
             Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
             return
         end
-        local step = math.min(glide.Speed * deltaTime, remaining)
+        -- Ease-out over the last 6 studs: an abrupt constant-speed stop reads
+        -- as the character skating across the ground ("trơn"); decelerating
+        -- into the target looks like a normal player braking to a halt.
+        local easeSpeed = remaining < 6
+            and glide.Speed * (0.35 + 0.65 * remaining / 6)
+            or glide.Speed
+        local step = math.min(easeSpeed * deltaTime, remaining)
         root.CFrame = current:Lerp(target, step / remaining)
         return
     end
@@ -1181,12 +1230,17 @@ end
 -- obstacles and walks its waypoints. Engaged only by the stuck watchdog inside
 -- tweenTo, so free-walking never pays the ComputeAsync cost.
 local function walkFieldPath(humanoid, root, position, generation)
+    local startField = flowerFieldAtPosition(root.Position, Config.TokenFieldPadding)
     local ok, path = pcall(function()
         local pathObject = PathfindingService:CreatePath({
-            AgentRadius = 2.5,
+            -- Generous radius keeps routes OFF hedge edges and tree trunks -
+            -- hugging them re-stalls the moment direct walking resumes.
+            -- AgentCanJump=false: the movement style is hop-free (corner
+            -- avoidance handles obstacles instead of bunny-hopping).
+            AgentRadius = 3,
             AgentHeight = 5,
-            AgentCanJump = true,
-            WaypointSpacing = 4,
+            AgentCanJump = false,
+            WaypointSpacing = 5,
         })
         pathObject:ComputeAsync(root.Position, position)
         return pathObject
@@ -1194,28 +1248,58 @@ local function walkFieldPath(humanoid, root, position, generation)
     if not ok or not path or path.Status ~= Enum.PathStatus.Success then return false end
     local okWaypoints, waypoints = pcall(path.GetWaypoints, path)
     if not okWaypoints or #waypoints < 2 then return false end
-    for index = 2, #waypoints do
-        local waypoint = waypoints[index]
+    -- Keep the route INSIDE the field: a waypoint past the field edge walks
+    -- the character straight into the invisible boundary wall.
+    local usable = {}
+    for _, waypoint in ipairs(waypoints) do
+        if not startField or flowerFieldAtPosition(waypoint.Position, 0) == startField then
+            table.insert(usable, waypoint)
+        end
+    end
+    if #usable < 2 then return false end
+    local index = 2
+    while index <= #usable do
+        local waypoint = usable[index]
+        -- Corner cutting: when a LATER waypoint is already closer than the
+        -- current one, the character drifted past it - skip ahead instead of
+        -- doubling back.
+        while index < #usable
+            and (root.Position - usable[index + 1].Position).Magnitude
+                < (root.Position - waypoint.Position).Magnitude do
+            index += 1
+            waypoint = usable[index]
+        end
         if waypoint.Action == Enum.PathWaypointAction.Jump then
-            humanoid.Jump = true
+            -- Hop-free movement: skip jump waypoints (AgentCanJump=false keeps
+            -- these out of fresh paths anyway).
+            index += 1
+            continue
         end
         humanoid:MoveTo(waypoint.Position)
-        local waypointDeadline = os.clock() + 2.5
+        local waypointStart = os.clock()
+        local waypointDeadline = waypointStart + 2
+        local lastDistance = (root.Position - waypoint.Position).Magnitude
         while Runtime.Running and Runtime.TweenGeneration == generation
             and humanoid.Health > 0 and not Runtime.AvoidingMob
-            and (root.Position - waypoint.Position).Magnitude > 3.5
+            and (root.Position - waypoint.Position).Magnitude > 3
             and os.clock() < waypointDeadline do
+            local distanceNow = (root.Position - waypoint.Position).Magnitude
+            if distanceNow < lastDistance - 0.3 then lastDistance = distanceNow end
+            -- Give up on a stalled waypoint at 1.5s and move to the next one
+            -- (no hop - the corner-avoid glide handles problem spots).
+            if os.clock() - waypointStart > 1.5 then break end
             task.wait(0.05)
         end
         if Runtime.TweenGeneration ~= generation then return false end
         -- A mob engaged mid-path: hand control back to the walk loop (it holds
         -- position while threatened and resumes direct walking afterwards).
         if Runtime.AvoidingMob then return false end
+        index += 1
     end
     return (root.Position - position).Magnitude <= math.max(4, Config.SmartArrivalDistance + 2)
 end
 
-local function tweenTo(target, speed, owner, forceWalk)
+local function tweenTo(target, speed, owner, forceWalk, preferGlide)
     local position
     local targetCFrame
     if typeof(target) == "CFrame" then
@@ -1264,7 +1348,11 @@ local function tweenTo(target, speed, owner, forceWalk)
         Runtime.MovementOwner = nil
         return false, "walk target outside current field"
     end
-    if forceWalk or (Config.SmartMove and (walkingInsideField or distance <= Config.SmartWalkDistance)) then
+    -- preferGlide bypasses the walk branch: the vic-ride targets a point IN
+    -- THE AIR (mob head) whose XZ is inside the field - without this flag the
+    -- walk path would ground-follow the mob instead of gliding onto it.
+    if forceWalk or (not preferGlide and Config.SmartMove
+        and (walkingInsideField or distance <= Config.SmartWalkDistance)) then
         -- Walking needs physics: release a still-anchored root left over from the
         -- previous glide's grace window, otherwise MoveTo silently stalls.
         if Runtime.TweenRoot == root then releaseTweenRoot() end
@@ -1302,6 +1390,52 @@ local function tweenTo(target, speed, owner, forceWalk)
                 Runtime.MobHoldPosition = nil
                 humanoid:MoveTo(position)
             end
+            -- Atlas-style corner avoidance: near one of the field's 4 corners
+            -- the walk glides back to the field center, then resumes straight
+            -- at the destination. Skipped when the DESTINATION is itself near
+            -- that corner (a corner token must stay chaseable).
+            if walkingInsideField and Config.FieldCornerAvoid
+                and not mobPaused and not Runtime.AvoidingMob
+                and os.clock() >= (Runtime.LastCornerAvoidAt or 0) + 3 then
+                local cornerDistance = fieldCornerDistance(startField, root.Position)
+                local targetCornerDistance = fieldCornerDistance(startField, position)
+                if cornerDistance and cornerDistance < (tonumber(Config.FieldCornerDistance) or 18)
+                    and (not targetCornerDistance or targetCornerDistance >= cornerDistance) then
+                    Runtime.LastCornerAvoidAt = os.clock()
+                    local center = fieldCenterPosition(startField, root.Position.Y)
+                    if center then
+                        setStatus("Smart move", "Near field corner - gliding to center")
+                        local cornerStart = os.clock()
+                        if Runtime.TweenRoot ~= root then
+                            releaseTweenRoot()
+                            Runtime.TweenRoot = root
+                            Runtime.TweenRootWasAnchored = root.Anchored
+                            pcall(function() root.Anchored = true end)
+                        end
+                        Runtime.TweenRootReleaseAt = nil
+                        Runtime.Glide = {
+                            CFrame = CFrame.new(center),
+                            Speed = math.max(40, tonumber(Config.TweenSpeed) or 85),
+                            Generation = generation,
+                        }
+                        ensureGlideRunner()
+                        while Runtime.Running and Runtime.TweenGeneration == generation
+                            and Runtime.Glide ~= nil and not Runtime.AvoidingMob
+                            and os.clock() - cornerStart < 4 do
+                            task.wait(0.05)
+                        end
+                        Runtime.Glide = nil
+                        releaseTweenRoot()
+                        -- The detour neither burns the walk timeout nor counts
+                        -- as progress; walking resumes exactly where it left.
+                        walkDeadline += os.clock() - cornerStart
+                        lastWalkTick = os.clock()
+                        lastWalkDistance = (root.Position - position).Magnitude
+                        stuckTicks = 0
+                        humanoid:MoveTo(position)
+                    end
+                end
+            end
             -- Stuck watchdog: walking against a tree/rock/hedge makes no progress.
             -- One pathfinding detour is computed (cooldown-gated), then SmartMove
             -- resumes straight at the target.
@@ -1314,6 +1448,8 @@ local function tweenTo(target, speed, owner, forceWalk)
                 else
                     stuckTicks += 1
                 end
+                -- Hop-free: stalls are handled by the corner-avoid glide and
+                -- the pathfinding detour below - never by bunny-hopping.
                 if stuckTicks >= 24 and os.clock() >= (Runtime.LastFieldPathfindAt or 0)
                     + math.max(2, tonumber(Config.FieldPathfindCooldown) or 6) then
                     Runtime.LastFieldPathfindAt = os.clock()
@@ -5477,9 +5613,12 @@ function MaterialSystem.FarmVicious()
         until not Runtime.Running or Runtime.MeteorPriorityActive or not thorn or os.clock() >= spawnDeadline
     end
 
-    -- Phase 2: hover above the Vicious' head - outside ground-spike range, avoiding damage;
-    -- bees around the player attack it. Re-tween to the vic whenever it drifts too far.
-    local hoverHeight = math.max(6, tonumber(Config.ViciousHoverHeight) or 14)
+    -- Phase 2: RIDE the Vicious - stand ON its head and follow continuously.
+    -- The old design hovered 14 studs up and only re-tweened after a 5-stud
+    -- drift, so the glide anchor expired between moves and the character FELL
+    -- every time the mob moved. Small glide retargets every 0.05s chain inside
+    -- the 0.45s anchor-grace window, keeping the root anchored for the whole
+    -- fight: no falling, and the player tracks the mob wherever it goes.
     local deadline = os.clock() + Config.MaterialCombatSeconds
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local mob = select(1, MaterialSystem.FindVicious())
@@ -5487,14 +5626,31 @@ function MaterialSystem.FarmVicious()
         local mobPosition = objectPosition(mob)
         local _, humanoid, root = getCharacter(1)
         if not humanoid or not root or not mobPosition then break end
-        local hoverTarget = CFrame.new(mobPosition + Vector3.new(0, hoverHeight, 0))
-        if (root.Position - hoverTarget.Position).Magnitude > 5 then
-            tweenTo(hoverTarget, Config.TokenTweenSpeed, "Vicious")
+        -- Feet ON the mob's head: half the model height plus hip height.
+        local mobHeight = 8
+        pcall(function() mobHeight = mob:GetExtentsSize().Y end)
+        local rideTarget = CFrame.new(mobPosition
+            + Vector3.new(0, math.clamp(mobHeight * 0.5, 3, 10) + 3, 0))
+        -- A mid-fight cancelMovement clears MaterialCombat; re-assert so the
+        -- avoid-mob worker never treats the mob we are riding as a threat.
+        Runtime.MaterialCombat = true
+        Runtime.Digging = true
+        if (root.Position - rideTarget.Position).Magnitude > 2 then
+            tweenTo(rideTarget, Config.TokenTweenSpeed, "Vicious", nil, true)
         else
+            -- Already on the head: keep the anchor alive by refreshing the
+            -- grace deadline - otherwise a stationary mob lets the 0.45s
+            -- glide-grace expire and the character drops off mid-fight.
             humanoid:Move(Vector3.zero, false)
+            Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
         end
-        remoteCall("ToolCollect")
-        task.wait(0.2)
+        -- ToolCollect stays rate-limited: the ride loop ticks at 0.05s but the
+        -- remote only needs the usual dig cadence.
+        if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
+            Runtime.LastVicToolCollect = os.clock()
+            remoteCall("ToolCollect")
+        end
+        task.wait(0.05)
     end
     sweepTokens(3, "ViciousDrop")
     Runtime.MaterialCombat = false
@@ -6336,7 +6492,18 @@ local function applyLowGraphics(enabled)
         elseif object:IsA("SpecialMesh") then
             if Config.FixLagRemoveTextures and not playerVisual then object.TextureId = "" end
         elseif object:IsA("SurfaceAppearance") then
-            if Config.FixLagRemoveTextures and not playerVisual then object:Destroy() end
+            -- Destroy()ing a SurfaceAppearance makes the engine print
+            -- "tried to set the parent ... to NULL" per object (parent chain
+            -- is protected). Blank the map references instead: same PBR
+            -- savings, zero warnings.
+            if Config.FixLagRemoveTextures and not playerVisual then
+                pcall(function()
+                    object.ColorMap = ""
+                    object.NormalMap = ""
+                    object.MetalnessMap = ""
+                    object.RoughnessMap = ""
+                end)
+            end
         elseif object:IsA("Decal") or object:IsA("Texture") then
             if hidden or (Config.FixLagRemoveTextures and not playerVisual) then object.Transparency = 1 end
         elseif object:IsA("ParticleEmitter") then
