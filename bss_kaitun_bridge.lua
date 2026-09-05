@@ -92,6 +92,13 @@ local CFG = {
     ApiKey = tostring(cfgIn.ApiKey or ""),
     Interval = math.max(1, tonumber(cfgIn.Interval) or 3),
 }
+-- Tu them duong dan ingest neu user chi dan URL goc (http://127.0.0.1:8787)
+local ingestPath = "/api/ingest"
+if #CFG.Url >= #ingestPath and CFG.Url:sub(-#ingestPath) ~= ingestPath then
+    if CFG.Url:sub(-1) == "/" then CFG.Url = CFG.Url:sub(1, -2) end
+    CFG.Url = CFG.Url .. ingestPath
+    warn("[Kaitun Bridge] Url thieu duong dan - tu dung: " .. CFG.Url)
+end
 if CFG.ApiKey == "" or CFG.ApiKey:find("dán API key", 1, true) then
     warn("[Kaitun Bridge] ApiKey trống hoặc placeholder - vẫn gửi, nếu server trả 401 hãy dán ApiKey vào BSS_KAITUN_BRIDGE_CONFIG")
 end
