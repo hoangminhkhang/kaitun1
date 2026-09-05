@@ -213,23 +213,25 @@ local DEFAULT_CONFIG = {
     MaterialPlanterHarvestPercent = 0.98,
     MaterialPlanterActionCooldown = 5,
     PlanterHarvestPercent = 0.98,
-    PlanterRescanInterval = 60,
-    -- Bees = hive size needed to enter the field; the spread covers all five nectar types.
+    PlanterRescanInterval = 30,
+    -- Nectar priority order only; entry gates come from the game's own
+    -- FIELD_REQUIREMENTS table, and the spread covers all five nectar types.
     PlanterFieldPlan = {
-        {Field = "Bamboo Field", Bees = 0},
-        {Field = "Blue Flower Field", Bees = 0},
-        {Field = "Sunflower Field", Bees = 0},
-        {Field = "Clover Field", Bees = 0},
-        {Field = "Spider Field", Bees = 0},
-        {Field = "Strawberry Field", Bees = 5},
-        {Field = "Pineapple Patch", Bees = 10},
-        {Field = "Pumpkin Patch", Bees = 10},
-        {Field = "Pine Tree Forest", Bees = 15},
-        {Field = "Cactus Field", Bees = 15},
-        {Field = "Rose Field", Bees = 20},
-        {Field = "Mountain Top Field", Bees = 25},
-        {Field = "Coconut Field", Bees = 25},
-        {Field = "Pepper Patch", Bees = 35},
+        "Sunflower Field",
+        "Blue Flower Field",
+        "Clover Field",
+        "Bamboo Field",
+        "Spider Field",
+        "Strawberry Field",
+        "Pineapple Patch",
+        "Stump Field",
+        "Rose Field",
+        "Pine Tree Forest",
+        "Pumpkin Patch",
+        "Cactus Field",
+        "Mountain Top Field",
+        "Coconut Field",
+        "Pepper Patch",
     },
     NectarCondenserCooldown = 10,
     BlenderCheckInterval = 2,
@@ -968,8 +970,19 @@ function MaterialSystem.Stats(force)
 
     -- ClientStatCache is delayed or blocked on several mobile executors. This
     -- server snapshot is also the authoritative source for BlenderState.
+    -- Single-flight: concurrent workers each firing RetrievePlayerStats can
+    -- land out of order and overwrite a newer snapshot with an older one.
     if force or not Runtime.MaterialStats or type(Runtime.MaterialStats.Eggs) ~= "table" then
+        if Runtime.ServerStatsInFlight then
+            local deadline = os.clock() + (tonumber(Config.StatsRefreshTimeout) or 5)
+            while Runtime.Running and Runtime.ServerStatsInFlight and os.clock() < deadline do
+                task.wait(0.05)
+            end
+            return Runtime.MaterialStats or stats or {}
+        end
+        Runtime.ServerStatsInFlight = true
         local ok, serverStats = remoteCall("RetrievePlayerStats")
+        Runtime.ServerStatsInFlight = false
         if ok and type(serverStats) == "table" then
             Runtime.MaterialStats = serverStats
             Runtime.LastStats = serverStats
@@ -1155,7 +1168,13 @@ end
 
 local function ensureGlideRunner()
     if Runtime.GlideRunnerConnection then return end
-    Runtime.GlideRunnerConnection = connect(RunService.Heartbeat, glideRunnerStep)
+    -- Deliberately NOT via connect(): the runner disconnects and reconnects on
+    -- every idle/grace cycle, and each register would leak a dead connection
+    -- into Runtime.Connections (unbounded growth over 24/7 sessions).
+    local ok, connection = pcall(function()
+        return RunService.Heartbeat:Connect(glideRunnerStep)
+    end)
+    if ok and connection then Runtime.GlideRunnerConnection = connection end
 end
 
 -- Field pathfinding (SmartMove stuck recovery): computes ONE route around
@@ -1401,6 +1420,11 @@ local function cancelMovement()
     Runtime.SproutPending = false
     Runtime.SproutMarker = false
     Runtime.SproutField = ""
+    -- FarmVicious has no error cleanup on the FarmSource path; a throw leaving
+    -- ViciousBusy set would disable vicious farming until re-execution.
+    Runtime.ViciousBusy = false
+    -- Same for the two planter movers (main loop + planter worker share it).
+    Runtime.PlanterBusy = false
     restoreFieldMoveSpeed()
     releaseTweenRoot()
 end
@@ -2159,7 +2183,13 @@ end
 
 local function hiveCellOccupied(x, y)
     if workspaceHiveCellOccupied(x, y) then return true end
-    if Runtime.ReservedHiveCells[hiveCellKey(x, y)] then return true end
+    -- Reservations are a short-lived bridge until the hive replicates; they
+    -- expire so a false-positive hatch cannot shrink the usable cells forever.
+    local reservedUntil = Runtime.ReservedHiveCells[hiveCellKey(x, y)]
+    if reservedUntil then
+        if os.clock() < reservedUntil then return true end
+        Runtime.ReservedHiveCells[hiveCellKey(x, y)] = nil
+    end
     local cell = hiveCellData(x, y)
     return type(cell) == "table" and beeTypePresent(cell.Type or cell.BeeType)
 end
@@ -2177,7 +2207,7 @@ local function waitForHatchConfirmation(beforeBees, x, y, timeout)
 end
 
 local function markBeeHatched(x, y)
-    Runtime.ReservedHiveCells[hiveCellKey(x, y)] = true
+    Runtime.ReservedHiveCells[hiveCellKey(x, y)] = os.clock() + 120
     consumeBasicEgg()
     Runtime.WaitingForEggFunds = false
     -- The next main-loop iteration may skip its blocking stats refresh: the
@@ -2431,7 +2461,7 @@ function Runtime.HatchNextEventBee()
                     local accepted = hatchResponseAccepted(ok, amount, remaining, success)
                     if (ok and success == true and type(honeycomb) == "table")
                         or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 0.8 or 0.6) then
-                        Runtime.ReservedHiveCells[key] = true
+                        Runtime.ReservedHiveCells[key] = os.clock() + 120
                         Runtime.EventBeePurchased[entry.Type] = true
                         Runtime.EventBeesHatched += 1
                         Runtime.SkipStatsBlockUntil = os.clock() + 2
@@ -2547,13 +2577,15 @@ function Runtime.ClaimWealthClock()
 
     Runtime.LastWealthClockAttempt = now
     setStatus("Wealth Clock", "Auto claim reward every hour")
-    -- Walk to the clock like a real player (quest-NPC style), then claim.
+    -- Walk to the clock like a real player (quest-NPC style), then claim -
+    -- but NEVER while another mover owns the character (the farm step would
+    -- supersede the walk within one burst and the remote would fire far away).
     -- Falls back to the pure remote claim if the toy is not replicated.
     local clockToy = workspace:FindFirstChild("Toys")
     clockToy = clockToy and clockToy:FindFirstChild("Wealth Clock")
     local anchor = clockToy and (clockToy:FindFirstChild("Platform", true) or clockToy)
     local clockPosition = anchor and objectPosition(anchor)
-    if clockPosition and not Runtime.MeteorPriorityActive then
+    if clockPosition and not Runtime.MeteorPriorityActive and Runtime.MovementOwner == nil then
         setStatus("Wealth Clock", "Walking to the clock")
         tweenTo(CFrame.new(clockPosition + Vector3.new(0, 3, 0)), Config.TweenSpeed, "WealthClock")
         task.wait(0.3)
@@ -2564,18 +2596,20 @@ function Runtime.ClaimWealthClock()
     end
     local ok = remoteCall("ToyEvent", "Wealth Clock")
     if ok then
-        Runtime.WealthClockClaims += 1
-        Runtime.NextWealthClockCheck = now + interval
         task.delay(2, function()
-            -- Confirm via ToyTimes so the hourly claim is visible in the log.
+            -- The claim is counted ONLY when ToyTimes confirms it: a fired
+            -- remote says nothing about whether the server accepted it (the
+            -- character may have been pulled away before the distance check).
             local fresh = getStats(true)
             local toyTimes = type(fresh) == "table" and fresh.ToyTimes or nil
             if type(toyTimes) == "table" and tonumber(toyTimes["Wealth Clock"]) then
+                Runtime.WealthClockClaims += 1
+                Runtime.NextWealthClockCheck = os.clock() + interval
                 warn(string.format("[BSS Kaitun] Wealth Clock claimed (%d total)",
                     Runtime.WealthClockClaims))
             else
-                warn("[BSS Kaitun] Wealth Clock claim unconfirmed - retrying in 90s")
-                Runtime.NextWealthClockCheck = os.clock() + 90
+                warn("[BSS Kaitun] Wealth Clock claim unconfirmed - retrying in 30s")
+                Runtime.NextWealthClockCheck = os.clock() + 30
             end
         end)
         task.defer(function() getStats(true) end)
@@ -3088,8 +3122,8 @@ function Runtime.ClaimFreeToys()
                                         toyName, busy, cooldown / 60))
                                 end
                             else
-                                Runtime.ToyRetryAt[toyName] = os.clock() + 90
-                                warn(string.format("[BSS Kaitun] %s busy on server - retrying in 90s (%d/3)",
+                                Runtime.ToyRetryAt[toyName] = os.clock() + 45
+                                warn(string.format("[BSS Kaitun] %s busy on server - retrying in 45s (%d/3)",
                                     toyName, busy))
                             end
                         end
@@ -3680,7 +3714,9 @@ local function maintainBearQuests()
             elseif npcName == "Science Bear" then
                 local confirmed = Runtime.WaitForScienceQuest(previousQuest)
                 if not confirmed then
-                    Runtime.LastQuestCheck = -math.huge
+                    -- Bounded backoff: forcing an immediate full rescan here
+                    -- turned a failed replication into a hot NPC-interact loop.
+                    Runtime.LastQuestCheck = os.clock()
                     Runtime.NPCModuleError = "Science quest not replicated - will rescan"
                     setStatus("Waiting for Science quest", Runtime.NPCModuleError)
                 end
@@ -3696,6 +3732,12 @@ end
 -- and Unlock Blue HQ): eggType = "Treat" or "RoyalJelly". Jelly only targets
 -- non-gifted common bees so event/mythic bees stay untouched.
 local function hiveBeeCells()
+    -- Short shared TTL: the treat/quest/RJ/star-treat workers all scan the
+    -- hive inside the same instant; a 0.5s cache dedupes those repeats without
+    -- serving stale data (cell state changes are re-read live where it matters).
+    local now = os.clock()
+    local cached = Runtime.HiveCellsCache
+    if cached and now - cached.At < 0.5 then return cached.Cells end
     local reference = Player:FindFirstChild("Honeycomb")
     local hive = reference and reference:IsA("ObjectValue") and reference.Value
     local cells = hive and hive:FindFirstChild("Cells")
@@ -3716,6 +3758,7 @@ local function hiveBeeCells()
             })
         end
     end
+    Runtime.HiveCellsCache = {At = now, Cells = result}
     return result
 end
 
@@ -3823,6 +3866,13 @@ local function questTreatStock(key, stats)
     return math.floor(found or 0)
 end
 
+-- Bee-leveling treats share the quest-feed reader: on live builds the count
+-- lives in stats.Treats, not stats.Eggs (Amount("Treat") reads Eggs only and
+-- would always report 0 -> endless buying, never feeding).
+local function treatStock(stats)
+    return questTreatStock("Treat", stats)
+end
+
 -- Out-of-stock quest tasks stand down for a while (go farm/do other work)
 -- but are REMEMBERED: after the cooldown they retry automatically, so rewards
 -- or sprout drops resume the feed as soon as food appears.
@@ -3830,7 +3880,7 @@ local function markQuestTaskCooldown(objective, seconds)
     Runtime.QuestFeedRetryAt = Runtime.QuestFeedRetryAt or {}
     Runtime.QuestFeedRetryAt[tostring(objective and objective.Quest)
         .. "|" .. tostring(objective and objective.Description)] = os.clock()
-        + (seconds or 90)
+        + (seconds or 45)
 end
 
 function Runtime.FeedQuestTreats(objective)
@@ -3868,7 +3918,7 @@ function Runtime.FeedQuestTreats(objective)
     Runtime.QuestFeedDeficit = Runtime.QuestFeedDeficit or {}
     local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
     if treats <= 0 then
-        markQuestTaskCooldown(objective, 90)
+        markQuestTaskCooldown(objective, 45)
         if remaining then
             -- Remember EXACTLY how many are missing: the worker auto-feeds the
             -- moment this much food arrives from farming.
@@ -3877,7 +3927,7 @@ function Runtime.FeedQuestTreats(objective)
             setStatusBackground("Quest feed", string.format(
                 "Missing %d %s - farming, auto-feed when it arrives", remaining, treatLabel))
         else
-            setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 90s", treatLabel))
+            setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 45s", treatLabel))
         end
         return false
     end
@@ -3916,8 +3966,8 @@ function Runtime.UseQuestRoyalJelly(objective)
     while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
         local stats = MaterialSystem.Stats(false) -- cached; server caps real use
         if math.floor(MaterialSystem.Amount("RoyalJelly", stats)) <= 0 then
-            markQuestTaskCooldown(objective, 90)
-            setStatus("Quest jelly", "Out of Royal Jelly - doing other work, retry in 90s")
+            markQuestTaskCooldown(objective, 45)
+            setStatus("Quest jelly", "Out of Royal Jelly - doing other work, retry in 45s")
             break
         end
         local bee = Runtime.FindQuestTargetBee(true)
@@ -3930,6 +3980,11 @@ function Runtime.UseQuestRoyalJelly(objective)
         local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
             "ConstructHiveCellFromEgg", bee.X, bee.Y, "RoyalJelly", 1)
         applyHatchResponse("RoyalJelly", remaining, success, honeycomb, discoveredBees, eggUses)
+        if ok then
+            -- Shared pool bookkeeping: keep the RJ farmer/upgrader counters in
+            -- sync with quest consumption (bounded drift otherwise).
+            Runtime.RJStock = math.max(0, Runtime.RJStock - 1)
+        end
         used += 1
         task.wait(0.3)
         if not Runtime.QuestTaskStillIncomplete(objective) then break end
@@ -4017,16 +4072,24 @@ function Runtime.BuyTreatsForCycle()
     -- items) to spend the budget fast instead of trickling one by one.
     local affordable = math.floor(remainingHoney / unitCost)
     local chunk = math.min(affordable, math.max(1, math.floor(tonumber(Config.TreatBuyChunk) or 100)))
+    -- Wallet gate: with honey below the chunk price the server just denies the
+    -- purchase and this loop would spam ~11 denied remotes every pass.
+    local honeyNow = liveCoreValue("Honey")
+    if honeyNow and honeyNow < chunk * unitCost then
+        setStatus("Treat bee", string.format("Honey %s below %s treat price - farming",
+            formatNumber(honeyNow), formatNumber(chunk * unitCost)))
+        return 0
+    end
     setStatus("Treat bee", string.format("Buy %d treats | budget %s/%s honey",
         chunk, formatNumber(boughtHoney), formatNumber(budget)))
-    local treatsBefore = math.floor(MaterialSystem.Amount("Treat"))
+    local treatsBefore = treatStock(MaterialSystem.Stats(false))
     local ok, result = remoteCall("ItemPackageEvent", "Purchase",
         {Category = "Eggs", Type = "Treat", Amount = chunk})
     task.wait(0.5)
     -- Blocking refresh: the purchase must be confirmed by the REAL inventory
     -- delta, otherwise a denied chunk still burns the hourly budget.
     MaterialSystem.Stats(true)
-    local treatsAfter = math.floor(MaterialSystem.Amount("Treat"))
+    local treatsAfter = treatStock(MaterialSystem.Stats(false))
     local gained = treatsAfter - treatsBefore
     if gained > 0 then
         Runtime.TreatCycleBoughtHoney = boughtHoney + gained * unitCost
@@ -4044,7 +4107,7 @@ function Runtime.BuyTreatsForCycle()
     end
     if bought > 0 then
         MaterialSystem.Stats(true)
-        local verified = math.floor(MaterialSystem.Amount("Treat")) - treatsAfter
+        local verified = treatStock(MaterialSystem.Stats(false)) - treatsAfter
         if verified > 0 then
             Runtime.TreatCycleBoughtHoney = boughtHoney + verified * unitCost
             Runtime.PurchaseRetryAt[purchaseKey] = nil
@@ -4109,7 +4172,7 @@ function Runtime.TreatLowestBee()
     -- Pending quest feed outranks bee leveling: never dip into the treats the
     -- quest worker is still waiting for.
     local reserve = questTreatReserve("Treat")
-    local treats = math.floor(MaterialSystem.Amount("Treat"))
+    local treats = treatStock(MaterialSystem.Stats(false))
     if reserve > 0 and treats <= reserve then
         Runtime.TreatBusy = false
         return false
@@ -4467,8 +4530,9 @@ local function questWork(seconds)
     -- Blocked on a kill-mob cooldown (typical Polar Bear flow): camp Pine Tree
     -- Forest and farm while waiting; FarmQuestMob grabs the mob the moment its
     -- spawner is ready, then maintainBearQuests turns the quest in at the bear.
-    -- Only reached when there is no other quest plan left to farm.
-    if Config.AutoQuestMobs and fieldUnlocked("Pine Tree Forest") then
+    -- Only reached when there is NO other quest plan left (a lower-rank pollen
+    -- plan outranks camping, otherwise it starves for the whole mob cooldown).
+    if not plan and Config.AutoQuestMobs and fieldUnlocked("Pine Tree Forest") then
         for _, objective in ipairs(objectives) do
             if objective.Task and tostring(objective.Task.Type) == "Defeat Monsters" then
                 local campField = findField("Pine Tree Forest")
@@ -5556,10 +5620,14 @@ function MaterialSystem.PlanterData()
 end
 
 function MaterialSystem.PlanterProgress(data)
+    -- nil = growth unreadable (Gui not replicated yet): callers must skip the
+    -- planter instead of treating it as 0% (which wedged the slot forever).
+    local gui = data and data.Gui
+    if not (gui and gui.Bar and gui.Bar.FillBar) then return nil end
     local ok, value = pcall(function()
-        return data.Gui.Bar.FillBar.Size.X.Scale / math.max(0.001, data.Gui.Bar.Size.X.Scale)
+        return gui.Bar.FillBar.Size.X.Scale / math.max(0.001, gui.Bar.Size.X.Scale)
     end)
-    return ok and math.clamp(tonumber(value) or 0, 0, 1) or 0
+    return ok and math.clamp(tonumber(value) or 0, 0, 1) or nil
 end
 
 function MaterialSystem.PlanterName(data)
@@ -5598,16 +5666,22 @@ function MaterialSystem.PlanterWork(material, field, stats)
     if material ~= "Honeysuckle" and material ~= "ComfortingVial" and material ~= "RefreshingVial" then
         return false
     end
+    -- Shared mover guard with the Auto Planter worker: two tweening movers
+    -- would supersede each other and fire remotes from the wrong field.
+    if Runtime.PlanterBusy then return false end
 
     local active = MaterialSystem.PlanterData()
     for _, data in ipairs(active) do
         local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
+        local progress = MaterialSystem.PlanterProgress(data)
         local planterField = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
-        if planterField == field and MaterialSystem.PlanterProgress(data) >= Config.MaterialPlanterHarvestPercent then
+        if planterField == field and progress and progress >= Config.MaterialPlanterHarvestPercent then
             Runtime.LastMaterialPlanterAction = os.clock()
+            Runtime.PlanterBusy = true
             setStatus("Farm material", "Harvest " .. MaterialSystem.PlanterName(data) .. " @ " .. field.Name)
             tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "MaterialPlanter")
             local ok = remoteCall("PlanterModelCollect", data.ActorID)
+            Runtime.PlanterBusy = false
             if ok then
                 task.wait(1)
                 sweepTokens(3, "PlanterDrop")
@@ -5621,10 +5695,13 @@ function MaterialSystem.PlanterWork(material, field, stats)
     local point = planterName and fieldPoint(field) or nil
     if not planterName or not point then return false end
     Runtime.LastMaterialPlanterAction = os.clock()
+    Runtime.PlanterBusy = true
     setStatus("Farm material", "Plant " .. planterName .. " @ " .. field.Name)
     tweenTo(CFrame.new(point), Config.TweenSpeed, "MaterialPlanter")
     task.wait(0.35)
-    return select(1, remoteCall("PlayerActivesCommand", {Name = planterName}))
+    local okPlant = select(1, remoteCall("PlayerActivesCommand", {Name = planterName}))
+    Runtime.PlanterBusy = false
+    return okPlant
 end
 
 function MaterialSystem.GuiVisible(object)
@@ -6771,39 +6848,40 @@ local function rjBuy()
     -- before/after read undercounts and silently blows the budget.
     getStats(true)
     local beforeRJ = rawEggCount("RoyalJelly")
-    local beforeHoney = liveCoreValue("Honey") or 0
-    local fired = false
+    local totalBought, totalSpent = 0, 0
     for _, amount in ipairs({tonumber(Config.RJBuyChunk) or 100, 10, 1}) do
+        local roundHoney = liveCoreValue("Honey") or 0
         local ok = remoteCall("ItemPackageEvent", "Purchase",
             {Category = package.Category, Type = package.Type, Amount = amount})
-        if ok then
-            fired = true
+        if not ok then
+            task.wait(0.2)
+            continue
+        end
+        task.wait(0.6)
+        getStats(true)
+        local bought = math.max(0, rawEggCount("RoyalJelly") - beforeRJ - totalBought)
+        local measured = math.max(0, roundHoney - (liveCoreValue("Honey") or roundHoney))
+        if bought > 0 then
+            if measured > 0 then
+                -- Learn the real unit cost whenever the window shows a net drop.
+                Runtime.RJUnitCost = measured / bought
+            end
+            totalBought += bought
+            totalSpent += math.max(measured, bought * (Runtime.RJUnitCost or 0))
+            -- Confirmed: stop climbing down the ladder.
             break
         end
-        task.wait(0.2)
+        -- Fire accepted but stock did not move: the server denied this amount
+        -- (usually honey < chunk price) - fall through to the next smaller one.
     end
-    if not fired then
-        setStatus("RJ Gifted", "Purchase failed - retrying later")
-        Runtime.RJNextBuy = os.clock() + 30
-        return
-    end
-    task.wait(0.6)
-    getStats(true)
-    local bought = math.max(0, rawEggCount("RoyalJelly") - beforeRJ)
-    local afterHoney = liveCoreValue("Honey") or beforeHoney
-    local measured = math.max(0, beforeHoney - afterHoney)
-    if bought > 0 then
-        if measured > 0 then
-            -- Learn the real unit cost whenever the window shows a net drop.
-            Runtime.RJUnitCost = measured / bought
-        end
-        Runtime.RJHoneySpent += math.max(measured, bought * (Runtime.RJUnitCost or 0))
-        Runtime.RJStock += bought
+    if totalBought > 0 then
+        Runtime.RJHoneySpent += totalSpent
+        Runtime.RJStock += totalBought
         setStatus("RJ Gifted", string.format("Bought %d RJ | budget %s/%s",
-            bought, formatNumber(Runtime.RJHoneySpent), formatNumber(Config.RJShopHoneyBudget or 5e9)))
+            totalBought, formatNumber(Runtime.RJHoneySpent), formatNumber(Config.RJShopHoneyBudget or 5e9)))
     else
         setStatus("RJ Gifted", "Purchase not confirmed - retrying later")
-        Runtime.RJNextBuy = os.clock() + 30
+        Runtime.RJNextBuy = os.clock() + 15
     end
 end
 
@@ -6904,8 +6982,9 @@ function Runtime.RJRollStep()
     local ok = remoteCall("ConstructHiveCellFromEgg", sacrifice.X, sacrifice.Y, "RoyalJelly", 1)
     if not ok then
         -- Fire rejected: do not burn the counter on a phantom roll - re-sync
-        -- from the live inventory and back off briefly.
-        Runtime.RJStock = rawEggCount("RoyalJelly")
+        -- from the live inventory and back off briefly. min() keeps any
+        -- concurrent decrement from another worker from being clobbered.
+        Runtime.RJStock = math.min(Runtime.RJStock, rawEggCount("RoyalJelly"))
         Runtime.RJNextBuy = os.clock() + 10
         task.wait(1)
         return "wait"
@@ -6944,9 +7023,10 @@ function Runtime.RJRollStep()
         elseif Runtime.RJRollsSinceSync >= (tonumber(Config.RJStockResyncEvery) or 25) then
             Runtime.RJRollsSinceSync = 0
             -- Off-thread refresh; the defer writes the corrected count back.
+            -- min() so a decrement landing during the yield window survives.
             task.defer(function()
                 getStats(true)
-                Runtime.RJStock = rawEggCount("RoyalJelly")
+                Runtime.RJStock = math.min(Runtime.RJStock, rawEggCount("RoyalJelly"))
             end)
         end
     end
@@ -7023,8 +7103,8 @@ local function buyStarTreat()
             return true
         end
     end
-    Runtime.StarTreatRetryAt = os.clock() + 60
-    setStatus("Star Treat", string.format("Star Treat purchase failed (%s/%s) - retry in 60s",
+    Runtime.StarTreatRetryAt = os.clock() + 30
+    setStatus("Star Treat", string.format("Star Treat purchase failed (%s/%s) - retry in 30s",
         tostring(package.Category), tostring(package.Type)))
     return false
 end
@@ -7062,7 +7142,7 @@ function Runtime.StarTreatStep()
         end
         return "wait"
     end
-    local cells = hiveBeeCells()
+    local cells = hiveBeeCells() -- one scan shared by pending check + gifting loop
     for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
         for _, cell in ipairs(cells) do
@@ -7071,8 +7151,17 @@ function Runtime.StarTreatStep()
                     cell.Type, cell.X, cell.Y, starTreats))
                 local ok = remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "StarTreat", 1)
                 if ok then
-                    Runtime.StarTreatsUsed += 1
                     task.wait(1)
+                    -- Confirm consumption by the REAL stock delta: a fired
+                    -- RemoteEvent says nothing about server-side acceptance,
+                    -- and an unconfirmed loop would spam every 3s pass.
+                    local fresh = deepFindNumber(getStats(true), "StarTreat") or 0
+                    if fresh >= starTreats then
+                        Runtime.StarTreatRetryAt = os.clock() + 30
+                        setStatus("Star Treat", "StarTreat use not confirmed - retry in 30s")
+                        return "unconfirmed"
+                    end
+                    Runtime.StarTreatsUsed += 1
                     -- Direct instance read for the gifted confirmation.
                     if cell.Instance and cell.Instance.Parent
                         and cell.Instance:FindFirstChild("GiftedCell") then
@@ -7080,10 +7169,10 @@ function Runtime.StarTreatStep()
                     end
                     return "used"
                 end
-                -- Wrong remote signature or server refusal: back off so the
+                -- Wrong remote signature or transport failure: back off so the
                 -- worker never spams rejected calls.
-                Runtime.StarTreatRetryAt = os.clock() + 60
-                setStatus("Star Treat", "Remote rejected StarTreat - retry in 60s")
+                Runtime.StarTreatRetryAt = os.clock() + 30
+                setStatus("Star Treat", "Remote rejected StarTreat - retry in 30s")
                 return "reject"
             end
         end
@@ -7110,11 +7199,13 @@ function Runtime.RJUpgradeBasicStep()
     if Runtime.RJStock <= reserve or (Runtime.RJUpgradeSyncs or 0) >= 20 then
         Runtime.RJUpgradeSyncs = 0
         getStats(true)
-        Runtime.RJStock = rawEggCount("RoyalJelly")
+        -- min() keeps concurrent farmer/quest decrements during the blocking
+        -- refresh from being rolled back into phantom stock.
+        Runtime.RJStock = math.min(Runtime.RJStock, rawEggCount("RoyalJelly"))
     end
     if Runtime.RJStock <= reserve then
         -- Not enough above the quest reserve: stand down, remember, re-check.
-        Runtime.RJUpgradeRetryAt = os.clock() + 60
+        Runtime.RJUpgradeRetryAt = os.clock() + 30
         return
     end
     for _, cell in ipairs(hiveBeeCells()) do
@@ -7199,6 +7290,10 @@ task.spawn(function()
                     for key in pairs(deficitMap) do
                         if not seen[key] then deficitMap[key] = nil end
                     end
+                    -- Same prune for retry cooldowns of turned-in quests.
+                    for key in pairs(retryAt) do
+                        if not seen[key] then retryAt[key] = nil end
+                    end
                     local now = os.clock()
                     for _, objective in ipairs(objectives) do
                         local kind = Runtime.QuestTaskKind(objective)
@@ -7214,9 +7309,12 @@ task.spawn(function()
                             end
                         elseif deficitMap[taskKey] then
                             -- Food arrived while farming: clear the cooldown so the
-                            -- next pass feeds exactly the missing amount.
+                            -- next pass feeds exactly the missing amount. FRESH
+                            -- stats read (single-flight + worker cadence caps the
+                            -- cost): a stale cache used to keep the unlock blind
+                            -- for seconds after the food actually landed.
                             local deficit = deficitMap[taskKey]
-                            if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(false)) > 0 then
+                            if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(true)) > 0 then
                                 Runtime.QuestFeedRetryAt[taskKey] = nil
                             end
                         end
@@ -7264,13 +7362,16 @@ end)
 -- inventory after harvest (they are permanent items).
 function Runtime.PlanterCycleStep()
     if not Config.Enabled or Runtime.MeteorPriorityActive then return "yield" end
+    if Runtime.PlanterBusy then return "yield" end -- material planter mover owns movement
     local stats = MaterialSystem.Stats(false)
     local active = MaterialSystem.PlanterData()
 
-    -- 1) Harvest anything at (or effectively at) full growth.
+    -- 1) Harvest anything at (or effectively at) full growth. Unreadable
+    -- growth (nil progress) is skipped: a Gui-less planter must not count as
+    -- 0% forever nor wedge the slot cap below.
     for _, data in ipairs(active) do
         local progress = MaterialSystem.PlanterProgress(data)
-        if progress >= (tonumber(Config.PlanterHarvestPercent) or 0.98) then
+        if progress and progress >= (tonumber(Config.PlanterHarvestPercent) or 0.98) then
             local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
             local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
             Runtime.PlanterBusy = true
@@ -7292,39 +7393,57 @@ function Runtime.PlanterCycleStep()
         end
     end
 
-    -- 2) Fill the free slots: walk the plan in order, plant into the first
-    -- field that is free and unlocked for this hive size.
-    if #active >= 3 then return "full" end
+    -- 2) Fill the free slots: walk the plan in order; field unlock comes from
+    -- the game's own FIELD_REQUIREMENTS (the plan's order is nectar priority,
+    -- not bee gates). A rejected plant falls through to the NEXT candidate
+    -- field instead of parking the whole plan on one head-of-line failure.
+    local usable = 0
     local occupied = {}
     for _, data in ipairs(active) do
         local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
         local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
         if field then occupied[field.Name] = true end
+        if MaterialSystem.PlanterProgress(data) ~= nil then usable += 1 end
     end
-    local beeCount = #hiveBeeCells()
-    local zones = workspace:FindFirstChild("FlowerZones")
+    if usable >= 3 then return "full" end
+    local attempts, failed = 0, false
     for _, entry in ipairs(Config.PlanterFieldPlan or {}) do
         local fieldName = type(entry) == "table" and tostring(entry.Field) or tostring(entry)
-        local required = type(entry) == "table" and (tonumber(entry.Bees) or 0) or 0
-        local field = zones and zones:FindFirstChild(fieldName) or nil
-        local point = field and not occupied[fieldName] and beeCount >= required
-            and fieldPoint(field) or nil
-        local planterName = point and MaterialSystem.ChoosePlanter(stats, active) or nil
-        if point and planterName then
-            Runtime.PlanterBusy = true
-            setStatus("Planter", string.format("Plant %s @ %s (%d/3 active)",
-                planterName, fieldName, #active + 1))
-            tweenTo(CFrame.new(point), Config.TweenSpeed, "Planter")
-            task.wait(0.35)
-            local ok = remoteCall("PlayerActivesCommand", {Name = planterName})
-            Runtime.PlanterBusy = false
-            if ok then
-                task.wait(1)
-                return "planted"
+        if not occupied[fieldName] and fieldUnlocked(fieldName) then
+            local field = findField(fieldName)
+            local point = field and fieldPoint(field) or nil
+            local planterName = point and MaterialSystem.ChoosePlanter(stats, active) or nil
+            if point and planterName then
+                attempts += 1
+                Runtime.PlanterBusy = true
+                setStatus("Planter", string.format("Plant %s @ %s (%d/3 active)",
+                    planterName, fieldName, math.min(usable + 1, 3)))
+                tweenTo(CFrame.new(point), Config.TweenSpeed, "Planter")
+                task.wait(0.35)
+                -- The material mover may have planted here while we walked:
+                -- re-verify the field is still free before firing.
+                local stillFree = true
+                for _, data in ipairs(MaterialSystem.PlanterData()) do
+                    local pos = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
+                    local fld = pos and flowerFieldAtPosition(pos + Vector3.new(0, 4, 0), 8) or nil
+                    if fld and fld.Name == fieldName then stillFree = false break end
+                end
+                if stillFree then
+                    local ok = remoteCall("PlayerActivesCommand", {Name = planterName})
+                    Runtime.PlanterBusy = false
+                    if ok then
+                        task.wait(1)
+                        return "planted"
+                    end
+                    failed = true
+                    if attempts >= 2 then break end
+                    continue
+                end
+                Runtime.PlanterBusy = false
             end
-            return "plant-failed"
         end
     end
+    if failed then return "plant-failed" end
     return "idle"
 end
 
@@ -7339,13 +7458,13 @@ task.spawn(function()
                 -- The step may have died between setting and clearing its busy
                 -- flag; clear it here or the worker blocks forever.
                 Runtime.PlanterBusy = false
-                Runtime.PlanterScanAt = os.clock() + (tonumber(Config.PlanterRescanInterval) or 60)
+                Runtime.PlanterScanAt = os.clock() + (tonumber(Config.PlanterRescanInterval) or 30)
             elseif result == "harvested" or result == "planted" then
                 -- An action just landed: re-check quickly so the remaining
                 -- slots/harvests fill without waiting a full scan cycle.
-                Runtime.PlanterScanAt = os.clock() + 6
+                Runtime.PlanterScanAt = os.clock() + 5
             else
-                Runtime.PlanterScanAt = os.clock() + (tonumber(Config.PlanterRescanInterval) or 60)
+                Runtime.PlanterScanAt = os.clock() + (tonumber(Config.PlanterRescanInterval) or 30)
             end
         end
         task.wait(1)
@@ -7386,6 +7505,15 @@ task.spawn(function()
         task.wait(math.max(1, math.min(15, tonumber(Config.WealthClockCheckInterval) or 15)))
     end
 end)
+
+-- Macro-gating for milestone entries. Declared BEFORE its first caller
+-- (EnsureCollectorEquipped): a later local would compile to a nil global
+-- there and the dig worker's pcall would swallow the failure silently.
+local function entryEnabled(entry)
+    if entry.NonMacroOnly and Config.MacroMode then return false end
+    if entry.MacroOnly and not Config.MacroMode then return false end
+    return true
+end
 
 -- Dig: ToolCollect only does anything while a collector is HELD. After a
 -- rejoin the collector sits in the backpack unequipped and the remote no-ops,
@@ -7505,8 +7633,12 @@ function Runtime.FindSafeBasicBeeCell()
         local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
         local locked = cell:FindFirstChild("CellLocked")
         local x, y = cell.Name:match("^C(%d+),(%d+)$")
+        -- Normalized compare: the replicated CellType spelling has varied
+        -- ("BasicBee"/"Basic Bee"/"Basic") and a hard-coded string would stall
+        -- the Blue HQ unlock forever.
         if x and y and cellType and cellType:IsA("ValueBase")
-            and tostring(cellType.Value) == "BasicBee" and not cell:FindFirstChild("GiftedCell")
+            and Runtime.NormalizeEventBeeName(tostring(cellType.Value)) == "basic"
+            and not cell:FindFirstChild("GiftedCell")
             and (not locked or not locked:IsA("ValueBase") or locked.Value == false) then
             return cell, tonumber(x), tonumber(y)
         end
@@ -7599,12 +7731,6 @@ function Runtime.UnlockBlueHQ()
         return false, "error"
     end
     return unlocked, reason
-end
-
-local function entryEnabled(entry)
-    if entry.NonMacroOnly and Config.MacroMode then return false end
-    if entry.MacroOnly and not Config.MacroMode then return false end
-    return true
 end
 
 local function nextOutstandingMaterialEntry(includeOptional)
