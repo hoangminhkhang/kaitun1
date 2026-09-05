@@ -8,13 +8,20 @@
       2. Execute kaitun_beeswarm.lua TRUOC (macro chinh).
       3. Execute bridge nay SAU. Chay lai an toan: bridge cu tu dong Shutdown.
 
-    CAU HINH NGAY DUOI DAY - TRUOC KHI EXECUTE ("ApiKey" la bat buoc).
-    Neu sua sau khi da execute mot lan, execute lai bridge de ap dung.
+    CAU HINH: da nhung san trong BUILTIN_CONFIG (cuoi phan CONFIG ben duoi) -
+    chi can loadstring file nay la chay. Neu muon ghi de, set
+    getgenv().BSS_KAITUN_BRIDGE_CONFIG TRUOC khi execute (bang nay KHONG con
+    tu ghi de getgenv nhu ban cu nua - do la nguyen nhan mat config truoc day).
 ]]
 
-getgenv().BSS_KAITUN_BRIDGE_CONFIG = {
-    Url = "http://127.0.0.1:8787/api/ingest",
-    ApiKey = "dán API key từ trang Help — API Key",
+-- ============================================================
+-- BUILTIN_CONFIG - sua Url/ApiKey tai day neu doi may/doi key.
+-- Url nen dung IP LAN (vi du 192.168.x.x) vi Roblox thuong bi
+-- chan loopback 127.0.0.1 trong process game -> ConnectFail.
+-- ============================================================
+local BUILTIN_CONFIG = {
+    Url = "http://192.168.1.142:8787/api/ingest",
+    ApiKey = "kbs_4747b9574d383a332109e862a83ab8b3c54d264a5405be10",
     Interval = 3, -- giay giua cac lan POST
 }
 
@@ -84,13 +91,13 @@ local function sanitizeMap(source)
     return out
 end
 
--- Doc config tu getgenv (block o dau file) voi gia tri mac dinh
+-- Doc config: getgenv (neu user set TRUOC khi execute) > BUILTIN_CONFIG
 local cfgIn = rawget(ENV, "BSS_KAITUN_BRIDGE_CONFIG")
-if type(cfgIn) ~= "table" then cfgIn = {} end
+local src = (type(cfgIn) == "table" and cfgIn) or BUILTIN_CONFIG
 local CFG = {
-    Url = tostring(cfgIn.Url or "http://127.0.0.1:8787/api/ingest"),
-    ApiKey = tostring(cfgIn.ApiKey or ""),
-    Interval = math.max(1, tonumber(cfgIn.Interval) or 3),
+    Url = tostring(src.Url or "http://127.0.0.1:8787/api/ingest"),
+    ApiKey = tostring(src.ApiKey or ""),
+    Interval = math.max(1, tonumber(src.Interval) or 3),
 }
 -- Tu them duong dan ingest neu user chi dan URL goc (http://127.0.0.1:8787)
 local ingestPath = "/api/ingest"
@@ -100,7 +107,26 @@ if #CFG.Url >= #ingestPath and CFG.Url:sub(-#ingestPath) ~= ingestPath then
     warn("[Kaitun Bridge] Url thieu duong dan - tu dung: " .. CFG.Url)
 end
 if CFG.ApiKey == "" or CFG.ApiKey:find("dán API key", 1, true) then
-    warn("[Kaitun Bridge] ApiKey trống hoặc placeholder - vẫn gửi, nếu server trả 401 hãy dán ApiKey vào BSS_KAITUN_BRIDGE_CONFIG")
+    warn("[Kaitun Bridge] ApiKey trống hoặc placeholder - vẫn gửi, nếu server trả 401 hãy dán ApiKey vào BUILTIN_CONFIG hoặc getgenv().BSS_KAITUN_BRIDGE_CONFIG")
+end
+
+-- Danh sach host du phong: ConnectFail o host nay thi tu chuyen sang host khac
+-- (Roblox thuong chan loopback 127.0.0.1 -> uu tien IP LAN truoc).
+local sch, host0, path0 = CFG.Url:match("^(https?://)([^/]+)(/.*)$")
+if not sch then sch, host0, path0 = "http://", "127.0.0.1:8787", "/api/ingest" end
+local LAN_HOST = BUILTIN_CONFIG.Url:match("^https?://([^/]+)") or "192.168.1.142:8787"
+local seenHosts, hostList = {}, {}
+for _, h in ipairs({ host0, LAN_HOST, "127.0.0.1:8787", "localhost:8787" }) do
+    if not seenHosts[h] then
+        seenHosts[h] = true
+        hostList[#hostList + 1] = h
+    end
+end
+local hostIdx = 1
+local function rotateHost()
+    hostIdx = hostIdx % #hostList + 1
+    CFG.Url = sch .. hostList[hostIdx] .. path0
+    return CFG.Url
 end
 
 -- Module game: require lazy bang FindFirstChild (khong block vong POST).
@@ -460,7 +486,12 @@ local function postLoop()
             else
                 fails = fails + 1
                 if info == 401 then
-                    warnOnce("http401", "[Kaitun Bridge] Server trả 401 (invalid_api_key) - hãy dán ApiKey vào BSS_KAITUN_BRIDGE_CONFIG (trang Help - API Key) rồi execute lại")
+                    warnOnce("http401", "[Kaitun Bridge] Server trả 401 (invalid_api_key) - ApiKey sai, dán key trang Help vào BUILTIN_CONFIG/getgenv rồi execute lại")
+                elseif tostring(info):find("ConnectFail", 1, true) then
+                    -- host hiện tại không nối được (vd 127.0.0.1 bị Roblox chặn) -> thử host kế tiếp ngay
+                    warn("[Kaitun Bridge] ConnectFail @ " .. tostring(hostList[hostIdx])
+                        .. " - chuyển host: " .. tostring(rotateHost()))
+                    fails, waitSeconds = 0, CFG.Interval
                 elseif fails == 1 or fails % 10 == 0 then
                     warn("[Kaitun Bridge] POST thất bại (" .. tostring(info) .. ") - thử lại sau " .. tostring(waitSeconds) .. "s")
                 end
@@ -498,9 +529,9 @@ task.spawn(postLoop)
 if Bridge.Http then
     -- log trang thai config de debug: thieu config -> mac dinh 127.0.0.1 (Roblox co the bi chan loopback)
     if type(cfgIn) == "table" then
-        print("[Kaitun Bridge] config: DA TIM THAY BSS_KAITUN_BRIDGE_CONFIG")
+        print("[Kaitun Bridge] config: da tim thay getgenv().BSS_KAITUN_BRIDGE_CONFIG (ghi de BUILTIN)")
     else
-        warn("[Kaitun Bridge] config: KHONG thay BSS_KAITUN_BRIDGE_CONFIG - dung mac dinh. Paste config + loadstring trong CUNG 1 lan Execute")
+        print("[Kaitun Bridge] config: khong co getgenv - dung BUILTIN_CONFIG trong file")
     end
     local keyState = (CFG.ApiKey ~= "" and not CFG.ApiKey:find("dán API key", 1, true))
         and ("OK (" .. #CFG.ApiKey .. " ky tu)") or "CHUA CO"
