@@ -1,3 +1,801 @@
+--[[
+    atlas.lua - Atlas BSS v1.2 (ban tai tao tu Dumped.json, Luraph deobfuscated)
+    Build: atlas_api.lua (module game) + atlas_gui.lua (GUI + config 410 key) + glue
+    Chay: dan ca file vao executor trong game Bee Swarm Simulator.
+]]
+
+local API = (function()
+-- ==========================================================================
+-- atlas_api.lua  -  Atlas BSS v1.2 : lop API game (ban viet moi hoan toan)
+-- Moi truong: executor Roblox (Synapse-style): game, workspace, task, pcall...
+-- Nguyen tac: MOI ham defensive (pcall + FindFirstChild), khong crash khi
+-- object game thieu; tra ve nil / false / {} an toan.
+--
+-- Bang chung duong dan (chuoi trong proto_analysis.md / trace2_*.txt / probe):
+--   * workspace.FlowerZones ........ recon task; proto 663: 'Position','Size','X','Y','Z'
+--   * Player.CoreStats (ValueBase) . probe_small_out.txt L148 'CoreStats'; proto 380 'Honey','Value'
+--   * workspace.Collectibles ....... recon task: folder chua token
+--   * ReplicatedStorage.Events ..... recon task: hub remote
+--   * ClientStatCache .............. recon task
+--   * 'ScreenGui' > 'MeterHUD' > 'HoneyMeter'/'PollenMeter' > 'PerSecLabel'
+--       ............................ trace2_380 L210-212, L251-253, L600, L5
+--   * 'Capacity' .................... trace2_380 L89
+--   * 17 field + 'ColorGroup' ....... proto 663 (blue / white / red)
+--   * 'GrowthPercent','MaxGrowth','IsMine','PotModel' ... proto 507 (planter)
+--   * 'Rhino Cave 1'..'WerewolfCave', 'MonsterType' ..... proto 572 (mob spawn)
+--   * 'Robo Pass Dispenser' ......... proto 150
+-- ==========================================================================
+
+local API = {}
+
+-- ---------------------------------------------------------------------------
+-- Services + helper chung
+-- ---------------------------------------------------------------------------
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- pcall mot getter, tra ve nil khi loi (defensive read)
+local function tryGet(fn)
+	local ok, res = pcall(fn)
+	if ok then
+		return res
+	end
+	return nil
+end
+
+local function getLocalPlayer()
+	return tryGet(function() return Players.LocalPlayer end)
+end
+
+local function getCharacter()
+	local plr = getLocalPlayer()
+	if not plr then
+		return nil
+	end
+	local char = tryGet(function() return plr.Character end)
+	if typeof(char) == "Instance" then
+		return char
+	end
+	return nil
+end
+
+local function getRootPart()
+	local char = getCharacter()
+	if not char then
+		return nil
+	end
+	local hrp = tryGet(function()
+		return char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+	end)
+	if typeof(hrp) == "Instance" then
+		return hrp
+	end
+	return nil
+end
+
+local function getHumanoid()
+	local char = getCharacter()
+	if not char then
+		return nil
+	end
+	local hum = tryGet(function() return char:FindFirstChildOfClass("Humanoid") end)
+	if typeof(hum) == "Instance" then
+		return hum
+	end
+	return nil
+end
+
+local function getInstancePosition(inst)
+	return tryGet(function()
+		if inst:IsA("BasePart") then
+			return inst.Position
+		end
+		if inst:IsA("Model") then
+			local pp = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+			if pp then
+				return pp.Position
+			end
+			return inst:GetPivot().Position
+		end
+		return nil
+	end)
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Player
+-- ---------------------------------------------------------------------------
+API.Player = {}
+
+function API.Player.LocalPlayer()
+	return getLocalPlayer()
+end
+
+function API.Player.Character()
+	return getCharacter()
+end
+
+function API.Player.RootPart()
+	return getRootPart()
+end
+
+function API.Player.Humanoid()
+	return getHumanoid()
+end
+
+function API.Player.Position()
+	local root = getRootPart()
+	if root then
+		return tryGet(function() return root.Position end)
+	end
+	return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Field  (proto 663: database 17 field + ColorGroup blue/red/white)
+-- ---------------------------------------------------------------------------
+local FIELD_DB = {
+	-- blue (5)
+	{ Name = "Blue Flower Field",  Color = "blue"  },
+	{ Name = "Clover Field",       Color = "blue"  },
+	{ Name = "Dandelion Field",    Color = "blue"  },
+	{ Name = "Sunflower Field",    Color = "blue"  },
+	{ Name = "Mushroom Field",     Color = "blue"  },
+	-- white (8)
+	{ Name = "Bamboo Field",       Color = "white" },
+	{ Name = "Pine Tree Forest",   Color = "white" },
+	{ Name = "Pineapple Patch",    Color = "white" },
+	{ Name = "Mountain Top Field", Color = "white" },
+	{ Name = "Pumpkin Patch",      Color = "white" },
+	{ Name = "Cactus Field",       Color = "white" },
+	{ Name = "Coconut Field",      Color = "white" },
+	{ Name = "Stump Field",        Color = "white" },
+	-- red (4)
+	{ Name = "Spider Field",       Color = "red"   },
+	{ Name = "Strawberry Field",   Color = "red"   },
+	{ Name = "Rose Field",         Color = "red"   },
+	{ Name = "Pepper Patch",       Color = "red"   },
+}
+
+API.Field = {}
+
+function API.Field.List()
+	local out = {}
+	for i, entry in ipairs(FIELD_DB) do
+		out[i] = { Name = entry.Name, Color = entry.Color }
+	end
+	return out
+end
+
+function API.Field.Names()
+	local out = {}
+	for i, entry in ipairs(FIELD_DB) do
+		out[i] = entry.Name
+	end
+	return out
+end
+
+function API.Field.ColorGroups()
+	local groups = { blue = {}, red = {}, white = {} }
+	for _, entry in ipairs(FIELD_DB) do
+		local bucket = groups[entry.Color]
+		if bucket then
+			bucket[#bucket + 1] = entry.Name
+		end
+	end
+	return groups
+end
+
+function API.Field.GetColor(fieldName)
+	for _, entry in ipairs(FIELD_DB) do
+		if entry.Name == fieldName then
+			return entry.Color
+		end
+	end
+	return nil
+end
+
+function API.Field.GetByName(fieldName)
+	for _, entry in ipairs(FIELD_DB) do
+		if entry.Name == fieldName then
+			return entry.Name, entry.Color
+		end
+	end
+	return nil
+end
+
+function API.Field.GetZone(fieldName)
+	return tryGet(function()
+		local zones = workspace:FindFirstChild("FlowerZones") -- recon task
+		if zones then
+			return zones:FindFirstChild(fieldName)
+		end
+		return nil
+	end)
+end
+
+-- tra ve (center:Vector3, size:Vector3) cua zone, nil khi khong doc duoc
+-- (dung pcall truc tiep de giu duoc 2 gia tri tra ve)
+function API.Field.ZoneBounds(zone)
+	if typeof(zone) ~= "Instance" then
+		return nil, nil
+	end
+	local ok, center, size = pcall(function()
+		if zone:IsA("BasePart") then
+			return zone.Position, zone.Size
+		end
+		if zone:IsA("Model") then
+			local pp = zone.PrimaryPart or zone:FindFirstChildWhichIsA("BasePart", true)
+			if pp then
+				return pp.Position, pp.Size
+			end
+		end
+		return nil, nil
+	end)
+	if ok and center and size then
+		return center, size
+	end
+	return nil, nil
+end
+
+-- fix: cache bounds cac zone trong 5s. API.Tokens.Scan goi ContainsPosition
+-- cho TUNG token; moi lan goi la quet GetChildren + pcall bounds cua ca folder
+-- FlowerZones -> O(tokens x zones) pcall moi lan quet, gap dan CPU khi field
+-- dong token. Zone it khi doi nen cache TTL la du an toan.
+local zoneBoundsCache = nil
+local zoneCacheTime = 0
+local ZONE_CACHE_TTL = 5
+
+local function getZoneBoundsList()
+	local now = os.clock()
+	if zoneBoundsCache and (now - zoneCacheTime) < ZONE_CACHE_TTL then
+		return zoneBoundsCache
+	end
+	local zones = tryGet(function() return workspace:FindFirstChild("FlowerZones") end)
+	if not zones then
+		return nil
+	end
+	local children = tryGet(function() return zones:GetChildren() end)
+	if not children then
+		return nil
+	end
+	local list = {}
+	for _, zone in ipairs(children) do
+		local center, size = API.Field.ZoneBounds(zone)
+		if center and size then
+			list[#list + 1] = { Name = zone.Name, Center = center, Size = size }
+		end
+	end
+	zoneBoundsCache = list
+	zoneCacheTime = now
+	return list
+end
+
+-- kiem tra 1 toa do co nam trong zone field nao khong; tra ve TEN ZONE (giong
+-- ten field trong DB) hoac nil. proto 663 dung 'Position'/'Size' theo zone.
+function API.Field.ContainsPosition(position)
+	if typeof(position) ~= "Vector3" then
+		return nil
+	end
+	local list = getZoneBoundsList() -- fix: dung cache thay vi quet lai moi goi
+	if not list then
+		return nil
+	end
+	for _, z in ipairs(list) do
+		local dx = math.abs(position.X - z.Center.X)
+		local dz = math.abs(position.Z - z.Center.Z)
+		-- le 4 stud de tru cap dat canh bien; chi canh theo X/Z (field phang)
+		if dx <= z.Size.X * 0.5 + 4 and dz <= z.Size.Z * 0.5 + 4 then
+			return z.Name
+		end
+	end
+	return nil
+end
+
+function API.Field.CurrentField()
+	local root = getRootPart()
+	if not root then
+		return nil
+	end
+	return API.Field.ContainsPosition(root.Position)
+end
+
+function API.Field.GetPosition(fieldName)
+	local zone = API.Field.GetZone(fieldName)
+	if not zone then
+		return nil
+	end
+	local center = select(1, API.Field.ZoneBounds(zone))
+	return center
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Stats  (Player.CoreStats - ValueBase; bang chung 'CoreStats' + 'Honey'/'Value')
+-- ---------------------------------------------------------------------------
+API.Stats = {}
+
+function API.Stats.Get(statName)
+	local plr = getLocalPlayer()
+	if not plr then
+		return nil
+	end
+	return tryGet(function()
+		local core = plr:FindFirstChild("CoreStats")
+		if not core then
+			return nil
+		end
+		local obj = core:FindFirstChild(statName)
+		if obj then
+			return obj.Value
+		end
+		return nil
+	end)
+end
+
+function API.Stats.Honey()
+	return API.Stats.Get("Honey")
+end
+
+function API.Stats.Pollen()
+	return API.Stats.Get("Pollen")
+end
+
+function API.Stats.Capacity()
+	return API.Stats.Get("Capacity")
+end
+
+function API.Stats.IsFull()
+	local pollen = API.Stats.Pollen()
+	local capacity = API.Stats.Capacity()
+	if pollen and capacity and capacity > 0 then
+		return pollen >= capacity
+	end
+	return false
+end
+
+-- doc du phong tu ClientStatCache (recon task); cau truc cham ho tro ca
+-- value object va folder
+function API.Stats.GetCached(statName)
+	return tryGet(function()
+		local cache = ReplicatedStorage:FindFirstChild("ClientStatCache")
+			or Players:FindFirstChild("ClientStatCache")
+		if not cache then
+			return nil
+		end
+		local obj = cache:FindFirstChild(statName)
+		if not obj then
+			obj = cache:FindFirstChild(statName, true)
+		end
+		if obj then
+			local ok, value = pcall(function() return obj.Value end)
+			if ok then
+				return value
+			end
+		end
+		return nil
+	end)
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Tokens  (workspace.Collectibles; 'IsMine' xuat hien o proto 380/507)
+-- ---------------------------------------------------------------------------
+API.Tokens = {}
+
+function API.Tokens.GetFolder()
+	return tryGet(function() return workspace:FindFirstChild("Collectibles") end)
+end
+
+-- quet token: fieldName = ten field loc (nil = field hien tai, false = tat ca)
+-- tra ve mang { { Instance, Name, Position, IsMine }, ... }
+function API.Tokens.Scan(fieldName)
+	local folder = API.Tokens.GetFolder()
+	if not folder then
+		return {}
+	end
+	local children = tryGet(function() return folder:GetChildren() end)
+	if not children then
+		return {}
+	end
+	local targetField = fieldName
+	if targetField == nil then
+		targetField = API.Field.CurrentField()
+	end
+	local out = {}
+	for _, inst in ipairs(children) do
+		local pos = getInstancePosition(inst)
+		if pos then
+			local ok = true
+			if targetField then
+				ok = (API.Field.ContainsPosition(pos) == targetField)
+			end
+			if ok then
+				local isMine = tryGet(function()
+					return inst:GetAttribute("IsMine") == true
+				end)
+				out[#out + 1] = {
+					Instance = inst,
+					Name = inst.Name,
+					Position = pos,
+					IsMine = isMine == true,
+				}
+			end
+		end
+	end
+	return out
+end
+
+function API.Tokens.InCurrentField()
+	return API.Tokens.Scan(nil)
+end
+
+function API.Tokens.Count(fieldName)
+	local list = API.Tokens.Scan(fieldName)
+	return #list
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Remotes  (ReplicatedStorage.Events; goi an toan qua pcall)
+-- Luu y: dump khong chua chuoi 'FireServer'/'RemoteEvent' du dang - cac lenh
+-- goi nam trong VMOP chua dich (ghi chu cuoi moi proto trong proto_analysis.md).
+-- ---------------------------------------------------------------------------
+API.Remotes = {}
+
+-- chuoi object duoc proto tham chieu lam duong dan tra cuu (khong phai ten
+-- remote xac nhan): proto 674 'Eggs','RoyalJelly','GetCost','Purchasing';
+-- proto 150 'RoboChallenges','ActiveChallenge','RoundState'; proto 514
+-- 'PlayerActiveTimes'; proto 507 'GrowthPercent','PotModel'.
+API.Remotes.Notes = {
+	Events = "ReplicatedStorage.Events - hub remote chinh (recon task)",
+	Eggs = "proto 674 - Basic Egg Shop",
+	RoyalJelly = "proto 674 - Royal Jelly Shop",
+	RoboChallenges = "proto 150 - folder trang thai RBC",
+	PlayerActiveTimes = "proto 514 - du lieu nguoi choi",
+}
+
+function API.Remotes.GetEvents()
+	return tryGet(function() return ReplicatedStorage:FindFirstChild("Events") end)
+end
+
+-- tra ve Instance tu duong dan cham, vd "Events.PlayerActs.X"
+function API.Remotes.Get(path)
+	if type(path) ~= "string" or path == "" then
+		return nil
+	end
+	return tryGet(function()
+		local current = ReplicatedStorage
+		for token in string.gmatch(path, "[^.]+") do
+			if not current then
+				return nil
+			end
+			current = current:FindFirstChild(token)
+		end
+		return current
+	end)
+end
+
+-- goi FireServer/InvokeServer tuy loai remote; tra ve (ok, err)
+function API.Remotes.Fire(path, ...)
+	local remote = API.Remotes.Get(path)
+	if typeof(remote) ~= "Instance" then
+		return false, "remote not found: " .. tostring(path)
+	end
+	local args = { ... }
+	if remote:IsA("RemoteFunction") then
+		local ok, err = pcall(function()
+			remote:InvokeServer(table.unpack(args))
+		end)
+		return ok, err
+	end
+	local ok, err = pcall(function()
+		remote:FireServer(table.unpack(args))
+	end)
+	return ok, err
+end
+
+-- chi dung cho RemoteFunction; tra ve gia tri hoac nil (khong bao crash)
+function API.Remotes.Invoke(path, ...)
+	local remote = API.Remotes.Get(path)
+	if typeof(remote) ~= "Instance" or not remote:IsA("RemoteFunction") then
+		return nil
+	end
+	local args = { ... }
+	return tryGet(function()
+		return remote:InvokeServer(table.unpack(args))
+	end)
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Mobs  (proto 572: spawn point + 'MonsterType')
+-- ---------------------------------------------------------------------------
+-- Anh xa spawn -> mob la best-effort tu ten chuoi trong proto 572; tai runtime
+-- uu tien doc thuoc tinh 'MonsterType' (API.Mobs.GetType).
+local MOB_DB = {
+	{ Name = "Rhino Cave 1",     Mob = "Rhino"      },
+	{ Name = "Rhino Cave 2",     Mob = "Rhino"      },
+	{ Name = "Rhino Bush",       Mob = "Rhino"      },
+	{ Name = "RoseBush",         Mob = "Rhino"      },
+	{ Name = "RoseBush2",        Mob = "Rhino"      },
+	{ Name = "Ladybug Bush",     Mob = "Ladybug"    },
+	{ Name = "Ladybug Bush 2",   Mob = "Ladybug"    },
+	{ Name = "Ladybug Bush 3",   Mob = "Ladybug"    },
+	{ Name = "MushroomBush",     Mob = "Ladybug"    },
+	{ Name = "ForestMantis1",    Mob = "Mantis"     },
+	{ Name = "ForestMantis2",    Mob = "Mantis"     },
+	{ Name = "PineappleMantis1", Mob = "Mantis"     },
+	{ Name = "PineappleBeetle",  Mob = "Beetle"     },
+	{ Name = "Spider Cave",      Mob = "Spider"     },
+	{ Name = "WerewolfCave",     Mob = "Werewolf"   },
+	{ Name = "Stump Snail",      Mob = "Stump Snail" },
+}
+
+API.Mobs = {}
+
+function API.Mobs.List()
+	local out = {}
+	for i, entry in ipairs(MOB_DB) do
+		out[i] = { Name = entry.Name, Mob = entry.Mob }
+	end
+	return out
+end
+
+function API.Mobs.GetInfo(spawnName)
+	for _, entry in ipairs(MOB_DB) do
+		if entry.Name == spawnName then
+			return entry.Name, entry.Mob
+		end
+	end
+	return nil
+end
+
+function API.Mobs.FindSpawn(spawnName)
+	if type(spawnName) ~= "string" then
+		return nil
+	end
+	return tryGet(function()
+		local direct = workspace:FindFirstChild(spawnName)
+		if direct then
+			return direct
+		end
+		for _, containerName in ipairs({ "Mobs", "Monsters", "MobSpawns", "Spawns" }) do
+			local container = workspace:FindFirstChild(containerName)
+			if container then
+				local found = container:FindFirstChild(spawnName, true)
+				if found then
+					return found
+				end
+			end
+		end
+		-- cuoi cung: quet de quy toan workspace (ton tai nhung chinh xac)
+		return workspace:FindFirstChild(spawnName, true)
+	end)
+end
+
+-- doc loai mob that tai runtime tu 'MonsterType' (attribute hoac value object)
+function API.Mobs.GetType(spawn)
+	if typeof(spawn) ~= "Instance" then
+		return nil
+	end
+	local attr = tryGet(function() return spawn:GetAttribute("MonsterType") end)
+	if type(attr) == "string" and attr ~= "" then
+		return attr
+	end
+	return tryGet(function()
+		local v = spawn:FindFirstChild("MonsterType")
+		if v then
+			return v.Value
+		end
+		return nil
+	end)
+end
+
+function API.Mobs.GetPosition(spawnName)
+	local spawn = API.Mobs.FindSpawn(spawnName)
+	if not spawn then
+		return nil
+	end
+	return getInstancePosition(spawn)
+end
+
+-- ---------------------------------------------------------------------------
+-- API.Dispensers  (config_schema: 'Blueberry Dispenser', 'Free Ant Pass
+-- Dispenser', 'Free Robo Pass Dispenser', 'Free Royal Jelly Dispenser',
+-- 'Glue Dispenser'; proto 150: 'Robo Pass Dispenser')
+-- ---------------------------------------------------------------------------
+local DISPENSER_DB = {
+	"Blueberry Dispenser",
+	"Honey Dispenser",
+	"Strawberry Dispenser",
+	"Treat Dispenser",
+	"Coconut Dispenser",
+	"Ant Pass Dispenser",
+	"Robo Pass Dispenser",
+	"Royal Jelly Dispenser",
+	"Glue Dispenser",
+}
+
+API.Dispensers = {}
+
+function API.Dispensers.List()
+	local out = {}
+	for i, name in ipairs(DISPENSER_DB) do
+		out[i] = name
+	end
+	return out
+end
+
+function API.Dispensers.Find(name)
+	if type(name) ~= "string" then
+		return nil
+	end
+	return tryGet(function()
+		local direct = workspace:FindFirstChild(name)
+		if direct then
+			return direct
+		end
+		return workspace:FindFirstChild(name, true)
+	end)
+end
+
+function API.Dispensers.GetPosition(name)
+	local inst = API.Dispensers.Find(name)
+	if not inst then
+		return nil
+	end
+	return getInstancePosition(inst)
+end
+
+-- tim ProximityPrompt gan voi dispenser (dung de kich hoat tu dong)
+function API.Dispensers.GetPrompt(inst)
+	if typeof(inst) ~= "Instance" then
+		return nil
+	end
+	return tryGet(function()
+		return inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+	end)
+end
+
+-- ---------------------------------------------------------------------------
+-- API.HUD  (proto 380: 'ScreenGui' > 'MeterHUD' > 'HoneyMeter'/'PollenMeter'
+-- > 'PerSecLabel' - doc toc do honey; 'Capacity' o trace2_380 L89)
+-- ---------------------------------------------------------------------------
+API.HUD = {}
+
+local SUFFIX_MULT = { K = 1e3, M = 1e6, B = 1e9, T = 1e12 }
+
+-- parser so the he thong game: "1,234,567", "12.5k", "3.2M"...
+function API.HUD.ParseNumber(text)
+	if type(text) ~= "string" then
+		return nil
+	end
+	local chunk = text:match("[%d%.%s,KMBTkmbt]+") or ""
+	chunk = chunk:gsub("[,%s]", "")
+	local numStr = chunk:match("^%d*%.?%d*")
+	if numStr == nil or numStr == "" or numStr == "." then
+		return nil
+	end
+	local num = tonumber(numStr)
+	if not num then
+		return nil
+	end
+	local suffix = chunk:sub(#numStr + 1, #numStr + 1):upper()
+	local mult = SUFFIX_MULT[suffix] or 1
+	return num * mult
+end
+
+local function guiRoots()
+	local roots = {}
+	local plr = getLocalPlayer()
+	if plr then
+		local pg = tryGet(function() return plr:FindFirstChildOfClass("PlayerGui") end)
+		if pg then
+			roots[#roots + 1] = pg
+		end
+	end
+	local cg = tryGet(function() return game:GetService("CoreGui") end)
+	if cg then
+		roots[#roots + 1] = cg
+	end
+	local hidden = tryGet(function()
+		if type(gethui) == "function" then
+			return gethui()
+		end
+		return nil
+	end)
+	if typeof(hidden) == "Instance" then
+		roots[#roots + 1] = hidden
+	end
+	return roots
+end
+
+-- tim ScreenGui HUD chua 'MeterHUD' (chuoi 'ScreenGui' o trace2_380 L210/L251)
+function API.HUD.FindScreenGui()
+	for _, root in ipairs(guiRoots()) do
+		local children = tryGet(function() return root:GetChildren() end)
+		if children then
+			for _, gui in ipairs(children) do
+				if typeof(gui) == "Instance" and gui:IsA("ScreenGui") then
+					local hasHud = tryGet(function()
+						return gui:FindFirstChild("MeterHUD", true)
+					end)
+					if hasHud then
+						return gui
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- tra ve meter con (HoneyMeter / PollenMeter / ...) trong MeterHUD
+function API.HUD.GetMeter(meterName)
+	local gui = API.HUD.FindScreenGui()
+	if not gui then
+		return nil
+	end
+	return tryGet(function()
+		local hud = gui:FindFirstChild("MeterHUD", true)
+		if hud then
+			return hud:FindFirstChild(meterName, true)
+		end
+		return nil
+	end)
+end
+
+-- doc honey/hour tu HoneyMeter.PerSecLabel; tra ve { Text, Value, Unit, PerHour }
+function API.HUD.GetHoneyPerHour()
+	local meter = API.HUD.GetMeter("HoneyMeter")
+	if not meter then
+		return nil
+	end
+	local label = tryGet(function() return meter:FindFirstChild("PerSecLabel", true) end)
+	if not label then
+		return nil
+	end
+	local text = tryGet(function() return label.Text end)
+	if type(text) ~= "string" then
+		return nil
+	end
+	local value = API.HUD.ParseNumber(text)
+	local low = string.lower(text)
+	local unit = nil
+	if string.find(low, "sec", 1, true) then
+		unit = "second"
+	elseif string.find(low, "hour", 1, true) or string.find(low, "/hr", 1, true) then
+		unit = "hour"
+	end
+	local perHour = nil
+	if value then
+		if unit == "second" then
+			perHour = value * 3600
+		else
+			perHour = value
+		end
+	end
+	return { Text = text, Value = value, Unit = unit, PerHour = perHour }
+end
+
+-- doc toc do pollen tu PollenMeter.PerSecLabel; tra ve { Text, Value }
+function API.HUD.GetPollenPerSec()
+	local meter = API.HUD.GetMeter("PollenMeter")
+	if not meter then
+		return nil
+	end
+	local label = tryGet(function() return meter:FindFirstChild("PerSecLabel", true) end)
+	if not label then
+		return nil
+	end
+	local text = tryGet(function() return label.Text end)
+	if type(text) ~= "string" then
+		return nil
+	end
+	return { Text = text, Value = API.HUD.ParseNumber(text) }
+end
+
+return API
+
+end)()
+
+local AtlasGUI = (function()
 -- ==========================================================================
 -- atlas_gui.lua  -  Atlas BSS v1.2 : UI framework + config (viet moi hoan toan)
 -- Moi truong: executor Roblox (Synapse-style): game, task, writefile/readfile,
@@ -496,7 +1294,7 @@ local function queueSave()
 	saveQueued = true
 	task.delay(0.75, function()
 		saveQueued = false
-		Config.Save()
+		pcall(function() Config.Save() end) -- fix: chan loi lan truyen trong task
 	end)
 end
 
@@ -534,7 +1332,10 @@ local function coerceValue(key, value)
 	end
 end
 
-local Config = {}
+-- fix: bo 'local Config = {}' trung lap o day. Truoc do no tao bang thu hai
+-- lam queueSave (closure tham chieu bang thu nhat rong) goi Config.Save -> nil
+-- call, crash ngay lan dau Config.Set kich hoat debounce. Dung dung bang
+-- Config khai bao phia tren (cung scope, truoc queueSave).
 
 function Config.Get(key)
 	return DEFAULT_CONFIG[key]
@@ -678,6 +1479,26 @@ end
 -- ---------------------------------------------------------------------------
 -- Element builders (ten ham theo method UI goc cua Atlas)
 -- ---------------------------------------------------------------------------
+-- fix: cac connection tren UserInputService (keo slider / keo window) la
+-- GLOBAL - neu khong track thi khi BuildGUI duoc goi lai (GuiRef:Destroy())
+-- connection cu con song, closure van cam widget da destroy (leak + keo slider
+-- tac dong len slider cu da mat). Gom lai va Disconnect khi rebuild/destroy.
+local TrackedConnections = {}
+
+local function trackConnection(conn)
+	if conn then
+		TrackedConnections[#TrackedConnections + 1] = conn
+	end
+	return conn
+end
+
+local function disconnectTrackedConnections()
+	for _, conn in ipairs(TrackedConnections) do
+		pcall(function() conn:Disconnect() end)
+	end
+	TrackedConnections = {}
+end
+
 local orderCounters = {}
 
 local function nextOrder(container)
@@ -812,26 +1633,26 @@ local function SetSlider(container, key, label, min, max, default)
 		local alpha = math.clamp((x - absPos) / absSize, 0, 1)
 		setVal(min + alpha * (max - min))
 	end
-	bar.InputBegan:Connect(function(input)
+	trackConnection(bar.InputBegan:Connect(function(input) -- fix: track de disconnect khi rebuild
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			applyFromX(input.Position.X)
 		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
+	end))
+	trackConnection(UserInputService.InputChanged:Connect(function(input) -- fix: track connection global
 		if dragging
 			and (input.UserInputType == Enum.UserInputType.MouseMovement
 				or input.UserInputType == Enum.UserInputType.Touch) then
 			applyFromX(input.Position.X)
 		end
-	end)
-	UserInputService.InputEnded:Connect(function(input)
+	end))
+	trackConnection(UserInputService.InputEnded:Connect(function(input) -- fix: track connection global
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
-	end)
+	end))
 
 	Registry[key] = { Set = refresh, Kind = "SetSlider" }
 	return row
@@ -863,6 +1684,8 @@ local function SetTextBox(container, key, label, default)
 		if enter then
 			Config.Set(key, box.Text)
 			box.Text = tostring(DEFAULT_CONFIG[key])
+		else
+			box.Text = tostring(DEFAULT_CONFIG[key]) -- fix: tra lai text theo config khi khong enter (UI khong lech gia tri)
 		end
 	end)
 	local function refresh(value)
@@ -899,6 +1722,7 @@ local function SetDropdown(container, key, label, items, default)
 		BackgroundColor3 = THEME.Side,
 		BorderSizePixel = 0,
 		Visible = false,
+		ZIndex = 5, -- fix: list phai ve TREN cac row tao sau no (ZIndexBehavior.Sibling)
 		LayoutOrder = nextOrder(container),
 		Parent = container,
 	})
@@ -1509,6 +2333,7 @@ local GuiRef = nil
 
 local function BuildGUI()
 	if GuiRef then
+		disconnectTrackedConnections() -- fix: ngat connection UIS cua lan build truoc
 		pcall(function() GuiRef:Destroy() end)
 		GuiRef = nil
 	end
@@ -1524,6 +2349,7 @@ local function BuildGUI()
 		Parent = getGuiParent(),
 	})
 	GuiRef = gui
+	trackConnection(gui.Destroying:Connect(disconnectTrackedConnections)) -- fix: gui bi destroy tu ben ngoai cung ngat connection
 
 	-- nut thu nho / mo
 	local toggleBtn = New("TextButton", {
@@ -1597,7 +2423,7 @@ local function BuildGUI()
 			startPos = main.Position
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	trackConnection(UserInputService.InputChanged:Connect(function(input) -- fix: track connection global
 		if dragging and dragStart
 			and (input.UserInputType == Enum.UserInputType.MouseMovement
 				or input.UserInputType == Enum.UserInputType.Touch) then
@@ -1607,13 +2433,13 @@ local function BuildGUI()
 				startPos.Y.Scale, startPos.Y.Offset + delta.Y
 			)
 		end
-	end)
-	UserInputService.InputEnded:Connect(function(input)
+	end))
+	trackConnection(UserInputService.InputEnded:Connect(function(input) -- fix: track connection global
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
-	end)
+	end))
 
 	-- cot tab ben trai
 	local side = New("Frame", {
@@ -1758,3 +2584,20 @@ return {
 	SetTextBox = SetTextBox,
 	AddDropdownItem = AddDropdownItem,
 }
+
+end)()
+
+-- ================= MAIN ENTRY =================
+if game.PlaceId ~= 1537690962 then
+    warn("[Atlas] Sai game - PlaceId=" .. tostring(game.PlaceId) .. ", can Bee Swarm Simulator (1537690962)")
+    return
+end
+_G.AtlasAPI = API
+local ok, err = pcall(function()
+    AtlasGUI.Build()
+end)
+if ok then
+    print("[Atlas v1.2] GUI da khoi tao thanh cong. Config: atlas1/default.json")
+else
+    warn("[Atlas] Loi khoi tao GUI: " .. tostring(err))
+end
