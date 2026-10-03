@@ -98,10 +98,10 @@ local USER_DEFAULTS = {
 local DEFAULT_CONFIG = {
     ConvertPercent = 1,
     ConvertFinishPercent = 0.01,
-    TweenSpeed = 85,
-    TokenTweenSpeed = 120,
+    TweenSpeed = 100,
+    TokenTweenSpeed = 150,
     SmartMove = true,
-    FieldMoveSpeed = 100,
+    FieldMoveSpeed = 120,
     SmartWalkDistance = 10,
     SmartArrivalDistance = 6,
     SmartFieldWalkTimeout = 12,
@@ -111,7 +111,7 @@ local DEFAULT_CONFIG = {
     -- of the field's 4 corners, glide back toward the field center instead.
     FieldCornerAvoid = true,
     FieldCornerDistance = 18,
-    FarmStepDelay = 0.25,
+    FarmStepDelay = 0.15,
     DigInterval = 0.22,
     TokenMaxChaseDistance = 115,
     TokenFieldPadding = 4,
@@ -127,6 +127,21 @@ local DEFAULT_CONFIG = {
     TokenLookaheadDiscount = 0.84,
     TokenTravelPenalty = 0.22,
     TokenUrgencyBonus = 0.45,
+    -- Mob-aware token chasing + smart farm routing (threat map is shared).
+    TokenPathfind = true,
+    TokenPathMargin = 4,
+    TokenDetourMaxStuds = 60,
+    TokenDetourCacheSeconds = 1,
+    FarmAvoidMobs = true,
+    FarmPointCandidates = 3,
+    -- Mobs trigger the dodge hop only when CLOSE (video feedback: hopping with
+    -- nothing near the player looked broken). Threat retreat keeps its band.
+    MobJumpRadius = 30,
+    -- Hazard scanner: only "goo" is name-evidenced (workspace instance per
+    -- Atlas decompile) and false-positive-safe; stick/spike/web matched normal
+    -- field objects (Sticker Stack etc.), so mobs are avoided by position
+    -- (threat map) instead of by name patterns.
+    HazardNamePatterns = {"goo"},
     MeteorPartFallback = false,
     MeteorRequiredMythicTypes = 3,
     -- Seconds (79200 = 22h).
@@ -134,7 +149,11 @@ local DEFAULT_CONFIG = {
     MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
     QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
     QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
-    QuestNPCBeeRequirements = {["Science Bear"] = 10, ["Polar Bear"] = 25},
+        QuestNPCBeeRequirements = {["Science Bear"] = 10, ["Polar Bear"] = 25},
+        -- Mid-game switch: once the hive reaches this many bees, the Black
+        -- Bear chain outranks Mother's endless cycle until the Diamond Egg
+        -- rule stops it (see questNpcPriority).
+        BlackBearPriorityAfterBees = 10,
     -- Stop Black Bear once this quest is active: any later quest proves the Diamond Egg is claimed.
     BlackBearStopAfterQuest = "Quest Of Legends",
     -- Pipe-separated Black Bear quests past the Diamond Egg; parsed into a lookup set once.
@@ -167,8 +186,10 @@ local DEFAULT_CONFIG = {
     QuestMobRecheckInterval = 20,
     BadgeClaimInterval = 1.25,
     AutoToys = {
+        -- Cooldowns verified against the place model; the toy's own "Cooldown"
+        -- child (read live at claim time) always overrides these fallbacks.
         {Name = "Free Ant Pass Dispenser", Cooldown = 7200},
-        {Name = "Blue Field Booster", Cooldown = 7200, FieldBoost = "Blue"},
+        {Name = "Blue Field Booster", Cooldown = 2700, FieldBoost = "Blue"},
     },
     BoostedFieldWhitelist = {"Pine Tree Forest", "Blue Flower Field", "Bamboo Field"},
     RJQuestReserve = 5,
@@ -178,6 +199,18 @@ local DEFAULT_CONFIG = {
     RJStockResyncEvery = 25,
     StarTreatTicketCost = 1000,
     MondoChickFightTimeout = 120,
+    -- Opportunistic bonus mobs (no quest needed): level gate is the HIVE
+    -- AVERAGE (fight only when mob level <= average), Stump Snail skipped.
+    AutoFarmBonusMobs = true,
+    BonusMobFightTimeout = 120,
+    -- Blue Field Booster: only tap when this many blue bee TYPES are in the hive.
+    BlueBoosterMinDiscoveries = 3,
+    -- Re-scan the stats payload for active field boosts this often (picks up
+    -- boosts from any source, not just our own booster tap).
+    BoostRescanInterval = 60,
+    -- Quest farming rides the active field boost when the boost field advances
+    -- at least one objective (pollx2+ while progressing quests).
+    BoostedQuestFarm = true,
     WealthClockInterval = 3600,
     WealthClockCheckInterval = 15,
     WealthClockRetryInterval = 60,
@@ -217,6 +250,14 @@ local DEFAULT_CONFIG = {
     MaterialPlanterActionCooldown = 5,
     PlanterHarvestPercent = 0.98,
     PlanterRescanInterval = 30,
+    -- Harvest cadence per planter: growth >= threshold AND this long since the
+    -- last harvest of THAT planter (2h rhythm; Paper/Plastic growth fits it).
+    PlanterHarvestInterval = 7200,
+    -- PlanterModelCollect is a one-way RemoteEvent (verified in the place
+    -- model): fire from anywhere, confirm by the planter disappearing, and
+    -- only escalate to the walking fallback after repeated silent failures.
+    PlanterRemoteHarvest = true,
+    PlanterRemoteRetries = 2,
     -- Nectar priority order only; entry gates come from the game's own
     -- FIELD_REQUIREMENTS table, and the spread covers all five nectar types.
     PlanterFieldPlan = {
@@ -720,6 +761,9 @@ local Runtime = {
     ViciousPending = false,
     ViciousBusy = false,
     ViciousRetryAt = 0,
+    BonusMobPending = nil,
+    BonusMobBusy = false,
+    BonusMobRetryAt = {},
     BlackBearStopped = false,
     BlackBearPastSet = nil,
     NextWealthClockCheck = 0,
@@ -1186,20 +1230,25 @@ local function glideRunnerStep(deltaTime)
         local current = root.CFrame
         local target = glide.CFrame
         local remaining = (target.Position - current.Position).Magnitude
+        -- Rotation-stable glide: interpolate POSITION only and keep the root's
+        -- current orientation for the whole flight. Lerping the raw CFrame
+        -- toward CFrame.new(position) (identity rotation) spun the character
+        -- mid-flight and snapped it again on arrival (user-visible "bi xoay").
+        local rotation = current - current.Position
         if remaining <= 0.35 then
-            root.CFrame = target
+            root.CFrame = CFrame.new(target.Position) * rotation
             Runtime.Glide = nil
             Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
             return
         end
         -- Ease-out over the last 6 studs: an abrupt constant-speed stop reads
-        -- as the character skating across the ground ("trơn"); decelerating
+        -- as the character skating across the ground (slippery); decelerating
         -- into the target looks like a normal player braking to a halt.
         local easeSpeed = remaining < 6
             and glide.Speed * (0.35 + 0.65 * remaining / 6)
             or glide.Speed
         local step = math.min(easeSpeed * deltaTime, remaining)
-        root.CFrame = current:Lerp(target, step / remaining)
+        root.CFrame = CFrame.new(current.Position:Lerp(target.Position, step / remaining)) * rotation
         return
     end
     local releaseAt = Runtime.TweenRootReleaseAt
@@ -1229,34 +1278,95 @@ end
 -- Field pathfinding (SmartMove stuck recovery): computes ONE route around
 -- obstacles and walks its waypoints. Engaged only by the stuck watchdog inside
 -- tweenTo, so free-walking never pays the ComputeAsync cost.
-local function walkFieldPath(humanoid, root, position, generation)
-    local startField = flowerFieldAtPosition(root.Position, Config.TokenFieldPadding)
-    local ok, path = pcall(function()
-        local pathObject = PathfindingService:CreatePath({
-            -- Generous radius keeps routes OFF hedge edges and tree trunks -
-            -- hugging them re-stalls the moment direct walking resumes.
-            -- AgentCanJump=false: the movement style is hop-free (corner
-            -- avoidance handles obstacles instead of bunny-hopping).
-            AgentRadius = 3,
-            AgentHeight = 5,
-            AgentCanJump = false,
-            WaypointSpacing = 5,
-        })
-        pathObject:ComputeAsync(root.Position, position)
-        return pathObject
-    end)
-    if not ok or not path or path.Status ~= Enum.PathStatus.Success then return false end
-    local okWaypoints, waypoints = pcall(path.GetWaypoints, path)
-    if not okWaypoints or #waypoints < 2 then return false end
-    -- Keep the route INSIDE the field: a waypoint past the field edge walks
-    -- the character straight into the invisible boundary wall.
-    local usable = {}
-    for _, waypoint in ipairs(waypoints) do
-        if not startField or flowerFieldAtPosition(waypoint.Position, 0) == startField then
-            table.insert(usable, waypoint)
+-- Shared path builder: ComputeAsync with hop-free agent params, waypoints
+-- filtered to stay inside the starting field. Used by the stuck-watchdog walk
+-- AND by token detours, so both pathfinders behave identically.
+local function computeFieldPath(rootPosition, position, startField)
+    local function attempt(goalPosition)
+        local ok, path = pcall(function()
+            local pathObject = PathfindingService:CreatePath({
+                -- Generous radius keeps routes OFF hedge edges and tree trunks -
+                -- hugging them re-stalls the moment direct walking resumes.
+                -- AgentCanJump=false: the movement style is hop-free (corner
+                -- avoidance handles obstacles instead of bunny-hopping).
+                AgentRadius = 3,
+                AgentHeight = 5,
+                AgentCanJump = false,
+                WaypointSpacing = 5,
+            })
+            pathObject:ComputeAsync(rootPosition, goalPosition)
+            return pathObject
+        end)
+        if not ok or not path or path.Status ~= Enum.PathStatus.Success then return nil end
+        local okWaypoints, waypoints = pcall(path.GetWaypoints, path)
+        if not okWaypoints or #waypoints < 2 then return nil end
+        -- Keep the route INSIDE the field: a waypoint past the field edge walks
+        -- the character straight into the invisible boundary wall.
+        local usable = {}
+        for _, waypoint in ipairs(waypoints) do
+            if not startField or flowerFieldAtPosition(waypoint.Position, 0) == startField then
+                table.insert(usable, waypoint)
+            end
+        end
+        if #usable < 2 then return nil end
+        return usable
+    end
+    local usable = attempt(position)
+    if not usable and startField then
+        -- ComputeAsync often refuses goals sitting inside flowers/props:
+        -- retry once with the goal nudged 6 studs toward the field center
+        -- (arrival is radius-based, and the caller closes the last few studs).
+        local boundsCFrame = fieldBoundsOf(startField)
+        if boundsCFrame then
+            local center = Vector3.new(boundsCFrame.Position.X, position.Y, boundsCFrame.Position.Z)
+            local nudged = position + (center - position).Unit * 6
+            if (nudged - position).Magnitude > 1 then
+                usable = attempt(nudged)
+            end
         end
     end
-    if #usable < 2 then return false end
+    return usable
+end
+
+-- Obstacle memory: positions where walking recently ground to a halt. New
+-- walks whose straight route passes a fresh memory pathfind IMMEDIATELY
+-- instead of re-stalling for the full 1.2s watchdog first.
+local function rememberStuckSpot(position)
+    local now = os.clock()
+    Runtime.StuckSpots = Runtime.StuckSpots or {}
+    -- Prune expired entries, then cap the list.
+    local fresh = {}
+    for _, spot in ipairs(Runtime.StuckSpots) do
+        if now - spot.At < 60 then table.insert(fresh, spot) end
+    end
+    table.insert(fresh, {Position = position, At = now})
+    while #fresh > 16 do table.remove(fresh, 1) end
+    Runtime.StuckSpots = fresh
+end
+
+local function straightPassesStuckSpot(from, to)
+    local now = os.clock()
+    local flatFrom = Vector3.new(from.X, 0, from.Z)
+    local flatTo = Vector3.new(to.X, 0, to.Z)
+    local length = (flatTo - flatFrom).Magnitude
+    if length < 4 then return false end
+    local steps = math.max(1, math.ceil(length / 4))
+    for _, spot in ipairs(Runtime.StuckSpots or {}) do
+        if now - spot.At < 60 then
+            local flatSpot = Vector3.new(spot.Position.X, 0, spot.Position.Z)
+            for step = 0, steps do
+                local point = flatFrom:Lerp(flatTo, step / steps)
+                if (point - flatSpot).Magnitude <= 8 then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function walkFieldPath(humanoid, root, position, generation)
+    local startField = flowerFieldAtPosition(root.Position, Config.TokenFieldPadding)
+    local usable = computeFieldPath(root.Position, position, startField)
+    if not usable then return false end
     local index = 2
     while index <= #usable do
         local waypoint = usable[index]
@@ -1357,6 +1467,16 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
         -- previous glide's grace window, otherwise MoveTo silently stalls.
         if Runtime.TweenRoot == root then releaseTweenRoot() end
         if walkingInsideField then applyFieldMoveSpeed(humanoid, generation) end
+        -- Obstacle memory: a fresh stuck spot on the straight route engages
+        -- pathfinding right away instead of re-stalling for the watchdog.
+        if Config.SmartFieldPathfind and walkingInsideField
+            and os.clock() >= (Runtime.LastFieldPathfindAt or 0)
+                + math.max(2, tonumber(Config.FieldPathfindCooldown) or 6)
+            and straightPassesStuckSpot(root.Position, position) then
+            Runtime.LastFieldPathfindAt = os.clock()
+            setStatus("Smart move", "Known obstacle ahead - pathfinding early")
+            walkFieldPath(humanoid, root, position, generation)
+        end
         humanoid:MoveTo(position)
         local maxWalkTime = forceWalk and math.min(4, Config.SmartFieldWalkTimeout)
             or (walkingInsideField and Config.SmartFieldWalkTimeout or 4)
@@ -1401,9 +1521,12 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
                 local targetCornerDistance = fieldCornerDistance(startField, position)
                 if cornerDistance and cornerDistance < (tonumber(Config.FieldCornerDistance) or 18)
                     and (not targetCornerDistance or targetCornerDistance >= cornerDistance) then
-                    Runtime.LastCornerAvoidAt = os.clock()
                     local center = fieldCenterPosition(startField, root.Position.Y)
-                    if center then
+                    -- Threat-blind centers fought the mob detours: only glide
+                    -- when the center itself is clear of mobs/hazards.
+                    if center and Runtime.SegmentThreat(center, center,
+                        math.max(8, tonumber(Config.MobThreatRadius) or 16) + 2) == nil then
+                        Runtime.LastCornerAvoidAt = os.clock()
                         setStatus("Smart move", "Near field corner - gliding to center")
                         local cornerStart = os.clock()
                         if Runtime.TweenRoot ~= root then
@@ -1454,6 +1577,7 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
                     + math.max(2, tonumber(Config.FieldPathfindCooldown) or 6) then
                     Runtime.LastFieldPathfindAt = os.clock()
                     stuckTicks = 0
+                    rememberStuckSpot(root.Position)
                     setStatus("Smart move", "Stuck - pathfinding around obstacle")
                     local pathStartedAt = os.clock()
                     walkFieldPath(humanoid, root, position, generation)
@@ -1519,7 +1643,10 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
     local arrived = routeSucceeded and (root.Position - position).Magnitude <= Config.SmartArrivalDistance
     if arrived and root.Parent then
         pcall(function()
-            root.CFrame = targetCFrame
+            -- Rotation-preserving snap: every glide keeps the character's
+            -- heading frozen; rewriting the raw targetCFrame here would spin
+            -- it one frame before the next move (the visible arrival jerk).
+            root.CFrame = CFrame.new(targetCFrame.Position) * (root.CFrame - root.CFrame.Position)
             root.AssemblyLinearVelocity = Vector3.zero
             root.AssemblyAngularVelocity = Vector3.zero
         end)
@@ -2925,12 +3052,149 @@ local function standingField()
     return field
 end
 
+-- THREAT MAP -------------------------------------------------------------------
+-- One shared picture of "what hurts": live mobs (same source the avoid worker
+-- reads) plus named hazards (goo patches, stick-bug debris, spike telegraphs).
+-- The token scorer and the farm mover query it so routes go AROUND danger at
+-- planning time, instead of the old walk-in / stop / jump pattern.
+local function threatPlanRadius(object)
+    if object:IsA("BasePart") then
+        return math.max(object.Size.X, object.Size.Z) * 0.5 + 3
+    end
+    local ok, _, boundsSize = pcall(function() return object:GetBoundingBox() end)
+    if ok and boundsSize then
+        return math.max(boundsSize.X, boundsSize.Z) * 0.5 + 3
+    end
+    return 6
+end
+
+local function collectThreats(field)
+    local threats = {}
+    local mobRadius = math.max(8, tonumber(Config.MobThreatRadius) or 16)
+    local monsters = workspace:FindFirstChild("Monsters")
+    if monsters then
+        for _, mob in ipairs(monsters:GetChildren()) do
+            local mobHumanoid = mob:FindFirstChildOfClass("Humanoid")
+            if mobHumanoid and mobHumanoid.Health > 0 then
+                local position = objectPosition(mob)
+                if position then
+                    table.insert(threats, {Position = position, Radius = mobRadius, Kind = "Mob"})
+                end
+            end
+        end
+    end
+    -- Hazards: shallow name-pattern scans only (cheap, TTL-cached).
+    local patterns = Config.HazardNamePatterns or {}
+    local containers = {workspace:FindFirstChild("Effects"), field}
+    for _, container in ipairs(containers) do
+        if container then
+            for _, object in ipairs(container:GetChildren()) do
+                local lowered = string.lower(tostring(object.Name))
+                for _, pattern in ipairs(patterns) do
+                    if lowered ~= "" and string.find(lowered, pattern, 1, true) then
+                        local position = objectPosition(object)
+                        if position then
+                            table.insert(threats, {
+                                Position = position,
+                                Radius = math.max(6, threatPlanRadius(object)),
+                                Kind = "Hazard",
+                            })
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return threats
+end
+
+function Runtime.RefreshThreats(force)
+    local now = os.clock()
+    if not force and now - (Runtime.ThreatsAt or 0) < 0.5 then return Runtime.Threats or {} end
+    Runtime.ThreatsAt = now
+    Runtime.Threats = collectThreats(standingField())
+    return Runtime.Threats
+end
+
+-- Block check for a straight segment (XZ plane): samples every 4 studs against
+-- every threat circle; margin grows the circles (player body width).
+function Runtime.SegmentThreat(from, to, margin)
+    margin = margin or 0
+    local threats = Runtime.RefreshThreats()
+    if #threats == 0 then return nil end
+    local flatFrom = Vector3.new(from.X, 0, from.Z)
+    local flatTo = Vector3.new(to.X, 0, to.Z)
+    local length = (flatTo - flatFrom).Magnitude
+    local steps = math.max(1, math.ceil(length / 4))
+    for step = 0, steps do
+        local point = flatFrom:Lerp(flatTo, step / steps)
+        for _, threat in ipairs(threats) do
+            local threatFlat = Vector3.new(threat.Position.X, 0, threat.Position.Z)
+            if (point - threatFlat).Magnitude <= threat.Radius + margin then
+                return threat
+            end
+        end
+    end
+    return nil
+end
+
+-- Detour cache keyed by rounded endpoints: repeated queries inside one sweep
+-- reuse the ComputeAsync result instead of paying for it again.
+Runtime.DetourCache = {}
+local detourCacheCount = 0
+
+function Runtime.DetourWaypoints(from, to, margin)
+    margin = margin or 0
+    local key = string.format("%.0f|%.0f|%.0f|%.0f", from.X, from.Z, to.X, to.Z)
+    local cached = Runtime.DetourCache[key]
+    local now = os.clock()
+    if cached and now - cached.At < (tonumber(Config.TokenDetourCacheSeconds) or 1) then
+        return cached.Waypoints, cached.Length
+    end
+    if detourCacheCount > 32 then
+        Runtime.DetourCache = {}
+        detourCacheCount = 0
+    end
+    local waypoints, length
+    local _, _, root = getCharacter(1)
+    local startField = standingField()
+    if root then
+        local usable = computeFieldPath(root.Position, to, startField)
+        if usable then
+            -- Every leg of the polyline must be clear, or there is no detour.
+            length = 0
+            local previous = from
+            local clear = true
+            for index = 2, #usable do
+                local point = usable[index].Position
+                length += (Vector3.new(point.X, 0, point.Z)
+                    - Vector3.new(previous.X, 0, previous.Z)).Magnitude
+                if Runtime.SegmentThreat(previous, point, margin) then
+                    clear = false
+                    break
+                end
+                previous = point
+            end
+            if clear and length <= (tonumber(Config.TokenDetourMaxStuds) or 60) then
+                waypoints = usable
+            end
+        end
+    end
+    if Runtime.DetourCache[key] == nil then detourCacheCount += 1 end
+    Runtime.DetourCache[key] = {At = now, Waypoints = waypoints, Length = length or 0}
+    return waypoints, waypoints and length or nil
+end
+
 local function scanTokenNodesInStandingField()
     local folder = workspace:FindFirstChild("Collectibles")
     local _, humanoid, root = getCharacter(1)
     local field = standingField()
     if not folder or not humanoid or not root or not field then return {}, nil, nil end
     local now = os.clock()
+    Runtime.RefreshThreats()
+    local pathfind = Config.TokenPathfind ~= false
+    local pathMargin = math.max(0, tonumber(Config.TokenPathMargin) or 4)
     local nodes = {}
     for _, token in ipairs(folder:GetChildren()) do
         if tokenAllowed(token) then
@@ -2942,6 +3206,11 @@ local function scanTokenNodesInStandingField()
                     local remaining, lifetime = tokenLifetime(token, now)
                     if remaining > 0 then
                         local utility = tokenUtility(token, descriptor)
+                        -- Mob-aware greedy: a token whose straight path crosses
+                        -- a mob/hazard is DEMOTED, not dropped - the DFS can
+                        -- still pick it when everything else is worse.
+                        local rootBlocked = pathfind
+                            and Runtime.SegmentThreat(root.Position, position, pathMargin) ~= nil
                         table.insert(nodes, {
                             Token = token,
                             Position = position,
@@ -2949,7 +3218,9 @@ local function scanTokenNodesInStandingField()
                             Utility = utility,
                             Remaining = remaining,
                             Lifetime = lifetime,
-                            Greedy = utility / math.max(0.1, distance / math.max(humanoid.WalkSpeed, 1) + Config.TokenCollectDelay),
+                            RootBlocked = rootBlocked,
+                            Greedy = utility / math.max(0.1, distance / math.max(humanoid.WalkSpeed, 1) + Config.TokenCollectDelay)
+                                * (rootBlocked and 0.25 or 1),
                         })
                     end
                 end
@@ -2958,14 +3229,34 @@ local function scanTokenNodesInStandingField()
     end
     table.sort(nodes, function(a, b) return a.Greedy > b.Greedy end)
     while #nodes > Config.TokenSearchBreadth do table.remove(nodes) end
+    -- Blocked-pair matrix (node -> node): the DFS asks "is this hop clear?"
+    -- up to hundreds of times per scan; O(1) lookups beat re-sampling the
+    -- same segments in every recursion branch.
+    if pathfind then
+        for i, node in ipairs(nodes) do
+            node.Blocked = {}
+            for j, other in ipairs(nodes) do
+                if i ~= j then
+                    node.Blocked[j] = Runtime.SegmentThreat(node.Position, other.Position, pathMargin) ~= nil
+                end
+            end
+        end
+    end
     return nodes, root, humanoid
 end
 
-local function searchTokenRoute(nodes, fromPosition, elapsed, depth, used, speedMultiplier, rewardMultiplier)
+local function searchTokenRoute(nodes, rootPosition, fromIndex, elapsed, depth, used, speedMultiplier, rewardMultiplier)
     if depth <= 0 then return 0, {} end
+    local fromPosition = fromIndex == 0 and rootPosition or nodes[fromIndex].Position
     local bestScore, bestRoute = 0, {}
     for index, node in ipairs(nodes) do
         if not used[index] and node.Token.Parent then
+            -- The DFS never plans THROUGH danger: a hop crossing a mob/hazard
+            -- circle is skipped (per-hop O(1) matrix lookup, no resampling).
+            local blocked = Config.TokenPathfind ~= false
+                and ((fromIndex == 0 and node.RootBlocked)
+                    or (fromIndex > 0 and node.Blocked and node.Blocked[fromIndex]))
+            if not blocked then
             local travelTime = (node.Position - fromPosition).Magnitude
                 / math.max(1, 16 * speedMultiplier)
             local arrival = elapsed + travelTime + Config.TokenCollectDelay
@@ -2979,7 +3270,8 @@ local function searchTokenRoute(nodes, fromPosition, elapsed, depth, used, speed
                 used[index] = true
                 local futureScore, futureRoute = searchTokenRoute(
                     nodes,
-                    node.Position,
+                    rootPosition,
+                    index,
                     arrival,
                     depth - 1,
                     used,
@@ -2993,6 +3285,7 @@ local function searchTokenRoute(nodes, fromPosition, elapsed, depth, used, speed
                     bestRoute = {index}
                     for _, futureIndex in ipairs(futureRoute) do table.insert(bestRoute, futureIndex) end
                 end
+            end
             end
         end
     end
@@ -3010,6 +3303,7 @@ local function findBestTokenInStandingField()
         nodes,
         root.Position,
         0,
+        0,
         math.max(1, Config.TokenSearchDepth),
         {},
         math.max(0.25, humanoid.WalkSpeed / 16),
@@ -3020,6 +3314,20 @@ local function findBestTokenInStandingField()
     Runtime.LastTokenPlan = table.concat(planNames, " -> ")
     Runtime.LastTokenScore = score
     local first = route[1] and nodes[route[1]]
+    -- Fresh plan: stale detours from the previous sweep die here.
+    Runtime.TokenDetours = {}
+    -- Lazy detour: only the token we actually chase pays for ComputeAsync.
+    if first and Config.TokenPathfind ~= false and first.RootBlocked then
+        local waypoints = Runtime.DetourWaypoints(root.Position, first.Position, Config.TokenPathMargin)
+        if waypoints then
+            Runtime.TokenDetours[first.Token] = waypoints
+        else
+            -- No clear route to the best token: skip this sweep round.
+            Runtime.LastTokenPlan = ""
+            Runtime.LastTokenScore = 0
+            return nil, 0, {}
+        end
+    end
     return first and first.Token or nil, score, route
 end
 
@@ -3037,7 +3345,54 @@ local function collectToken(token, owner)
         or not tokenNearFieldSurface(field, position) then return false end
     Runtime.TokenCooldowns[token] = os.clock() + Config.TokenAttemptCooldown
     local movementOwner = owner or "Token"
-    local meteorWalk = string.find(tostring(movementOwner), "Meteor", 1, true) == 1
+    -- Choke-point threat guard: every chase passes here (moon charms and the
+    -- vic/planter sweeps too, where the avoid worker is disabled). Mob-fight
+    -- owners intentionally walk INTO the mob and are exempt.
+    local lowerOwner = string.lower(movementOwner)
+    local exempt = string.find(lowerOwner, "meteor", 1, true)
+        or string.find(lowerOwner, "vicious", 1, true)
+        or string.find(lowerOwner, "mondo", 1, true)
+        or string.find(lowerOwner, "questmob", 1, true)
+    local detour
+    if Config.TokenPathfind ~= false and not exempt then
+        local _, _, guardRoot = getCharacter(1)
+        if guardRoot and Runtime.SegmentThreat(guardRoot.Position, position, Config.TokenPathMargin) then
+            detour = Runtime.TokenDetours and Runtime.TokenDetours[token]
+                or select(1, Runtime.DetourWaypoints(guardRoot.Position, position, Config.TokenPathMargin))
+            if not detour then
+                -- Nothing clear leads there: skip the token (the attempt
+                -- cooldown charged above throttles any rescans).
+                return false
+            end
+        end
+    end
+    -- Detour pre-legs walk in ONE generation (one tweenTo per waypoint would
+    -- churn generations, reset corner-avoid and leave ownership gaps), then
+    -- the usual final leg to the token below.
+    if detour then
+        local _, detourHumanoid, detourRoot = getCharacter(1)
+        if detourHumanoid and detourRoot then
+            Runtime.TweenGeneration += 1
+            local generation = Runtime.TweenGeneration
+            Runtime.Glide = nil
+            releaseTweenRoot()
+            Runtime.MovementOwner = movementOwner
+            applyFieldMoveSpeed(detourHumanoid, generation)
+            for _, waypoint in ipairs(detour) do
+                if Runtime.TweenGeneration ~= generation then break end
+                detourHumanoid:MoveTo(waypoint.Position)
+                local legDeadline = os.clock() + 2
+                while Runtime.Running and Runtime.TweenGeneration == generation
+                    and detourHumanoid.Health > 0 and not Runtime.AvoidingMob
+                    and (detourRoot.Position - waypoint.Position).Magnitude > 3.5
+                    and os.clock() < legDeadline do
+                    task.wait(0.05)
+                end
+                if Runtime.TweenGeneration ~= generation or Runtime.AvoidingMob then break end
+            end
+        end
+    end
+    local meteorWalk = string.find(lowerOwner, "meteor", 1, true) == 1
     local ok = tweenTo(CFrame.new(position + Vector3.new(0, 1.5, 0)),
         Config.TokenTweenSpeed, movementOwner, meteorWalk)
     if ok then task.wait(0.12) end
@@ -3143,7 +3498,40 @@ local function farmStep(seconds, overrideField, state, detail)
             local remaining = math.max(0, deadline - os.clock())
             if sweepTokens(math.min(Config.TokenSweepDuration, remaining), "FarmToken") > 0 then continue end
         end
-        local point = fieldPoint(field)
+        -- Smart point selection: several random candidates; ones whose walk
+        -- crosses a mob/hazard are dropped (margin >= threat radius + body so
+        -- the avoid worker's hold band is never walked into) and the FARTHEST
+        -- survivor wins, so farming sweeps the whole field instead of one
+        -- corner. If every candidate is blocked, the raw set stays in play -
+        -- the avoid worker owns those cases.
+        local point
+        do
+            local _, _, farmRoot = getCharacter(1)
+            local margin = math.max(8, tonumber(Config.MobThreatRadius) or 16) + 4
+            local candidates = {}
+            for _ = 1, math.max(1, tonumber(Config.FarmPointCandidates) or 3) do
+                local candidate = fieldPoint(field)
+                if candidate then
+                    local distance = 0
+                    if farmRoot then
+                        distance = (Vector3.new(candidate.X, 0, candidate.Z)
+                            - Vector3.new(farmRoot.Position.X, 0, farmRoot.Position.Z)).Magnitude
+                    end
+                    table.insert(candidates, {Point = candidate, Distance = distance})
+                end
+            end
+            if Config.FarmAvoidMobs and #candidates > 1 then
+                local filtered = {}
+                for _, candidate in ipairs(candidates) do
+                    local pathClear = not farmRoot
+                        or Runtime.SegmentThreat(farmRoot.Position, candidate.Point, margin) == nil
+                    if pathClear then table.insert(filtered, candidate) end
+                end
+                if #filtered > 0 then candidates = filtered end
+            end
+            table.sort(candidates, function(a, b) return a.Distance > b.Distance end)
+            point = candidates[1] and candidates[1].Point or nil
+        end
         if point then
             local startedAt = os.clock()
             tweenTo(CFrame.new(point), Config.TweenSpeed, "Farm")
@@ -3182,6 +3570,14 @@ function Runtime.ClaimFreeToys()
     local now = os.clock()
     if now < (Runtime.NextFreeToyCheck or 0) then return false end
     Runtime.NextFreeToyCheck = now + 5
+    -- Periodic boost pickup: boosts from ANY source (dispensers, gifted-bee
+    -- tokens, our own booster tap) land in stats - rescan when none is active.
+    if os.clock() >= (Runtime.BoostedFieldUntil or 0)
+        and os.clock() >= (Runtime.NextBoostRescanAt or 0) then
+        Runtime.NextBoostRescanAt = os.clock()
+            + math.max(30, tonumber(Config.BoostRescanInterval) or 60)
+        Runtime.DetectFieldBoost(MaterialSystem.Stats(false))
+    end
     local stats = getStats(false)
     local serverNow = MaterialSystem.Clock()
     local toysFolder = workspace:FindFirstChild("Toys")
@@ -3196,7 +3592,12 @@ function Runtime.ClaimFreeToys()
     end
     for _, toyEntry in ipairs(Config.AutoToys or {}) do
         local toyName = tostring(toyEntry.Name or "")
-        if toyName ~= "" and (Runtime.ToyRetryAt[toyName] or 0) <= now then
+        -- Blue Field Booster gate: the hive needs enough BLUE bee TYPES before
+        -- the pad is worth tapping (re-check every 5 min until it qualifies).
+        if toyEntry.FieldBoost == "Blue"
+            and Runtime.BlueDiscoveryCount(false) < math.max(1, tonumber(Config.BlueBoosterMinDiscoveries) or 3) then
+            Runtime.ToyRetryAt[toyName] = now + 300
+        elseif toyName ~= "" and (Runtime.ToyRetryAt[toyName] or 0) <= now then
             local cooldown = math.max(60, tonumber(toyEntry.Cooldown) or 7200)
             local toyInstance = toysFolder and toysFolder:FindFirstChild(toyName)
             if toyInstance then
@@ -3290,15 +3691,30 @@ function Runtime.DetectFieldBoost(stats, colorHint)
         if type(value) ~= "table" or visited[value] then return end
         visited[value] = true
         for key, child in pairs(value) do
-            if type(key) == "string" and FIELD_COLORS[key] ~= nil and allowed(key) then
+            -- Two accepted shapes: the bare field name, or "<Field> Boost"
+            -- (the game's buff-tile key). Suffix keys derive their base so
+            -- the whitelist + color map keep gating both.
+            local baseKey, boostKey = key, false
+            if type(key) == "string" and FIELD_COLORS[key] == nil then
+                local base = string.match(string.lower(key), "^(.-)%s+boost$")
+                if base and FIELD_COLORS[base] ~= nil and allowed(base) then
+                    baseKey = base
+                    boostKey = true
+                end
+            end
+            if type(key) == "string" and FIELD_COLORS[baseKey] ~= nil and allowed(baseKey) then
                 local multiplier = tonumber(child)
                 if type(child) == "table" then
                     multiplier = tonumber(child.Value or child.Mult or child.Boost or child.Amount or child.Multiplier)
                 end
-                if multiplier and multiplier > 1 then
-                    local hinted = colorHint ~= nil and FIELD_COLORS[key] == colorHint
+                -- Pollen TOTALS share these field-name keys (values in the
+                -- thousands - seen x9585 live). Only small multipliers, or an
+                -- explicit "<Field> Boost" key, are real field boosts.
+                if multiplier and multiplier > 1
+                    and (boostKey or multiplier <= 10) then
+                    local hinted = colorHint ~= nil and FIELD_COLORS[baseKey] == colorHint
                     if not best or (hinted and not bestIsHinted) then
-                        best = key
+                        best = baseKey
                         bestIsHinted = hinted
                     end
                 end
@@ -3485,6 +3901,10 @@ Runtime.MobRoutes = {
     ["King Beetle"] = {Fields = {"Clover Field"}, Spawners = {"King Beetle Cave"}, Cooldown = 86400},
     ["Tunnel Bear"] = {Fields = {}, Spawners = {"TunnelBear"}, Cooldown = 172800, AllowNoField = true},
     ["Stump Snail"] = {Fields = {"Stump Field"}, Spawners = {"StumpSnail"}, Cooldown = 345600},
+    -- Coconut Crab (hourly on Coconut Field): fought HEAD-RIDE style by the
+    -- bonus-mob worker (same technique as the Vicious ride). Stump Snail above
+    -- stays quest-only: an hours-long fight wastes the whole scheduler.
+    ["Coconut Crab"] = {Fields = {"Coconut Field"}, Spawners = {"CoconutCrab"}, Cooldown = 3600},
 }
 
 Runtime.NormalizeMobType = function(value)
@@ -3683,10 +4103,24 @@ local function fieldAdvancesObjective(fieldName, objective)
     return taskData.Type == "Collect Pollen" or taskData.Type == "Collect Goo"
 end
 
+-- Dynamic bear priority. Mother-first fits the early hive (her treats and
+-- Royal Jelly feed growth, and her feed tasks already complete off-thread).
+-- From ~10 bees the Black Bear CHAIN is the real progression line, so it takes
+-- the front until the Diamond Egg rule stops it - then Mother cycles again.
+local function questNpcPriority()
+    local stopped = Runtime.BlackBearStopped
+        or (type(Runtime.BlackBearStopState) == "function"
+            and Runtime.BlackBearStopState() == "past")
+    if not stopped and beeCount() >= math.max(1, tonumber(Config.BlackBearPriorityAfterBees) or 10) then
+        return {"Black Bear", "Mother Bear", "Science Bear", "Polar Bear"}
+    end
+    return Config.QuestFarmPriority or Config.QuestNPCs or {}
+end
+
 local function chooseQuestField(objectives)
     local candidates = {}
     local npcRanks = {}
-    for index, npcName in ipairs(Config.QuestFarmPriority or Config.QuestNPCs or {}) do
+    for index, npcName in ipairs(questNpcPriority()) do
         npcRanks[npcName] = index
     end
     for _, objective in ipairs(objectives) do
@@ -3716,6 +4150,10 @@ local function chooseQuestField(objectives)
     local best
     for _, candidate in pairs(candidates) do
         if current and current.Name == candidate.Name then candidate.Score += 8 end
+        -- An objective that NAMES this field outranks same-rank guesses: the
+        -- game explicitly asked for it, so treat it as +6 (ties only - the
+        -- NPC rank still dominates).
+        if candidate.Explicit then candidate.Score += 6 end
         if not best or candidate.NPCRank < best.NPCRank
             or (candidate.NPCRank == best.NPCRank and candidate.Score > best.Score) then
             best = candidate
@@ -3818,7 +4256,9 @@ local function maintainBearQuests()
     Runtime.LastQuestCheck = os.clock()
     local active = activeBearQuests(true)
     local currentBees = beeCount()
-    for _, npcName in ipairs(Config.QuestNPCs) do
+    -- Same dynamic order the farm router uses: turn in / re-accept from the
+    -- highest-priority bear first so accept-order matches farm priority.
+    for _, npcName in ipairs(questNpcPriority()) do
         local requiredBees = tonumber((Config.QuestNPCBeeRequirements or {})[npcName]) or 0
         if currentBees < requiredBees then continue end
         local hasQuest, allDone, previousQuest = false, true, nil
@@ -4482,10 +4922,51 @@ function Runtime.HandleAmuletOffer(...)
                 amuletType = amuletType or payload.Type or payload.AmuletType or payload.Category
                 amuletName = amuletName or payload.Name or payload.AmuletName
                 statsText = statsText or payload.Stats or payload.Text or payload.Description
+                if type(statsText) == "table" then
+                    -- Structured stat list (no "+X%" string anywhere): rebuild
+                    -- the "+N Name" text the comparer expects. Entry shapes
+                    -- seen across builds: {Stat/Name/Key, Value/Amount/Mult}.
+                    local parts = {}
+                    for _, entry in ipairs(statsText) do
+                        if type(entry) == "string" then
+                            table.insert(parts, entry)
+                        elseif type(entry) == "table" then
+                            local label = tostring(entry.Stat or entry.Name or entry.Key or "")
+                            local value = tonumber(entry.Value or entry.Amount or entry.Mult
+                                or entry.Multiplier or entry.Bonus)
+                            if label ~= "" and value then
+                                table.insert(parts, string.format("+%g %s", value, label))
+                            end
+                        end
+                    end
+                    statsText = #parts > 0 and table.concat(parts, ", ") or nil
+                end
             end
         end
     end
-    if not statsText then return end
+    if not statsText then
+        -- Ground-truth capture: dump the raw offer ONCE per session so the
+        -- parser can be locked to the live shape (silent drops were the whole
+        -- "amulet not working" symptom).
+        if not Runtime.AmuletPayloadDumped then
+            Runtime.AmuletPayloadDumped = true
+            local pieces = {}
+            for i = 1, math.min(args.n, 4) do
+                pieces[i] = typeof(args[i]) == "table" and "{table}"
+                    or tostring(args[i]):sub(1, 80)
+            end
+            warn("[BSS Kaitun] Amulet offer UNPARSED (args: " .. table.concat(pieces, " | ") .. ")")
+            for i = 1, args.n do
+                if type(args[i]) == "table" then
+                    for key, child in pairs(args[i]) do
+                        warn(string.format("[BSS Kaitun]   offer[%s].%s = %s",
+                            i, tostring(key), type(child) == "table" and "{table}" or tostring(child):sub(1, 60)))
+                    end
+                end
+            end
+        end
+        return
+    end
 
     local currentText = Runtime.EquippedAmuletStatsText(amuletType)
     local accept = true
@@ -4514,6 +4995,24 @@ if amuletOfferRemote and amuletOfferRemote:IsA("RemoteEvent") then
     warn("[BSS Kaitun] Auto amulet armed (remote listener + GUI fallback)")
 else
     warn("[BSS Kaitun] LocalAmuletEvent not found - GUI fallback only")
+end
+-- Diagnostic-only listener: ServerOfferReward may be the real offer channel on
+-- some servers. It is LOGGED, never answered - learning the shape without the
+-- risk of double-accepting an offer LocalAmuletEvent already handled.
+do
+    local rewardRemote = Events:FindFirstChild("ServerOfferReward")
+    if rewardRemote and rewardRemote:IsA("RemoteEvent") then
+        connect(rewardRemote.OnClientEvent, function(...)
+            if Runtime.AmuletRewardDumped or not Config.AutoCompareAmulets then return end
+            Runtime.AmuletRewardDumped = true
+            local pieces = {}
+            for i = 1, math.min(select("#", ...), 4) do
+                local value = select(i, ...)
+                pieces[i] = typeof(value) == "table" and "{table}" or tostring(value):sub(1, 80)
+            end
+            warn("[BSS Kaitun] ServerOfferReward payload (log-only): " .. table.concat(pieces, " | "))
+        end)
+    end
 end
 
 -- GUI fallback: some servers drive the amulet offer purely through the GUI, so
@@ -4642,9 +5141,10 @@ local function questWork(seconds)
     -- the character keeps farm-moving while feeds happen off-thread.
     local plan = chooseQuestField(objectives)
     local planRank = plan and plan.NPCRank or math.huge
-    -- Mob objectives also respect NPC order. E.g. when Science has a farmable
-    -- objective, out-of-order jobs must not cut in line.
-    for rank, npcName in ipairs(Config.QuestFarmPriority or Config.QuestNPCs or {}) do
+    -- Mob objectives also respect NPC order (the SAME dynamic order the field
+    -- plan uses, or the two rank systems would disagree). E.g. when Science
+    -- has a farmable objective, out-of-order jobs must not cut in line.
+    for rank, npcName in ipairs(questNpcPriority()) do
         if rank > planRank then break end
         for _, objective in ipairs(objectives) do
             if objective.NPC == npcName and objective.Task
@@ -4671,6 +5171,27 @@ local function questWork(seconds)
                     Runtime.QuestFarming = false
                     return ok
                 end
+            end
+        end
+    end
+    -- Boost awareness: while a field booster is active, farm the boost field
+    -- when it advances at least one objective - quest progress AND x2+ pollen
+    -- in the same pass instead of ignoring the boost (pollen totals are the
+    -- scarce resource early game).
+    if plan and Config.BoostedQuestFarm ~= false
+        and Runtime.BoostedField and os.clock() < (Runtime.BoostedFieldUntil or 0)
+        and fieldUnlocked(Runtime.BoostedField) and plan.Name ~= Runtime.BoostedField then
+        for _, objective in ipairs(objectives) do
+            if fieldAdvancesObjective(Runtime.BoostedField, objective) then
+                plan = {
+                    Name = Runtime.BoostedField,
+                    Score = plan.Score + 50,
+                    Objectives = plan.Objectives,
+                    Explicit = plan.Explicit,
+                    NPCRank = plan.NPCRank,
+                    PrimaryObjective = plan.PrimaryObjective,
+                }
+                break
             end
         end
     end
@@ -4857,6 +5378,10 @@ task.spawn(function()
             -- Threat (retreat + farm pause) still requires the mob inside the
             -- small danger radius, so mob-heavy fields keep farming while hopping.
             local threatRadius = math.max(8, tonumber(Config.MobThreatRadius) or 16)
+            -- Hop band: the dodge hop fires only when a mob is CLOSE (default
+            -- 30). At the old 55-stud scan radius the character hopped with no
+            -- mob anywhere near it (video feedback) - pure noise.
+            local jumpRadius = math.max(threatRadius + 4, tonumber(Config.MobJumpRadius) or 30)
             local mobNear, nearestDistance = false, nil
             if root then
                 for _, mob in ipairs(mobs) do
@@ -4866,7 +5391,7 @@ task.spawn(function()
                     end
                 end
                 mobNear = nearestDistance ~= nil
-                    and nearestDistance <= (tonumber(Config.MobScanRadius) or 55)
+                    and nearestDistance <= jumpRadius
             end
             threatening = nearestDistance ~= nil and nearestDistance <= threatRadius
                 and humanoid ~= nil and root ~= nil and not root.Anchored
@@ -5564,6 +6089,13 @@ task.spawn(function()
             and type(MaterialSystem.FindVicious) == "function" then
             Runtime.ViciousPending = MaterialSystem.FindVicious() ~= nil
         end
+        -- Bonus mobs (read-only pick): a live/ready mob lands in Pending; the
+        -- scheduler's priority slots do the actual fighting.
+        if enabled and Config.AutoFarmBonusMobs
+            and type(Runtime.ScanBonusMob) == "function" then
+            local okScan, errScan = pcall(Runtime.ScanBonusMob)
+            if not okScan then reportError("BonusMobScan", errScan) end
+        end
         task.wait(math.max(0.15, math.min(
             math.max(0.1, tonumber(Config.SproutScanInterval) or 0.25),
             math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25))))
@@ -5709,6 +6241,166 @@ function Runtime.FarmMondoChick()
     Runtime.MondoChickPending = false
     -- Dead or expired: wait 60s before rescanning to avoid retry spam.
     Runtime.MondoChickRetryAt = os.clock() + 60
+    task.defer(function() getStats(true) end)
+    return true
+end
+
+-- BONUS MOB SCANNER ------------------------------------------------------------
+-- Opportunistic hunting without a quest: whenever a mob is live or its spawner
+-- is ready, fight it. Rules: fight ONLY when the mob's level <= the hive's
+-- AVERAGE bee level; Stump Snail is never bonus-farmed (hours-long fight);
+-- Coconut Crab is fought HEAD-RIDE style (the Vicious technique).
+local function bonusMobLevelAllowed(mob)
+    local mobLevel = Runtime.MobLevel(mob)
+    local hiveLevel = Runtime.HiveAverageLevel()
+    if not mobLevel or not hiveLevel then return true end
+    return mobLevel <= hiveLevel
+end
+
+function Runtime.ScanBonusMob()
+    if not Config.AutoFarmBonusMobs or not Config.Enabled
+        or Runtime.MeteorPriorityActive or Runtime.BonusMobBusy
+        or Runtime.ViciousBusy or Runtime.PlanterBusy or Runtime.Digging then
+        Runtime.BonusMobPending = nil
+        return
+    end
+    local stats = getStats(false)
+    for canonical, route in pairs(Runtime.MobRoutes or {}) do
+        if canonical ~= "Stump Snail"
+            and os.clock() >= (Runtime.BonusMobRetryAt[canonical] or 0) then
+            -- A live mob beats a waiting spawner.
+            local live = Runtime.FindLiveQuestMob(canonical)
+            if live then
+                if bonusMobLevelAllowed(live) then
+                    Runtime.BonusMobPending = {
+                        Name = canonical, Route = route, Live = live,
+                        Field = Runtime.NearestMobField(live),
+                    }
+                    return
+                end
+                Runtime.BonusMobRetryAt[canonical] = os.clock() + 30
+            else
+                local monsters = workspace:FindFirstChild("MonsterSpawners")
+                for _, spawnerName in ipairs(route.Spawners or {}) do
+                    local spawner = monsters and monsters:FindFirstChild(spawnerName)
+                    if spawner then
+                        local ready = Runtime.QuestMobSpawnerReady(spawner, route, stats)
+                        if ready then
+                            local fieldName = route.Fields and route.Fields[1] or nil
+                            local field = fieldName and findField(fieldName) or nil
+                            if (field and fieldUnlocked(field.Name)) or route.AllowNoField then
+                                Runtime.BonusMobPending = {
+                                    Name = canonical, Route = route,
+                                    Spawner = spawner, Field = field,
+                                }
+                                return
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    Runtime.BonusMobPending = nil
+end
+
+function Runtime.FarmBonusMob()
+    local pending = Runtime.BonusMobPending
+    if not pending or not Config.AutoFarmBonusMobs
+        or Runtime.MeteorPriorityActive or Runtime.PlanterBusy or Runtime.ViciousBusy then
+        Runtime.BonusMobPending = nil
+        return false
+    end
+    Runtime.BonusMobBusy = true
+    Runtime.Digging = true
+    local canonical = pending.Name
+    local route = pending.Route
+    Runtime.CurrentField = pending.Field and pending.Field.Name or Runtime.CurrentField
+    setStatus("Bonus mob", canonical .. (pending.Field and (" | " .. pending.Field.Name) or ""))
+    local sawLive = false
+    if canonical == "Coconut Crab" then
+        -- HEAD-RIDE variant: stand on the crab's head and follow continuously -
+        -- the chained anchor-grace keeps the character from falling (Vicious
+        -- ride technique). ToolCollect stays rate-limited to the dig cadence.
+        local deadline = os.clock() + math.max(30, tonumber(Config.BonusMobFightTimeout) or 120)
+        while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+            and os.clock() < deadline do
+            local mob = Runtime.FindLiveQuestMob(canonical)
+            if not mob then break end
+            local mobPosition = objectPosition(mob)
+            local _, humanoid, root = getCharacter(1)
+            if not mobPosition or not humanoid or not root then break end
+            sawLive = true
+            -- Re-check the level gate on the live mob (a spawner-path mob only
+            -- reveals its level once spawned).
+            if not bonusMobLevelAllowed(mob) then
+                setStatus("Bonus mob", string.format("Skip %s: level above hive average", canonical))
+                Runtime.BonusMobRetryAt[canonical] = os.clock() + 60
+                break
+            end
+            local mobHeight = 8
+            pcall(function() mobHeight = mob:GetExtentsSize().Y end)
+            local rideTarget = CFrame.new(mobPosition
+                + Vector3.new(0, math.clamp(mobHeight * 0.5, 3, 12) + 3, 0))
+            -- A mid-fight cancelMovement clears MaterialCombat; re-assert so the
+            -- avoid worker never treats the mob we are riding as a threat.
+            Runtime.MaterialCombat = true
+            Runtime.Digging = true
+            if (root.Position - rideTarget.Position).Magnitude > 2 then
+                tweenTo(rideTarget, Config.TokenTweenSpeed, "BonusMob", nil, true)
+            else
+                humanoid:Move(Vector3.zero, false)
+                Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
+            end
+            if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
+                Runtime.LastVicToolCollect = os.clock()
+                remoteCall("ToolCollect")
+            end
+            task.wait(0.05)
+        end
+    else
+        -- Normal mobs: FarmQuestMob-style fight (retween when far, hop-dodge,
+        -- ToolCollect; wait out the spawn window when only the spawner was ready).
+        local destination = pending.Field and fieldPoint(pending.Field)
+            or objectPosition(pending.Spawner or pending.Live)
+        if destination then
+            tweenTo(CFrame.new(destination + Vector3.new(0, 3, 0)), Config.TweenSpeed, "BonusMob")
+        end
+        local deadline = os.clock() + math.max(6, tonumber(Config.BonusMobFightTimeout) or 120)
+        local spawnDeadline = os.clock() + math.max(2, tonumber(Config.QuestMobSpawnWait) or 12)
+        while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+            and os.clock() < deadline do
+            local mob = Runtime.FindLiveQuestMob(canonical)
+            if not mob then
+                if sawLive or os.clock() >= spawnDeadline then break end
+                task.wait(0.2)
+            else
+                if not bonusMobLevelAllowed(mob) then
+                    Runtime.BonusMobRetryAt[canonical] = os.clock() + 60
+                    break
+                end
+                sawLive = true
+                local position = objectPosition(mob)
+                local _, humanoid, root = getCharacter(1)
+                if not position or not humanoid or not root then break end
+                if (root.Position - position).Magnitude > (tonumber(Config.MobScanRadius) or 55) then
+                    tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "BonusMob")
+                elseif humanoid.FloorMaterial ~= Enum.Material.Air then
+                    humanoid.Jump = true
+                end
+                remoteCall("ToolCollect")
+                task.wait(0.2)
+            end
+        end
+    end
+    if sawLive and Config.AutoTokens then sweepTokens(3, "BonusDrop") end
+    Runtime.Digging = false
+    Runtime.MaterialCombat = false
+    Runtime.BonusMobBusy = false
+    Runtime.BonusMobPending = nil
+    -- The kill puts the spawner on its real cooldown; route.Cooldown is the
+    -- fallback when MonsterTimes has not replicated yet.
+    Runtime.BonusMobRetryAt[canonical] = os.clock() + math.max(60, tonumber(route.Cooldown) or 300)
     task.defer(function() getStats(true) end)
     return true
 end
@@ -7526,30 +8218,82 @@ function Runtime.PlanterCycleStep()
     local stats = MaterialSystem.Stats(false)
     local active = MaterialSystem.PlanterData()
 
-    -- 1) Harvest anything at (or effectively at) full growth. Unreadable
-    -- growth (nil progress) is skipped: a Gui-less planter must not count as
-    -- 0% forever nor wedge the slot cap below.
+    -- 1) Harvest DUE planters: growth at/over threshold AND the per-planter
+    -- cadence elapsed. Remote-first (no tween): the collect remote is one-way
+    -- so confirmation = the planter vanishing from LocalPlanters; walking is
+    -- the escalation path, and only there are the field tokens sweepable.
+    local nowClock = os.clock()
+    Runtime.PlanterHarvestedAt = Runtime.PlanterHarvestedAt or {}
+    Runtime.PlanterRemoteFails = Runtime.PlanterRemoteFails or {}
+    Runtime.PlanterBackoffUntil = Runtime.PlanterBackoffUntil or {}
     for _, data in ipairs(active) do
         local progress = MaterialSystem.PlanterProgress(data)
         if progress and progress >= (tonumber(Config.PlanterHarvestPercent) or 0.98) then
-            local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
-            local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
-            Runtime.PlanterBusy = true
-            setStatus("Planter", string.format("Harvest %s @ %s (%d%% grown)",
-                MaterialSystem.PlanterName(data), field and field.Name or "?",
-                math.floor(progress * 100 + 0.5)))
-            local ok = false
-            if position then
-                tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Planter")
-                ok = remoteCall("PlanterModelCollect", data.ActorID)
+            local id = tostring(data.ActorID)
+            if nowClock >= (Runtime.PlanterHarvestedAt[id] or 0)
+                + math.max(0, tonumber(Config.PlanterHarvestInterval) or 7200)
+                and nowClock >= (Runtime.PlanterBackoffUntil[id] or 0) then
+                local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
+                local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
+                Runtime.PlanterBusy = true
+                setStatus("Planter", string.format("Harvest %s @ %s (%d%% grown)",
+                    MaterialSystem.PlanterName(data), field and field.Name or "?",
+                    math.floor(progress * 100 + 0.5)))
+                local gone = function()
+                    local fresh = MaterialSystem.PlanterData()
+                    -- An EMPTY read is inconclusive (module/upvalue hiccup):
+                    -- treating it as "vanished" would record a phantom harvest.
+                    if #fresh == 0 then return false end
+                    for _, entry in ipairs(fresh) do
+                        if tostring(entry.ActorID) == id then return false end
+                    end
+                    return true
+                end
+                local ok = false
+                if Config.PlanterRemoteHarvest ~= false then
+                    for _ = 1, math.max(1, tonumber(Config.PlanterRemoteRetries) or 2) do
+                        remoteCall("PlanterModelCollect", data.ActorID)
+                        task.wait(1.5)
+                        if gone() then
+                            ok = true
+                            break
+                        end
+                        Runtime.PlanterRemoteFails[id] = (Runtime.PlanterRemoteFails[id] or 0) + 1
+                    end
+                end
+                if not ok then
+                    -- Server likely validated proximity: walk over ONCE and
+                    -- tap on site - the drops land nearby, so sweep them too.
+                    if position then
+                        tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Planter")
+                        remoteCall("PlanterModelCollect", data.ActorID)
+                        task.wait(1.5)
+                        ok = gone()
+                        if ok then sweepTokens(3, "PlanterDrop") end
+                    end
+                end
                 if ok then
                     Runtime.PlanterHarvests += 1
-                    task.wait(1)
-                    sweepTokens(3, "PlanterDrop")
+                    Runtime.PlanterHarvestedAt[id] = nowClock
+                    Runtime.PlanterRemoteFails[id] = nil
+                    Runtime.PlanterBackoffUntil[id] = nil
+                else
+                    -- Backoff so a wedged planter cannot retry every 30s and
+                    -- yank the character cross-map forever (5min -> 1h cap).
+                    Runtime.PlanterBackoffUntil[id] = nowClock
+                        + math.min(300 * math.max(1, Runtime.PlanterRemoteFails[id] or 1), 3600)
                 end
+                Runtime.PlanterBusy = false
+                return ok and "harvested" or "harvest-failed"
             end
-            Runtime.PlanterBusy = false
-            return ok and "harvested" or "harvest-failed"
+        end
+    end
+    -- Prune state for planters that no longer exist (ActorIDs rotate per plant).
+    local liveIds = {}
+    for _, data in ipairs(active) do liveIds[tostring(data.ActorID)] = true end
+    for mapName in pairs({PlanterHarvestedAt = true, PlanterRemoteFails = true, PlanterBackoffUntil = true}) do
+        for key in pairs(Runtime[mapName] or {}) do
+            if not liveIds[key] then Runtime[mapName][key] = nil end
         end
     end
 
@@ -8106,6 +8850,20 @@ local function progressionWork(reason, allowSideJobs)
                 return
             end
         end
+        -- Bonus mobs (no quest needed): level-gated, snail-free, crab rides.
+        if Config.AutoFarmBonusMobs and Runtime.BonusMobPending
+            and not Runtime.PlanterBusy then
+            local okBonus, errBonus = xpcall(Runtime.FarmBonusMob, debug.traceback)
+            if not okBonus then
+                Runtime.BonusMobBusy = false
+                Runtime.Digging = false
+                Runtime.MaterialCombat = false
+                Runtime.BonusMobPending = nil
+                reportError("BonusMob", errBonus)
+            elseif okBonus then
+                return
+            end
+        end
     end
     local ratio = pollenRatio()
     if Config.AutoConvert and ratio >= Config.ConvertPercent then
@@ -8306,6 +9064,20 @@ task.spawn(function()
                     Runtime.ViciousBusy = false
                     reportError("ViciousAlways", result)
                 elseif result then
+                    return
+                end
+            end
+
+            if Config.AutoFarmBonusMobs and Runtime.BonusMobPending
+                and not Runtime.PlanterBusy then
+                local okBonus, errBonus = xpcall(Runtime.FarmBonusMob, debug.traceback)
+                if not okBonus then
+                    Runtime.BonusMobBusy = false
+                    Runtime.Digging = false
+                    Runtime.MaterialCombat = false
+                    Runtime.BonusMobPending = nil
+                    reportError("BonusMob", errBonus)
+                elseif okBonus then
                     return
                 end
             end
