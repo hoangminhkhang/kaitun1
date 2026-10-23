@@ -4144,8 +4144,12 @@ Runtime.FarmQuestMob = function(objective, seconds)
             local _, humanoid, root = getCharacter(1)
             if position and humanoid and root and (root.Position - position).Magnitude > Config.MobScanRadius then
                 tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "QuestMob")
-            elseif humanoid and humanoid.FloorMaterial ~= Enum.Material.Air then
-                humanoid.Jump = true
+            elseif position and root and (root.Position - position).Magnitude < 6 then
+                -- Hop-free dodge: contact range -> backstep glide to the safe
+                -- 8-stud offset (bees keep attacking; the player never jumps).
+                tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TokenTweenSpeed, "QuestMob", nil, true)
+            else
+                humanoid:Move(Vector3.zero, false)
             end
             remoteCall("ToolCollect")
         elseif sawLive or os.clock() >= spawnDeadline then
@@ -5564,11 +5568,23 @@ task.spawn(function()
                 Runtime.MobRelocateTarget = nil
                 Runtime.MobRelocateUntil = 0
             end
-            -- Jump-dodge: mobs only connect while the character is grounded, so
-            -- keep hopping whenever ANY mob is around (threat or not).
+            -- Hop-free proximity response: a CLOSE mob (not yet threat-range)
+            -- triggers a short backstep glide away from it - no jumping. The
+            -- threat branch above still handles real danger with retreat/hold.
             if mobNear and humanoid and root and not root.Anchored
-                and humanoid.FloorMaterial ~= Enum.Material.Air then
-                humanoid.Jump = true
+                and not threatening and not Runtime.AvoidingMob
+                and os.clock() >= (Runtime.NextMobBackstepAt or 0) then
+                Runtime.NextMobBackstepAt = os.clock() + 1.5
+                local nearest = nil
+                for _, mob in ipairs(mobs) do
+                    if not nearest or (root.Position - mob.Position).Magnitude
+                        < (root.Position - nearest).Magnitude then
+                        nearest = mob.Position
+                    end
+                end
+                local away = root.Position
+                    + (root.Position - (nearest or root.Position)).Unit * 10
+                tweenTo(CFrame.new(away), Config.TokenTweenSpeed, "MobBackstep", nil, true)
             end
         else
             Runtime.AvoidingMob = false
@@ -6331,8 +6347,8 @@ function Runtime.FarmMondoChick()
         if (root.Position - position).Magnitude > 24 then
             tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "MondoChick")
         else
+            -- Hop-free: stand the safe offset; bees do the damage.
             humanoid:Move(Vector3.zero, false)
-            if humanoid.FloorMaterial ~= Enum.Material.Air then humanoid.Jump = true end
         end
         remoteCall("ToolCollect")
         task.wait(0.2)
@@ -6486,8 +6502,11 @@ function Runtime.FarmBonusMob()
                 if not position or not humanoid or not root then break end
                 if (root.Position - position).Magnitude > (tonumber(Config.MobScanRadius) or 55) then
                     tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "BonusMob")
-                elseif humanoid.FloorMaterial ~= Enum.Material.Air then
-                    humanoid.Jump = true
+                elseif (root.Position - position).Magnitude < 6 then
+                    -- Hop-free dodge: contact range -> backstep glide to offset.
+                    tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TokenTweenSpeed, "BonusMob", nil, true)
+                else
+                    humanoid:Move(Vector3.zero, false)
                 end
                 remoteCall("ToolCollect")
                 task.wait(0.2)
