@@ -2938,14 +2938,66 @@ local function getField()
 end
 
 local function fieldPoint(field)
+    -- Bounds-based for BOTH zone shapes (Part and Model): Model zones used to
+    -- fall into a tiny pivot +/- 12 stud box - the farm-clustering bug where
+    -- the character only twitched around one spot (Pineapple Patch etc).
+    local boundsCFrame, boundsSize = fieldBoundsOf(field)
+    if boundsCFrame and boundsSize then
+        local x = (math.random() - 0.5) * math.max(2, boundsSize.X * 0.72)
+        local z = (math.random() - 0.5) * math.max(2, boundsSize.Z * 0.72)
+        return (boundsCFrame * CFrame.new(x, boundsSize.Y / 2 + 3, z)).Position
+    end
     local position = objectPosition(field)
     if not position then return nil end
-    if field:IsA("BasePart") then
-        local x = (math.random() - 0.5) * math.max(2, field.Size.X * 0.72)
-        local z = (math.random() - 0.5) * math.max(2, field.Size.Z * 0.72)
-        return (field.CFrame * CFrame.new(x, field.Size.Y / 2 + 3, z)).Position
-    end
     return position + Vector3.new(math.random(-12, 12), 3, math.random(-12, 12))
+end
+
+-- COVERAGE GRID: fields are flat obstacle-free beds, so "pathfinding" is not
+-- the problem - POINT SELECTION is. Divide the field bounds into a cell grid,
+-- visit cells in shuffled order (jittered inside each cell), reshuffle when
+-- done: guaranteed full-field sweep, clustering impossible, no per-field data.
+local function farmCoveragePoint(field, root)
+    local boundsCFrame, boundsSize = fieldBoundsOf(field)
+    if not boundsCFrame or not boundsSize then return fieldPoint(field) end
+    Runtime.FarmGrids = Runtime.FarmGrids or {}
+    local cols = math.clamp(math.floor(boundsSize.X / 25 + 0.5), 2, 5)
+    local rows = math.clamp(math.floor(boundsSize.Z / 25 + 0.5), 2, 5)
+    local state = Runtime.FarmGrids[field.Name]
+    if not state or state.Cols ~= cols or state.Rows ~= rows then
+        state = {Cols = cols, Rows = rows, Queue = {}}
+        Runtime.FarmGrids[field.Name] = state
+    end
+    if #state.Queue == 0 then
+        for row = 1, rows do
+            for col = 1, cols do table.insert(state.Queue, {col, row}) end
+        end
+        for index = #state.Queue, 2, -1 do
+            local swap = math.random(index)
+            state.Queue[index], state.Queue[swap] = state.Queue[swap], state.Queue[index]
+        end
+    end
+    local margin = math.max(8, tonumber(Config.MobThreatRadius) or 16) + 4
+    local fallback, fallbackIndex
+    for index = 1, math.min(#state.Queue, 4) do
+        local cell = state.Queue[index]
+        local halfX, halfZ = boundsSize.X / cols / 2, boundsSize.Z / rows / 2
+        local center = (boundsCFrame * CFrame.new(
+            (cell[1] - 0.5) / cols * boundsSize.X - boundsSize.X / 2,
+            boundsSize.Y / 2 + 3,
+            (cell[2] - 0.5) / rows * boundsSize.Z - boundsSize.Z / 2)).Position
+        local point = center
+            + Vector3.new((math.random() - 0.5) * halfX, 0, (math.random() - 0.5) * halfZ)
+        if not Config.FarmAvoidMobs or not root
+            or Runtime.SegmentThreat(root.Position, point, margin) == nil then
+            table.remove(state.Queue, index)
+            return point
+        end
+        if not fallback then fallback, fallbackIndex = point, index end
+    end
+    -- Every nearby cell mob-blocked: still advance (fallback cell) so the
+    -- sweep never stalls; the avoid worker owns the actual dodging.
+    if fallbackIndex then table.remove(state.Queue, fallbackIndex) end
+    return fallback
 end
 
 local function fieldSurfaceOffset(field, position)
@@ -3587,40 +3639,11 @@ local function farmStep(seconds, overrideField, state, detail)
             local remaining = math.max(0, deadline - os.clock())
             if sweepTokens(math.min(Config.TokenSweepDuration, remaining), "FarmToken") > 0 then continue end
         end
-        -- Smart point selection: several random candidates; ones whose walk
-        -- crosses a mob/hazard are dropped (margin >= threat radius + body so
-        -- the avoid worker's hold band is never walked into) and the FARTHEST
-        -- survivor wins, so farming sweeps the whole field instead of one
-        -- corner. If every candidate is blocked, the raw set stays in play -
-        -- the avoid worker owns those cases.
-        local point
-        do
-            local _, _, farmRoot = getCharacter(1)
-            local margin = math.max(8, tonumber(Config.MobThreatRadius) or 16) + 4
-            local candidates = {}
-            for _ = 1, math.max(1, tonumber(Config.FarmPointCandidates) or 3) do
-                local candidate = fieldPoint(field)
-                if candidate then
-                    local distance = 0
-                    if farmRoot then
-                        distance = (Vector3.new(candidate.X, 0, candidate.Z)
-                            - Vector3.new(farmRoot.Position.X, 0, farmRoot.Position.Z)).Magnitude
-                    end
-                    table.insert(candidates, {Point = candidate, Distance = distance})
-                end
-            end
-            if Config.FarmAvoidMobs and #candidates > 1 then
-                local filtered = {}
-                for _, candidate in ipairs(candidates) do
-                    local pathClear = not farmRoot
-                        or Runtime.SegmentThreat(farmRoot.Position, candidate.Point, margin) == nil
-                    if pathClear then table.insert(filtered, candidate) end
-                end
-                if #filtered > 0 then candidates = filtered end
-            end
-            table.sort(candidates, function(a, b) return a.Distance > b.Distance end)
-            point = candidates[1] and candidates[1].Point or nil
-        end
+        -- Coverage sweep: next cell from the shuffled grid (mob-clear cells
+        -- preferred, blocked ones only as fallback). Replaces the old random
+        -- 3-candidate pick that clustered in one area on Model-shape zones.
+        local _, _, farmRoot = getCharacter(1)
+        local point = farmCoveragePoint(field, farmRoot)
         if point then
             local startedAt = os.clock()
             tweenTo(CFrame.new(point), Config.TweenSpeed, "Farm")
