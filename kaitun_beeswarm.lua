@@ -52,6 +52,10 @@ local USER_DEFAULTS = {
     AutoQuestMobs = true,
     AutoTreatBees = true,
     AutoCompareAmulets = true,
+    -- KEEP-OLD policy: an equipped amulet is never traded away for a new offer
+    -- (comparison skipped while an amulet of that type is on). Free slot =
+    -- still accepts. Set false to return to stat-comparison mode.
+    AmuletKeepOld = true,
     AutoRJGiftedFarm = true,
     AutoRJUpgradeBasic = true,
     AutoStarTreat = true,
@@ -84,6 +88,7 @@ local USER_DEFAULTS = {
     AutoPlaceSprinkler = true,
     FarmField = "Sunflower Field",
     RedeemCodes = true,
+    AmuletKeepOld = true,
     StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
     RJShopHoneyBudget = 5000000000,
     RJTargetGiftedTypes = 15,
@@ -3106,6 +3111,22 @@ local function collectThreats(field)
             end
         end
     end
+    -- Telegraph avoid (Atlas technique): mob ATTACK TELEGRAPHS tracked live
+    -- from workspace.Particles by the watcher worker: vicious spike disks
+    -- (avoid 8), stick-bug spinners (20), windy gusts/tornadoes (22). Dodging
+    -- the telegraph means never getting hit at all.
+    for part, radius in pairs(Runtime.TelegraphAvoid or {}) do
+        if typeof(part) == "Instance" and part.Parent then
+            local position = objectPosition(part)
+            if position then
+                table.insert(threats, {
+                    Position = position,
+                    Radius = radius,
+                    Kind = "Telegraph",
+                })
+            end
+        end
+    end
     return threats
 end
 
@@ -3184,6 +3205,74 @@ function Runtime.DetourWaypoints(from, to, margin)
     if Runtime.DetourCache[key] == nil then detourCacheCount += 1 end
     Runtime.DetourCache[key] = {At = now, Waypoints = waypoints, Length = length or 0}
     return waypoints, waypoints and length or nil
+end
+
+-- Telegraph watcher (Atlas technique, event-driven): mob attacks are announced
+-- by Particles long before they land: vicious ground-spike "WarningDisk"
+-- (avoid 8), stick-bug "Spinner" debris (20), windy "Gust"/"TornadoInstance"
+-- (22). Tracking ChildAdded/Removed costs nothing per frame and feeds the
+-- shared threat map, so EVERY mover (tokens, farm, quests) dodges telegraphs.
+Runtime.TelegraphAvoid = {}
+do
+    local function trackTelegraph(object)
+        local lowered = string.lower(tostring(object and object.Name or ""))
+        if lowered == "warningdisk" then
+            local ok, sizeX = pcall(function() return object.Size.X end)
+            if ok and sizeX and sizeX >= 9 and sizeX <= 11 then
+                Runtime.TelegraphAvoid[object] = 8 -- vicious spike disk
+            end
+        elseif lowered == "spinner" then
+            local part = object:FindFirstChild("Part")
+            if part then
+                Runtime.TelegraphAvoid[part] = 20 -- stick-bug spinner debris
+            else
+                task.spawn(function()
+                    local added = object.ChildAdded:Wait()
+                    if added and added.Name == "Part" and object.Parent then
+                        Runtime.TelegraphAvoid[added] = 20
+                    end
+                end)
+            end
+        elseif lowered == "gust" or lowered == "tornadoinstance" then
+            Runtime.TelegraphAvoid[object] = 22 -- windy tornado
+        end
+    end
+    task.spawn(function()
+        while Runtime.Running do
+            local particles = workspace:FindFirstChild("Particles")
+            if particles then
+                for _, object in ipairs(particles:GetChildren()) do
+                    pcall(trackTelegraph, object)
+                end
+                local addedConn = connect(particles.ChildAdded, function(object)
+                    pcall(trackTelegraph, object)
+                end)
+                local removedConn = connect(particles.ChildRemoved, function(object)
+                    Runtime.TelegraphAvoid[object] = nil
+                    local inner = object:FindFirstChild("Part")
+                    if inner then Runtime.TelegraphAvoid[inner] = nil end
+                end)
+                -- The Particles folder can be rebuilt on server hop: rescan.
+                local gone = false
+                local goneConn = connect(particles.Destroying, function() gone = true end)
+                while Runtime.Running and not gone and particles.Parent do
+                    task.wait(2)
+                    -- Prune entries whose instance vanished (defensive).
+                    for part in pairs(Runtime.TelegraphAvoid) do
+                        if typeof(part) ~= "Instance" or not part.Parent then
+                            Runtime.TelegraphAvoid[part] = nil
+                        end
+                    end
+                end
+                addedConn:Disconnect()
+                removedConn:Disconnect()
+                goneConn:Disconnect()
+                Runtime.TelegraphAvoid = {}
+            else
+                task.wait(2)
+            end
+        end
+    end)
 end
 
 local function scanTokenNodesInStandingField()
@@ -4972,10 +5061,17 @@ function Runtime.HandleAmuletOffer(...)
     local accept = true
     local detail = "no amulet of this type yet"
     if currentText then
-        local better, worse, notes = Runtime.CompareAmuletStats(statsText, currentText)
-        accept = worse <= 0 and better > 0
-        detail = string.format("%d stat(s) better, %d worse%s", better, worse,
-            #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
+        if Config.AmuletKeepOld then
+            -- KEEP-OLD policy: never lose the equipped amulet of this type to
+            -- an offer, no matter how good it looks (comparison skipped).
+            accept = false
+            detail = "keep-old policy"
+        else
+            local better, worse, notes = Runtime.CompareAmuletStats(statsText, currentText)
+            accept = worse <= 0 and better > 0
+            detail = string.format("%d stat(s) better, %d worse%s", better, worse,
+                #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
+        end
     end
     setStatus("Amulet", string.format("%s %s | %s",
         accept and "REPLACE" or "KEEP", tostring(amuletName or "?"), detail))
@@ -5085,7 +5181,10 @@ function Runtime.HandleAmuletGui()
     if red > 0 then
         accept = false
     elseif green > 0 then
-        accept = true
+        -- KEEP-OLD policy outranks the green/red comparison: the equipped
+        -- amulet of this type is never traded away via the GUI either.
+        accept = not (Config.AmuletKeepOld
+            and Runtime.EquippedAmuletStatsText(nil) ~= nil)
     else
         -- No colored stats: accept only when no amulet of that kind is on.
         accept = Runtime.EquippedAmuletStatsText(nil) == nil
@@ -7347,6 +7446,21 @@ local function applyLowGraphics(enabled)
     end)
     connect(Lighting.DescendantAdded, function(object)
         if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
+    end)
+    -- Atlas anti-lag hardening: the game RE-ENABLES shadows/lighting presets on
+    -- respawn and zone changes - re-force them on every Lighting change, and
+    -- turn the server-side pollen popup spam off once.
+    connect(Lighting.Changed, function()
+        if not (Runtime.Running and Config.LowGraphics) then return end
+        pcall(function()
+            Lighting.GlobalShadows = false
+            Lighting.ExposureCompensation = -0.35
+            Lighting.EnvironmentDiffuseScale = 0
+            Lighting.EnvironmentSpecularScale = 0
+        end)
+    end)
+    task.defer(function()
+        remoteCall("PlayerSettingsEvent", "PollenPopUps", false)
     end)
     -- Hide every other player: their characters + accessories + tools are one of
     -- the biggest lag sources on busy servers. Local-only hiding (render), no effect
