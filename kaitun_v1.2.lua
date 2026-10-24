@@ -651,7 +651,6 @@ end
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PathfindingService = game:GetService("PathfindingService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
@@ -1280,57 +1279,45 @@ local function ensureGlideRunner()
     if ok and connection then Runtime.GlideRunnerConnection = connection end
 end
 
--- Field pathfinding (SmartMove stuck recovery): computes ONE route around
--- obstacles and walks its waypoints. Engaged only by the stuck watchdog inside
--- tweenTo, so free-walking never pays the ComputeAsync cost.
--- Shared path builder: ComputeAsync with hop-free agent params, waypoints
--- filtered to stay inside the starting field. Used by the stuck-watchdog walk
--- AND by token detours, so both pathfinders behave identically.
+-- Field "pathfinding" (geometric): verified against the place model - all
+-- 13,685 flower tiles and every one of the 23 FlowerZone Parts are
+-- CanCollide=false, so fields are FLAT AND OBSTACLE-FREE and the Roblox
+-- navmesh inside them is empty: PathfindingService.ComputeAsync could only
+-- ever return the straight line back (pure latency + async stalls). Detours
+-- are therefore computed GEOMETRICALLY: one midpoint offset perpendicular to
+-- the straight segment, around the blocking threat circle. Instant, smooth,
+-- zero service calls. Used by the stuck-watchdog walk AND token detours.
 local function computeFieldPath(rootPosition, position, startField)
-    local function attempt(goalPosition)
-        local ok, path = pcall(function()
-            local pathObject = PathfindingService:CreatePath({
-                -- Generous radius keeps routes OFF hedge edges and tree trunks -
-                -- hugging them re-stalls the moment direct walking resumes.
-                -- AgentCanJump=false: the movement style is hop-free (corner
-                -- avoidance handles obstacles instead of bunny-hopping).
-                AgentRadius = 3,
-                AgentHeight = 5,
-                AgentCanJump = false,
-                WaypointSpacing = 5,
-            })
-            pathObject:ComputeAsync(rootPosition, goalPosition)
-            return pathObject
-        end)
-        if not ok or not path or path.Status ~= Enum.PathStatus.Success then return nil end
-        local okWaypoints, waypoints = pcall(path.GetWaypoints, path)
-        if not okWaypoints or #waypoints < 2 then return nil end
-        -- Keep the route INSIDE the field: a waypoint past the field edge walks
-        -- the character straight into the invisible boundary wall.
-        local usable = {}
-        for _, waypoint in ipairs(waypoints) do
-            if not startField or flowerFieldAtPosition(waypoint.Position, 0) == startField then
-                table.insert(usable, waypoint)
-            end
-        end
-        if #usable < 2 then return nil end
-        return usable
+    local margin = math.max(0, tonumber(Config.TokenPathMargin) or 4)
+    local threat = type(Runtime.SegmentThreat) == "function"
+        and Runtime.SegmentThreat(rootPosition, position, margin) or nil
+    if not threat then
+        return nil -- straight line is clear; the caller walks directly
     end
-    local usable = attempt(position)
-    if not usable and startField then
-        -- ComputeAsync often refuses goals sitting inside flowers/props:
-        -- retry once with the goal nudged 6 studs toward the field center
-        -- (arrival is radius-based, and the caller closes the last few studs).
-        local boundsCFrame = fieldBoundsOf(startField)
-        if boundsCFrame then
-            local center = Vector3.new(boundsCFrame.Position.X, position.Y, boundsCFrame.Position.Z)
-            local nudged = position + (center - position).Unit * 6
-            if (nudged - position).Magnitude > 1 then
-                usable = attempt(nudged)
-            end
-        end
+    local from = Vector3.new(rootPosition.X, 0, rootPosition.Z)
+    local to = Vector3.new(position.X, 0, position.Z)
+    local direction = to - from
+    local length = direction.Magnitude
+    if length < 4 then return nil end
+    direction = direction / length
+    local flatThreat = Vector3.new(threat.Position.X, 0, threat.Position.Z)
+    local mid = from:Lerp(to, 0.5)
+    local perp = Vector3.new(-direction.Z, 0, direction.X)
+    -- Detour on the side of the line FARTHER from the threat.
+    local side = (mid + perp * 8 - flatThreat).Magnitude
+        >= (mid - perp * 8 - flatThreat).Magnitude and 1 or -1
+    local offsetDist = math.max(threat.Radius + margin + 4, 10)
+    local midPoint = mid + perp * (side * offsetDist)
+    -- Keep the arc inside the field (narrow fields): outside -> give up on the
+    -- detour and let the straight walk + avoid worker handle it.
+    if startField and flowerFieldAtPosition(Vector3.new(midPoint.X, rootPosition.Y, midPoint.Z), 0) ~= startField then
+        return nil
     end
-    return usable
+    local height = math.max(rootPosition.Y, position.Y)
+    return {
+        {Position = Vector3.new(midPoint.X, height, midPoint.Z)},
+        {Position = Vector3.new(to.X, height, to.Z)},
+    }
 end
 
 -- Obstacle memory: positions where walking recently ground to a halt. New
@@ -7505,6 +7492,52 @@ local function applyLowGraphics(enabled)
         end)
         if sethiddenproperty then pcall(sethiddenproperty, terrain, "Decoration", false) end
         for _, object in ipairs(terrain:GetChildren()) do pcall(optimizeObject, object) end
+    end
+    -- PRIORITY FAST-HIDE: the big visual folders go FIRST in one shallow
+    -- recursive pass (no per-object ancestor walks, no decoration checks) -
+    -- thousands of flower tiles sit at the END of the generic GetDescendants
+    -- sweep, which is why flowers used to fade in long after everything else.
+    local function fastHideTree(root)
+        local stack = {root}
+        local processed = 0
+        while #stack > 0 do
+            local node = table.remove(stack)
+            if node ~= root then
+                pcall(function()
+                    if node:IsA("BasePart") then
+                        node.LocalTransparencyModifier = 1
+                        node.Transparency = 1
+                        node.CastShadow = false
+                    elseif node:IsA("Decal") or node:IsA("Texture") then
+                        node.Transparency = 1
+                    elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
+                        node.Enabled = false
+                    elseif node:IsA("ParticleEmitter") then
+                        node.Enabled = false
+                        node.Rate = 0
+                    elseif node:IsA("Model") and not Player.Character:IsDescendantOf(node) then
+                        node.LevelOfDetail = Enum.ModelLevelOfDetail.StreamingMesh
+                    end
+                end)
+                processed += 1
+                if processed % 400 == 0 then task.wait() end
+            end
+            for _, child in ipairs(node:GetChildren()) do table.insert(stack, child) end
+        end
+    end
+    local priorityFolders = {}
+    if Config.FixLagHideFlowers then table.insert(priorityFolders, workspace:FindFirstChild("Flowers")) end
+    if Config.FixLagHideBees then
+        table.insert(priorityFolders, workspace:FindFirstChild("Bees"))
+        table.insert(priorityFolders, workspace:FindFirstChild("NPCBees"))
+    end
+    if Config.FixLagHideTokens then table.insert(priorityFolders, workspace:FindFirstChild("Collectibles")) end
+    if Config.FixLagHideHives then
+        table.insert(priorityFolders, workspace:FindFirstChild("Honeycombs"))
+        table.insert(priorityFolders, workspace:FindFirstChild("HivePlatforms"))
+    end
+    for _, folder in ipairs(priorityFolders) do
+        if folder then fastHideTree(folder) end
     end
     local scanBatch = math.max(50, tonumber(Config.FixLagScanBatch) or 350)
     for index, object in ipairs(workspace:GetDescendants()) do
