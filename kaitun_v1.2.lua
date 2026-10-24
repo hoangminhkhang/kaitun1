@@ -204,10 +204,12 @@ local DEFAULT_CONFIG = {
     RJStockResyncEvery = 25,
     StarTreatTicketCost = 1000,
     MondoChickFightTimeout = 120,
-    -- Opportunistic bonus mobs (no quest needed): level gate is the HIVE
-    -- AVERAGE (fight only when mob level <= average), Stump Snail skipped.
-    AutoFarmBonusMobs = true,
+    -- Opportunistic bonus mobs (no quest needed): OFF by default - when ON it
+    -- only fights LIVE mobs within BonusMobMaxDistance (passing-by loot), and
+    -- only when the mob level <= the hive AVERAGE. Stump Snail skipped.
+    AutoFarmBonusMobs = false,
     BonusMobFightTimeout = 120,
+    BonusMobMaxDistance = 80,
     -- Blue Field Booster: only tap when this many blue bee TYPES are in the hive.
     BlueBoosterMinDiscoveries = 3,
     -- Re-scan the stats payload for active field boosts this often (picks up
@@ -1455,6 +1457,19 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
     -- walk path would ground-follow the mob instead of gliding onto it.
     if forceWalk or (not preferGlide and Config.SmartMove
         and (walkingInsideField or distance <= Config.SmartWalkDistance)) then
+        -- GROUND-LEVEL walk goal: token targets carry +1.5 Y - walking at an
+        -- elevated point makes the humanoid tip-toe/hop, and the arrival snap
+        -- then lifts the character 1.5 studs just to fall right back (the
+        -- visible "nhảy lên 1 cái" after each token grab). Walks aim at the
+        -- character's own height; glides keep the original target.
+        position = Vector3.new(position.X, root.Position.Y, position.Z)
+        targetCFrame = CFrame.new(position)
+        -- Standing INSIDE a field boosts the walk even when the target is a
+        -- few studs past the zone edge (bees drop tokens on field borders all
+        -- the time): without this those chases crawl at base 16 speed.
+        if startField and (walkingInsideField or distance <= Config.SmartWalkDistance * 3) then
+            walkingInsideField = true
+        end
         -- Walking needs physics: release a still-anchored root left over from the
         -- previous glide's grace window, otherwise MoveTo silently stalls.
         if Runtime.TweenRoot == root then releaseTweenRoot() end
@@ -1800,6 +1815,10 @@ local function playerHas(entry, refresh)
     -- Local proof is required on executors where ItemPackages cannot be required.
     -- Without this, a confirmed purchase is forgotten on the next scheduler pass.
     if Runtime.CompletedGear[entry.Type] then return true end
+    -- Starter-gear snapshot (scanned right before the hive claim): covers the
+    -- window before stats replicate on rejoin/pre-equipped accounts.
+    if Runtime.SeedGear and (Runtime.SeedGear[tostring(entry.Item)]
+        or Runtime.SeedGear[tostring(entry.Type)]) then return true end
     local stats = getStats(refresh)
     if currentGearAtLeast(entry, stats) then return true end
     if rawPackageHas(getPackage(entry), stats) then return true end
@@ -2076,8 +2095,60 @@ local function findFreeHive()
     return nil
 end
 
+-- Executor workspace data folder: all per-player files live in ONE place
+-- (bss_kaitun_data/) instead of littering the workspace root. Falls back to
+-- flat files when the executor has no folder API.
+local DataDir = ""
+local function dataPath(name)
+    if DataDir == "" then
+        local isfolderFn = rawget(ENV, "isfolder")
+        local makefolderFn = rawget(ENV, "makefolder")
+        if type(isfolderFn) == "function" and type(makefolderFn) == "function" then
+            pcall(function()
+                if not isfolderFn("bss_kaitun_data") then makefolderFn("bss_kaitun_data") end
+            end)
+            local ok, exists = pcall(isfolderFn, "bss_kaitun_data")
+            if ok and exists then DataDir = "bss_kaitun_data/" end
+        end
+    end
+    return DataDir .. name
+end
+
+-- One-shot starter-gear scan (runs BEFORE the hive is claimed): names every
+-- Tool and Accessory the player holds/wears so progression KNOWS what the
+-- account already owns before stats replicate (rejoin with equipped gear, or
+-- a pre-set account) - otherwise the scheduler re-buys owned items.
+function Runtime.ScanStarterGear()
+    if Runtime.SeedGearScanned then return 0 end
+    Runtime.SeedGearScanned = true
+    Runtime.SeedGear = {}
+    local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
+    for _, container in ipairs(containers) do
+        if container then
+            for _, object in ipairs(container:GetChildren()) do
+                if object:IsA("Tool") or object:IsA("Accessory") then
+                    Runtime.SeedGear[object.Name] = true
+                end
+            end
+        end
+    end
+    local names = {}
+    for name in pairs(Runtime.SeedGear) do table.insert(names, name) end
+    table.sort(names)
+    if #names > 0 then
+        warn("[BSS Kaitun] Starter gear (" .. #names .. "): " .. table.concat(names, ", "))
+        local writefileFn = rawget(ENV, "writefile")
+        if type(writefileFn) == "function" then
+            pcall(writefileFn, dataPath("bss_kaitun_gear_" .. tostring(Player.UserId) .. ".txt"),
+                table.concat(names, "\n"))
+        end
+    end
+    return #names
+end
+
 local function claimHive()
     if findOwnedHive() then return true end
+    Runtime.ScanStarterGear()
     setStatus("Init", "Claiming hive")
     for attempt = 1, 12 do
         if not Runtime.Running then return false end
@@ -2108,7 +2179,7 @@ local function redeemCodes()
         local readfileFn = rawget(ENV, "readfile") or (type(readfile) == "function" and readfile)
         if type(readfileFn) == "function" then
             local ok, content = pcall(readfileFn,
-                "bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt")
+                dataPath("bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt"))
             if ok and type(content) == "string" then
                 for code in string.gmatch(content, "[^\r\n]+") do
                     local trimmed = code:match("^%s*(.-)%s*$")
@@ -2125,10 +2196,10 @@ local function redeemCodes()
         local existing = ""
         if type(readfileFn) == "function" then
             local okRead, content = pcall(readfileFn,
-                "bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt")
+                dataPath("bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt"))
             if okRead and type(content) == "string" then existing = content end
         end
-        pcall(writefileFn, "bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt",
+        pcall(writefileFn, dataPath("bss_kaitun_codes_" .. tostring(Player.UserId) .. ".txt"),
             existing .. code .. "\n")
     end
     local function redeemList(codes, label)
@@ -2163,14 +2234,14 @@ function Runtime.TeleRewardsClaimed()
     local readfileFn = rawget(ENV, "readfile") or (type(readfile) == "function" and readfile)
     if type(readfileFn) ~= "function" then return false end
     local ok, content = pcall(readfileFn,
-        "bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt")
+        dataPath("bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt"))
     return ok and type(content) == "string" and content:find("done", 1, true) ~= nil
 end
 
 function Runtime.MarkTeleRewardsDone()
     local writefileFn = rawget(ENV, "writefile") or (type(writefile) == "function" and writefile)
     if type(writefileFn) ~= "function" then return end
-    pcall(writefileFn, "bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt", "done")
+    pcall(writefileFn, dataPath("bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt"), "done")
 end
 
 -- Tele reward phase (from telebss rewards.txt): instantly teleport to each
@@ -6413,13 +6484,21 @@ function Runtime.ScanBonusMob()
         Runtime.BonusMobPending = nil
         return
     end
-    local stats = getStats(false)
+    -- LIVE-ONLY and NEARBY: spawner "ready" checks are gone on purpose --
+    -- Ladybug/Rhino spawners reset every 5 minutes, so "ready" was ALWAYS
+    -- true and the character farmed mobs nonstop instead of pollen. Bonus mobs
+    -- are now strictly opportunistic: a live mob within BonusMobMaxDistance
+    -- of the player (drops bonus loot while passing by), never a trip.
+    local _, _, scanRoot = getCharacter(1)
+    if not scanRoot then Runtime.BonusMobPending = nil return end
+    local maxDistance = math.max(30, tonumber(Config.BonusMobMaxDistance) or 80)
     for canonical, route in pairs(Runtime.MobRoutes or {}) do
         if canonical ~= "Stump Snail"
             and os.clock() >= (Runtime.BonusMobRetryAt[canonical] or 0) then
-            -- A live mob beats a waiting spawner.
             local live = Runtime.FindLiveQuestMob(canonical)
-            if live then
+            local position = live and objectPosition(live)
+            if live and position
+                and (scanRoot.Position - position).Magnitude <= maxDistance then
                 if bonusMobLevelAllowed(live) then
                     Runtime.BonusMobPending = {
                         Name = canonical, Route = route, Live = live,
@@ -6428,25 +6507,6 @@ function Runtime.ScanBonusMob()
                     return
                 end
                 Runtime.BonusMobRetryAt[canonical] = os.clock() + 30
-            else
-                local monsters = workspace:FindFirstChild("MonsterSpawners")
-                for _, spawnerName in ipairs(route.Spawners or {}) do
-                    local spawner = monsters and monsters:FindFirstChild(spawnerName)
-                    if spawner then
-                        local ready = Runtime.QuestMobSpawnerReady(spawner, route, stats)
-                        if ready then
-                            local fieldName = route.Fields and route.Fields[1] or nil
-                            local field = fieldName and findField(fieldName) or nil
-                            if (field and fieldUnlocked(field.Name)) or route.AllowNoField then
-                                Runtime.BonusMobPending = {
-                                    Name = canonical, Route = route,
-                                    Spawner = spawner, Field = field,
-                                }
-                                return
-                            end
-                        end
-                    end
-                end
             end
         end
     end
