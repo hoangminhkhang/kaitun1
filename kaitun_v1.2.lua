@@ -4356,14 +4356,26 @@ local function interactQuestNPC(name)
     end
     if not opened then return false end
 
+    -- Dialogue sweep: panes transition with brief invisible gaps and BSS
+    -- animates pane text. A 60Hz advance spam double-skips panes, and breaking
+    -- on the FIRST invisible tick exits right after the reward pane - before
+    -- the ACCEPT pane appears (the "turn-in but never re-accepts" bug). So:
+    -- advance at a human cadence, and only treat the GUI as closed after it
+    -- stays hidden past a grace window.
     local deadline = os.clock() + Config.QuestInteractTimeout
+    local hiddenSince = nil
     while Runtime.Running and not Runtime.MeteorPriorityActive and os.clock() < deadline do
-        local visible = npcDialogueVisible()
-        if not visible then break end
-        incrementNPCDialogue()
-        RunService.Stepped:Wait()
+        if npcDialogueVisible() then
+            hiddenSince = nil
+            incrementNPCDialogue()
+            task.wait(0.2)
+        else
+            if not hiddenSince then hiddenSince = os.clock() end
+            if os.clock() - hiddenSince > 1.2 then break end
+            task.wait(0.05)
+        end
     end
-    task.wait(0.2)
+    task.wait(0.5)
     getStats(true)
     Runtime.NPCModuleError = ""
     return true
@@ -5592,8 +5604,8 @@ task.spawn(function()
                 Runtime.MobRelocateUntil = 0
             end
             -- Hop-free proximity response: a CLOSE mob (not yet threat-range)
-            -- triggers a short backstep glide away from it - no jumping. The
-            -- threat branch above still handles real danger with retreat/hold.
+            -- triggers a short backstep glide away from it. The threat branch
+            -- above still handles real danger with retreat/hold.
             if mobNear and humanoid and root and not root.Anchored
                 and not threatening and not Runtime.AvoidingMob
                 and os.clock() >= (Runtime.NextMobBackstepAt or 0) then
@@ -5608,6 +5620,16 @@ task.spawn(function()
                 local away = root.Position
                     + (root.Position - (nearest or root.Position)).Unit * 10
                 tweenTo(CFrame.new(away), Config.TokenTweenSpeed, "MobBackstep", nil, true)
+            end
+            -- Danger jump (game mechanic): mobs only connect hits while the
+            -- character is GROUNDED - inside the threat band a single hop
+            -- makes the swing whiff. Rate-limited so it never bunny-hops.
+            if threatening and humanoid and root and not root.Anchored
+                and humanoid.FloorMaterial ~= Enum.Material.Air
+                and os.clock() >= (Runtime.NextMobJumpAt or 0) then
+                Runtime.NextMobJumpAt = os.clock()
+                    + math.max(0.5, tonumber(Config.MobJumpInterval) or 0.12)
+                humanoid.Jump = true
             end
         else
             Runtime.AvoidingMob = false
@@ -7341,6 +7363,14 @@ local function applyLowGraphics(enabled)
             end
         elseif object:IsA("Decal") or object:IsA("Texture") then
             if hidden or (Config.FixLagRemoveTextures and not playerVisual) then object.Transparency = 1 end
+        elseif object:IsA("BillboardGui") or object:IsA("SurfaceGui") then
+            -- Token/bee labels float on GUI layers that part Transparency
+            -- never hides - disable the whole gui when its group is hidden.
+            if hidden or (Config.FixLagRemoveTextures and not playerVisual) then
+                pcall(function() object.Enabled = false end)
+            end
+        elseif object:IsA("PointLight") or object:IsA("SpotLight") or object:IsA("Sparkles") then
+            if hidden then pcall(function() object.Enabled = false end) end
         elseif object:IsA("ParticleEmitter") then
             if Config.FixLagHideParticles then
                 pcall(function()
@@ -7488,6 +7518,24 @@ local function applyLowGraphics(enabled)
     connect(workspace.DescendantAdded, function(object)
         if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
     end)
+    -- Token fast-path: tokens pop in with a visible Part + decal + gui before
+    -- the generic descendant pass reaches each child. Hide the whole token
+    -- subtree in one shot the instant it spawns (scanners still read Position).
+    if Config.FixLagHideTokens then
+        local collectibles = workspace:FindFirstChild("Collectibles")
+        if collectibles then
+            connect(collectibles.ChildAdded, function(token)
+                if not (Runtime.Running and Config.LowGraphics) then return end
+                pcall(function()
+                    if token:IsA("BasePart") then token.LocalTransparencyModifier = 1 end
+                    if token:IsA("BasePart") then token.Transparency = 1 end
+                    for _, child in ipairs(token:GetChildren()) do
+                        pcall(optimizeObject, child)
+                    end
+                end)
+            end)
+        end
+    end
     connect(Lighting.DescendantAdded, function(object)
         if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
     end)
