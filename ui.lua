@@ -1016,12 +1016,12 @@ do
             TextXAlignment = Enum.TextXAlignment.Left,
         }, gridFrame)
         hiveCells.GridCount = gridCountLabel
-        -- LOGIC HIVE THẬT (atlas 62501: cột x chạy 1..5, hàng y 1..10):
-        -- 5 CỘT × 10 HÀNG, hàng so le nửa ô như tổ ong, ô gần vuông.
-        -- Trang tự scroll nên comb cao không sao.
-        local CELL_W, CELL_H, PAD_X, ROW_STEP = 54, 38, 5, 34
+        -- LOGIC HIVE THẬT (atlas 62501: cột x 1..5, hàng y 1..10):
+        -- THẲNG TẮP 5 cột × 10 hàng, không so le, viền VÀNG HONEY quanh ô
+        -- như panel hive trong game. Ô gần vuông, page tự scroll.
+        local CELL_W, CELL_H, PAD_X, PAD_Y = 54, 38, 5, 5
         local gridHolder = create("Frame", {
-            Size = UDim2.new(1, -12, 0, 9 * ROW_STEP + CELL_H + 4),
+            Size = UDim2.new(1, -12, 0, 9 * (CELL_H + PAD_Y) + CELL_H + 4),
             Position = UDim2.fromOffset(6, 21),
             BackgroundTransparency = 1,
         }, gridFrame)
@@ -1029,16 +1029,15 @@ do
         for slot = 1, 50 do
             local row = math.floor((slot - 1) / 5)   -- Y 1..10
             local col = (slot - 1) % 5                -- X 1..5
-            local stagger = (row % 2 == 1) and (CELL_W + PAD_X) * 0.5 or 0
             local slotCell = corner(create("Frame", {
                 Name = "Slot" .. slot,
                 BackgroundColor3 = T.PanelLight,
                 BackgroundTransparency = 0.35,
-                Position = UDim2.fromOffset(col * (CELL_W + PAD_X) + stagger, row * ROW_STEP),
+                Position = UDim2.fromOffset(col * (CELL_W + PAD_X), row * (CELL_H + PAD_Y)),
                 Size = UDim2.fromOffset(CELL_W, CELL_H),
             }, gridHolder), 10)
             local slotStroke = create("UIStroke", {
-                Color = T.Stroke, Thickness = 1, Transparency = 0.5,
+                Color = T.Accent, Thickness = 1.5, Transparency = 0.35,
             }, slotCell)
             -- Mặt ong THẬT (GiftedBeeModels.FaceTexture) chính giữa - thiết kế
             -- theo reference: icon chủ đạo, nền tint màu họ ong.
@@ -1324,8 +1323,9 @@ function UI.SetHiveGrid(entries, existingSlots)
             cell.Frame.Visible = false
             cell.Frame.BackgroundColor3 = T.PanelLight
             cell.Frame.BackgroundTransparency = 0.35
-            cell.Stroke.Color = T.Stroke
-            cell.Stroke.Transparency = 0.5
+            cell.Stroke.Color = T.Accent
+            cell.Stroke.Thickness = 1.5
+            cell.Stroke.Transparency = 0.35
             cell.Level.Text = ""
             cell.Face.Image = ""
             cell.Star.Visible = false
@@ -1364,8 +1364,9 @@ function UI.SetHiveGrid(entries, existingSlots)
                 pcall(function()
                     cell.Frame.BackgroundColor3 = hiveFamilyColor(entry.Type)
                     cell.Frame.BackgroundTransparency = 0.5
-                    cell.Stroke.Color = gifted and T.Accent or T.Stroke
-                    cell.Stroke.Transparency = gifted and 0 or 0.5
+                    cell.Stroke.Color = T.Accent
+                    cell.Stroke.Thickness = gifted and 2.5 or 1.5
+                    cell.Stroke.Transparency = gifted and 0 or 0.35
                     cell.Level.Text = tostring(tonumber(entry.Level) or "")
                     cell.Face.Image = face or ""
                     cell.Star.Visible = gifted
