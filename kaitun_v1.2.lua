@@ -48,6 +48,9 @@ local USER_DEFAULTS = {
     AutoTokens = true,
     AutoQuest = true,
     AutoQuestFeedTasks = true,
+    -- Cap for quest feeds whose task text has NO "feed N" number: never
+    -- dump the whole stock in one call (burned piles of food into a bee).
+    QuestFeedMaxBlindBatch = 10,
     AutoQuestJellyTasks = true,
     AutoQuestMobs = true,
     AutoTreatBees = true,
@@ -248,6 +251,9 @@ local DEFAULT_CONFIG = {
     AvoidMobRelocateCooldown = 2.5,
     AvoidMobArrivalDistance = 5,
     AvoidMobRelocateTimeout = 4,
+    -- Damage-dodge nudge: this many studs PAST the threat radius (a short
+    -- hop out of the swing band at DEFAULT game speed, not a boosted sprint).
+    AvoidMobNudgeStuds = 6,
     MobThreatRadius = 16,
     MobThreatHoldSeconds = 4,
     FireflyScanInterval = 0.25,
@@ -1072,11 +1078,23 @@ end
 function MaterialSystem.Amount(material, stats)
     stats = stats or MaterialSystem.Stats(false)
     local inventory = type(stats) == "table" and stats.Eggs or nil
-    if type(inventory) ~= "table" then return 0 end
+    if type(inventory) ~= "table" then inventory = {} end
     local aliases = MaterialSystem.Aliases[material] or {material}
     local best = tonumber(inventory[material]) or 0
     for _, alias in ipairs(aliases) do
         best = math.max(best, tonumber(inventory[alias]) or 0)
+    end
+    -- Cold StatCache fallback: read the LIVE per-item counter on the player.
+    -- BSS keeps every owned item count (eggs AND planters AND treats) as a
+    -- ValueBase under Player.Eggs - the place model confirms planters share
+    -- the EggTypes item namespace (PlasticPlanterIcon etc.), and a cold
+    -- stats cache at boot must not lock planting out for the session.
+    if best <= 0 then
+        local eggsFolder = Player:FindFirstChild("Eggs")
+        local value = eggsFolder and eggsFolder:FindFirstChild(material)
+        if value and value:IsA("ValueBase") then
+            best = tonumber(value.Value) or 0
+        end
     end
     return best
 end
@@ -2497,22 +2515,81 @@ local function redeemCodes()
     getStats(true)
 end
 
--- Cross-server memory for tele rewards: world pickups are ONE-TIME per account,
--- so a single permanent marker file per UserId (executor file storage) skips the
--- 40-spot sweep on every later execution or server, forever. Delete the file to
--- force one re-sweep (e.g. after adding new spots to TeleRewardSpots).
-function Runtime.TeleRewardsClaimed()
+-- Cross-server memory for tele rewards: world pickups are ONE-TIME per
+-- account, so a PER-SPOT ledger file per UserId (executor file storage)
+-- remembers exactly which spots this account already handled. The old
+-- all-or-nothing "done" marker both over- and under-marked: a crash
+-- mid-sweep lost everything (full re-sweep next run), and stopping the
+-- script mid-sweep marked unvisited spots done forever. Each spot is now
+-- saved the moment it is visited (or confirmed empty), so an interruption
+-- loses at most the single spot in flight, and adding spots to
+-- TeleRewardSpots later sweeps only the new ones. Delete the file to
+-- force a full re-sweep. Keys are ROUNDED COORDINATES - labels duplicate
+-- ("Star Jelly" x3...) and would collapse into one entry.
+local function teleRewardSpotKey(spot, index)
+    local position = spot.CFrame and spot.CFrame.Position
+    if position then
+        return string.format("%d_%d_%d",
+            math.floor(position.X + 0.5),
+            math.floor(position.Y + 0.5),
+            math.floor(position.Z + 0.5))
+    end
+    return tostring(index)
+end
+
+local function teleRewardFilePath()
+    return dataPath("bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt")
+end
+
+-- Ledger = set of spot keys this account already handled.
+local function loadTeleRewardLedger(spots)
+    local ledger = {}
     local readfileFn = rawget(ENV, "readfile") or (type(readfile) == "function" and readfile)
-    if type(readfileFn) ~= "function" then return false end
-    local ok, content = pcall(readfileFn,
-        dataPath("bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt"))
-    return ok and type(content) == "string" and content:find("done", 1, true) ~= nil
+    if type(readfileFn) == "function" then
+        local ok, content = pcall(readfileFn, teleRewardFilePath())
+        if ok and type(content) == "string" then
+            if content:find("done", 1, true) then
+                -- Legacy full-sweep marker: every configured spot counts.
+                for index, spot in ipairs(spots) do
+                    ledger[teleRewardSpotKey(spot, index)] = true
+                end
+            else
+                for key in content:gmatch("[^%s\r\n]+") do
+                    ledger[key] = true
+                end
+            end
+        end
+    end
+    return ledger
+end
+
+local function saveTeleRewardLedger(ledger)
+    local writefileFn = rawget(ENV, "writefile") or (type(writefile) == "function" and writefile)
+    if type(writefileFn) ~= "function" then return end
+    local keys = {}
+    for key in pairs(ledger) do table.insert(keys, key) end
+    table.sort(keys)
+    pcall(writefileFn, teleRewardFilePath(), table.concat(keys, "\n"))
+end
+
+function Runtime.TeleRewardsClaimed()
+    local spots = Config.TeleRewardSpots or {}
+    if #spots == 0 then return true end
+    local ledger = loadTeleRewardLedger(spots)
+    for index, spot in ipairs(spots) do
+        if not ledger[teleRewardSpotKey(spot, index)] then return false end
+    end
+    return true
 end
 
 function Runtime.MarkTeleRewardsDone()
-    local writefileFn = rawget(ENV, "writefile") or (type(writefile) == "function" and writefile)
-    if type(writefileFn) ~= "function" then return end
-    pcall(writefileFn, dataPath("bss_kaitun_rewards_" .. tostring(Player.UserId) .. ".txt"), "done")
+    -- Force-finish: mark every configured spot done.
+    local spots = Config.TeleRewardSpots or {}
+    local ledger = loadTeleRewardLedger(spots)
+    for index, spot in ipairs(spots) do
+        ledger[teleRewardSpotKey(spot, index)] = true
+    end
+    saveTeleRewardLedger(ledger)
 end
 
 -- Tele reward phase (from telebss rewards.txt): instantly teleport to each
@@ -2534,8 +2611,14 @@ function Runtime.CollectWorldRewards()
     -- re-runs this phase within a single execution.
     Runtime.TeleRewardsDone = true
     if #spots <= 0 then return false end
-    -- Skip forever once this account swept the one-time rewards (persisted file).
-    if Runtime.TeleRewardsClaimed() then
+    -- Per-spot ledger: crash-safe, marks each spot the moment it is handled.
+    local ledger = loadTeleRewardLedger(spots)
+    local alreadyDone = 0
+    for index, spot in ipairs(spots) do
+        if ledger[teleRewardSpotKey(spot, index)] then alreadyDone += 1 end
+    end
+    -- Skip forever once this account swept every one-time reward.
+    if alreadyDone >= #spots then
         setStatus("Tele reward", "One-time rewards already collected - skipping")
         warn("[BSS Kaitun] Tele rewards already collected (one-time) - skipping phase")
         return false
@@ -2564,6 +2647,8 @@ function Runtime.CollectWorldRewards()
         if not Runtime.Running then break end
         while Runtime.Running and Runtime.MeteorPriorityActive do task.wait(0.1) end
         if not Runtime.Running then break end
+        local key = teleRewardSpotKey(spot, index)
+        if ledger[key] then continue end -- this account already took it
         local _, _, root = getCharacter(8)
         if not root then continue end
         local targetCFrame = spot.CFrame
@@ -2583,6 +2668,10 @@ function Runtime.CollectWorldRewards()
             end
             if not best then
                 skipped += 1
+                -- Empty = handled for this account: save NOW so a crash
+                -- never re-visits (or worse, forgets) this spot.
+                ledger[key] = true
+                saveTeleRewardLedger(ledger)
                 continue -- reward removed (e.g. Beesmas ended) - zero time spent
             end
             visitedInstances[best] = true
@@ -2601,10 +2690,17 @@ function Runtime.CollectWorldRewards()
             task.wait(0.12)
         end
         Runtime.TeleRewardsCollected += 1
+        -- Save the moment the spot is handled: mid-sweep crashes keep every
+        -- earlier spot marked (the old code lost the whole sweep).
+        ledger[key] = true
+        saveTeleRewardLedger(ledger)
     end
-    setStatus("Tele reward", string.format("Done %d/%d spots (%d empty) - moving to hive claim",
-        Runtime.TeleRewardsCollected, #spots, skipped))
-    Runtime.MarkTeleRewardsDone()
+    local remaining = 0
+    for index, spot in ipairs(spots) do
+        if not ledger[teleRewardSpotKey(spot, index)] then remaining += 1 end
+    end
+    setStatus("Tele reward", string.format("Done %d/%d spots (%d empty, %d already had, %d left) - moving to hive claim",
+        Runtime.TeleRewardsCollected, #spots, skipped, alreadyDone, remaining))
     task.wait(0.2)
     return true
 end
@@ -4861,6 +4957,28 @@ function Runtime.FindQuestTargetBee(commonOnly)
     return fallback
 end
 
+-- QUEST FEED target: the LOWEST-LEVEL bee this pass. The old first-cell
+-- pick dumped every feed batch into ONE bee (it rocketed ahead, then the
+-- leveler burned extra treats catching the rest up). Feeding the lowest
+-- bee self-spreads: once fed, its level rises and the next pass naturally
+-- picks another - no extra state needed.
+function Runtime.FindQuestFeedBee()
+    local best, bestLevel = nil, math.huge
+    for _, entry in ipairs(hiveBeeCells()) do
+        if beeTypePresent(entry.Type) and not entry.Locked then
+            local level = Runtime.HiveBeeLevel(entry)
+            if level and level < bestLevel then
+                best, bestLevel = entry, level
+            end
+        end
+    end
+    if not best then
+        -- No readable levels (fresh hive / Gui not replicated): old pick.
+        return Runtime.FindQuestTargetBee(false)
+    end
+    return best
+end
+
 -- Task classification by Type + Description: "jelly" = use royal jelly,
 -- "treat" = feed treat, nil = other. Case-insensitive matching toler
 -- differences between quest module versions.
@@ -4975,10 +5093,30 @@ function Runtime.FeedQuestTreats(objective)
     -- Goal + remaining computed UP FRONT so shortages are remembered exactly.
     local taskText = string.lower(tostring(objective and objective.Description or ""))
     local goal = tonumber(string.match(taskText, "feed%s+(%d+)"))
-    local ratio = tonumber(type(objective.Progress) == "table" and objective.Progress[1]) or 0
+    local ratio = 0
+    if goal and goal >= 1 then
+        -- Progress shape is version-dependent: {current, goal} AND
+        -- {goal, current} both exist. Mid-task the current is always the
+        -- SMALLER of the two (progress never exceeds the goal), so
+        -- min/max reads the right pair regardless of order. The old
+        -- Progress[1]-only read mixed the shapes up and trickled 1-treat
+        -- feeds for a whole quest.
+        local progress = type(objective.Progress) == "table" and objective.Progress or {}
+        local first = tonumber(progress[1]) or 0
+        local second = tonumber(progress[2])
+        if second then
+            local current = math.min(first, second)
+            local target = math.max(first, second)
+            if target >= 1 then
+                ratio = math.clamp(current / target, 0, 0.99)
+            end
+        else
+            ratio = math.clamp(first / goal, 0, 0.99)
+        end
+    end
     local remaining
     if goal and goal >= 1 then
-        remaining = math.max(1, math.ceil(goal * (1 - math.clamp(ratio, 0, 0.99))))
+        remaining = math.max(1, math.ceil(goal * (1 - ratio)))
     end
     Runtime.QuestFeedDeficit = Runtime.QuestFeedDeficit or {}
     local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
@@ -4996,14 +5134,17 @@ function Runtime.FeedQuestTreats(objective)
         end
         return false
     end
-    local bee = Runtime.FindQuestTargetBee(false)
+    local bee = Runtime.FindQuestFeedBee()
     if not bee then
         setStatus("Quest feed", "No bee found to feed")
         return false
     end
     -- Feed only what the quest still NEEDS: a 1-seed task never burns the
     -- whole stock, and a partially-fed task tops up just the remainder.
-    local batch = treats -- unknown goal: keep the feed-everything behaviour
+    -- Unknown goal (no "feed N" in the text): CAP the pass - the old
+    -- feed-everything behaviour dumped the entire stock into one bee.
+    local batch = math.min(treats,
+        math.max(1, math.floor(tonumber(Config.QuestFeedMaxBlindBatch) or 10)))
     if remaining then
         batch = math.min(treats, remaining)
         if batch < remaining then
@@ -5928,7 +6069,30 @@ task.spawn(function()
                     Runtime.MobLastDamageAt = now
                     Runtime.TweenGeneration += 1
                     releaseTweenRoot()
-                    local escape = Runtime.FindMobEscapePosition(field, root.Position, mobs)
+                    -- Dodge at the GAME'S DEFAULT speed (drop the field move
+                    -- boost): a short nudge just past the swing band looks and
+                    -- plays like a real player dodging, and the continuous
+                    -- bounce below carries the actual immunity meanwhile.
+                    restoreFieldMoveSpeed()
+                    local nearest = nil
+                    for _, mob in ipairs(mobs) do
+                        if not nearest or (root.Position - mob.Position).Magnitude
+                            < (root.Position - nearest).Magnitude then
+                            nearest = mob.Position
+                        end
+                    end
+                    local escape = nil
+                    if nearest then
+                        local away = root.Position - nearest
+                        if away.Magnitude > 0.5 then
+                            escape = root.Position + away.Unit
+                                * (threatRadius + math.max(4, tonumber(Config.AvoidMobNudgeStuds) or 6))
+                        end
+                    end
+                    if escape and Runtime.SegmentThreat(root.Position, escape, 2) then
+                        -- The nudge path crosses a second mob: full escape finder.
+                        escape = Runtime.FindMobEscapePosition(field, root.Position, mobs)
+                    end
                     if escape then
                         Runtime.MobRelocating = true
                         Runtime.MobRelocateTarget = escape
@@ -5936,15 +6100,15 @@ task.spawn(function()
                             + math.max(1.5, tonumber(Config.AvoidMobRelocateTimeout) or 4)
                         Runtime.MobHoldPosition = nil
                         humanoid:MoveTo(escape)
-                        setStatus("Avoid mob", "Hit - retreat to safe point in " .. field.Name)
+                        setStatus("Avoid mob", "Hit - nudging out at default speed")
                     else
-                        -- Nowhere safe: STAND STILL instead of running through mobs.
+                        -- Nowhere safe: hold + bounce (airborne swings whiff).
                         Runtime.MobRelocating = false
                         Runtime.MobRelocateTarget = nil
                         Runtime.MobHoldPosition = root.Position
                         humanoid:Move(Vector3.zero, false)
                         humanoid:MoveTo(root.Position)
-                        setStatus("Avoid mob", "Hit - no safe point, holding still in " .. field.Name)
+                        setStatus("Avoid mob", "Hit - no safe point, holding + bouncing")
                     end
                 end
 
@@ -5992,13 +6156,14 @@ task.spawn(function()
                 tweenTo(CFrame.new(away), Config.TokenTweenSpeed, "MobBackstep", nil, true)
             end
             -- Danger jump (game mechanic): mobs only connect hits while the
-            -- character is GROUNDED - inside the threat band a single hop
-            -- makes the swing whiff. Rate-limited so it never bunny-hops.
-            if threatening and humanoid and root and not root.Anchored
-                and humanoid.FloorMaterial ~= Enum.Material.Air
-                and os.clock() >= (Runtime.NextMobJumpAt or 0) then
-                Runtime.NextMobJumpAt = os.clock()
-                    + math.max(0.5, tonumber(Config.MobJumpInterval) or 0.12)
+            -- character is GROUNDED, so for the WHOLE threat hold (mob in
+            -- band or the post-hit hold window) the bot BOUNCES CONTINUOUSLY
+            -- - Jump is re-asserted every grounded tick, so it re-hops the
+            -- instant it lands. The old 0.5s rate gate left the mob's swing
+            -- window open half the time - the "lúc nhảy lúc không" dodge.
+            if (threatening or Runtime.AvoidingMob) and humanoid and root
+                and not root.Anchored
+                and humanoid.FloorMaterial ~= Enum.Material.Air then
                 humanoid.Jump = true
             end
         else
@@ -6999,6 +7164,10 @@ function MaterialSystem.PlanterName(data)
 end
 
 function MaterialSystem.ChoosePlanter(stats, active)
+    -- INVENTORY-GATED choice: a planter is only planted when the player
+    -- OWNS a spare one - Amount() reads the owned count (stats.Eggs, with
+    -- a live Player.Eggs fallback) and subtracts the ones already growing.
+    -- Names verified against the place model's Planter Pots catalog.
     local folder = ReplicatedStorage:FindFirstChild("LocalPlanters")
     folder = folder and folder:FindFirstChild("Planter Pots")
     if not folder then return nil end
@@ -7010,7 +7179,8 @@ function MaterialSystem.ChoosePlanter(stats, active)
     local priority = {
         "Blue Clay Planter", "Tacky Planter", "Candy Planter", "Plastic Planter",
         "Paper Planter", "Red Clay Planter", "Pesticide Planter", "Heat-Treated Planter",
-        "Hydroponic Planter", "Petal Planter", "Planter of Plenty",
+        "Hydroponic Planter", "Petal Planter", "The Planter Of Plenty",
+        "Festive Planter", "Ticket Planter", "Sticker Planter",
     }
     local available = {}
     for _, model in ipairs(folder:GetChildren()) do available[model.Name] = true end
@@ -7021,6 +7191,52 @@ function MaterialSystem.ChoosePlanter(stats, active)
         if MaterialSystem.Amount(name, stats) > (used[name] or 0) then return name end
     end
     return nil
+end
+
+-- REMOTE ("từ xa") PLANT - blink-plant. The server validates the player's
+-- STANDING FIELD when PlayerActivesCommand fires (planter goes into the
+-- field under the character), so the trip is the only slow part. Instead
+-- of walking: one replicated CFrame write puts the character in the field,
+-- the remote fires, the planter spawn is CONFIRMED against LocalPlanters
+-- (new ActorID), then one CFrame write returns the character home. Two
+-- writes total, no tween, no walk. Returns false when the planter never
+-- appears - callers fall back to the legacy walk-and-fire path.
+function Runtime.PlantAt(point, planterName)
+    if typeof(point) ~= "Vector3" or type(planterName) ~= "string" then return false end
+    local _, humanoid, root = getCharacter(2)
+    if not root or not humanoid or humanoid.Health <= 0 then return false end
+    local home = root.CFrame
+    local wasAnchored = root.Anchored
+    pcall(function()
+        -- Anchor during the blink so the game physics cannot drift the
+        -- character off the field between the write and the remote fire.
+        root.Anchored = true
+        root.CFrame = CFrame.new(point + Vector3.new(0, 3, 0))
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+    task.wait(0.2) -- let the standing field replicate to the server
+    local before = {}
+    for _, data in ipairs(MaterialSystem.PlanterData()) do before[data.ActorID] = true end
+    remoteCall("PlayerActivesCommand", {Name = planterName})
+    local confirmed = false
+    local deadline = os.clock() + 1.5
+    while os.clock() < deadline and Runtime.Running do
+        task.wait(0.1)
+        for _, data in ipairs(MaterialSystem.PlanterData()) do
+            if not before[data.ActorID] then
+                confirmed = true
+                break
+            end
+        end
+        if confirmed then break end
+    end
+    pcall(function()
+        root.CFrame = home
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.Anchored = wasAnchored
+    end)
+    return confirmed
 end
 
 function MaterialSystem.PlanterWork(material, field, stats)
@@ -7060,9 +7276,13 @@ function MaterialSystem.PlanterWork(material, field, stats)
     Runtime.LastMaterialPlanterAction = os.clock()
     Runtime.PlanterBusy = true
     setStatus("Farm material", "Plant " .. planterName .. " @ " .. field.Name)
-    tweenTo(CFrame.new(point), Config.TweenSpeed, "MaterialPlanter")
-    task.wait(0.35)
-    local okPlant = select(1, remoteCall("PlayerActivesCommand", {Name = planterName}))
+    -- Blink-plant first; the walk is only the fallback for a failed fire.
+    local okPlant = Runtime.PlantAt(point, planterName)
+    if not okPlant then
+        tweenTo(CFrame.new(point), Config.TweenSpeed, "MaterialPlanter")
+        task.wait(0.35)
+        okPlant = select(1, remoteCall("PlayerActivesCommand", {Name = planterName}))
+    end
     Runtime.PlanterBusy = false
     return okPlant
 end
@@ -8850,10 +9070,8 @@ function Runtime.PlanterCycleStep()
                 Runtime.PlanterBusy = true
                 setStatus("Planter", string.format("Plant %s @ %s (%d/3 active)",
                     planterName, fieldName, math.min(usable + 1, 3)))
-                tweenTo(CFrame.new(point), Config.TweenSpeed, "Planter")
-                task.wait(0.35)
-                -- The material mover may have planted here while we walked:
-                -- re-verify the field is still free before firing.
+                -- The material mover may have planted here: re-verify the
+                -- field is still free before firing (no walk to wait out).
                 local stillFree = true
                 for _, data in ipairs(MaterialSystem.PlanterData()) do
                     local pos = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
@@ -8861,10 +9079,16 @@ function Runtime.PlanterCycleStep()
                     if fld and fld.Name == fieldName then stillFree = false break end
                 end
                 if stillFree then
-                    local ok = remoteCall("PlayerActivesCommand", {Name = planterName})
+                    -- Blink-plant first; walk-and-fire only as fallback.
+                    local planted = Runtime.PlantAt(point, planterName)
+                    if not planted then
+                        tweenTo(CFrame.new(point), Config.TweenSpeed, "Planter")
+                        task.wait(0.35)
+                        planted = select(1, remoteCall("PlayerActivesCommand", {Name = planterName})) and true or false
+                    end
                     Runtime.PlanterBusy = false
-                    if ok then
-                        task.wait(1)
+                    if planted then
+                        task.wait(0.5)
                         return "planted"
                     end
                     failed = true
