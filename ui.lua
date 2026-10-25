@@ -885,6 +885,27 @@ local function hiveFamilyColor(beeType)
     if n:find("red", 1, true) then return Color3.fromRGB(230, 105, 95) end
     return Color3.fromRGB(125, 125, 135) -- colorless
 end
+
+-- MẶT ONG THẬT từ game: ReplicatedStorage.GiftedBeeModels.<Tên>.FaceTexture
+-- (tên model = từ đầu của loại ong: "Bumble Bee" -> "Bumble"). Cache theo loại.
+local beeFaceCache = {}
+local function beeFaceTexture(beeType)
+    local key = tostring(beeType or "")
+    if beeFaceCache[key] ~= nil then return beeFaceCache[key] end
+    local texture
+    local firstName = key:match("^(%S+)")
+    local models = ReplicatedStorage:FindFirstChild("GiftedBeeModels")
+    local model = models and firstName and models:FindFirstChild(firstName) or nil
+    if model then
+        local decal = model:FindFirstChild("FaceTexture")
+            or model:FindFirstChildWhichIsA("Decal", true)
+        if decal then
+            pcall(function() texture = decal.Texture end)
+        end
+    end
+    beeFaceCache[key] = texture or false
+    return texture
+end
 local hiveCells
 do
     local page = UI._pages.Hive
@@ -996,25 +1017,25 @@ do
             local slotStroke = create("UIStroke", {
                 Color = T.Stroke, Thickness = 1, Transparency = 0.5,
             }, slotCell)
+            -- Mặt ong THẬT (GiftedBeeModels.FaceTexture) chính giữa - thiết kế
+            -- theo reference: icon chủ đạo, nền tint màu họ ong.
+            local faceIcon = create("ImageLabel", {
+                Name = "Face",
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0.5, 0, 0.5, 1),
+                Size = UDim2.fromOffset(26, 26),
+                BackgroundTransparency = 1,
+                Image = "",
+                ScaleType = Enum.ScaleType.Fit,
+            }, slotCell)
             local levelText = create("TextLabel", {
                 Size = UDim2.new(1, -4, 0, 9),
-                Position = UDim2.fromOffset(3, 1),
+                Position = UDim2.fromOffset(3, 0),
                 BackgroundTransparency = 1,
                 Font = Enum.Font.Gotham,
                 Text = "",
                 TextColor3 = T.TextDim,
                 TextSize = 9,
-                TextXAlignment = Enum.TextXAlignment.Left,
-            }, slotCell)
-            local typeText = create("TextLabel", {
-                Size = UDim2.new(1, -6, 0, 11),
-                Position = UDim2.fromOffset(3, 10),
-                BackgroundTransparency = 1,
-                Font = Enum.Font.GothamMedium,
-                Text = "",
-                TextColor3 = T.Text,
-                TextSize = 8,
-                TextTruncate = Enum.TextTruncate.AtEnd,
                 TextXAlignment = Enum.TextXAlignment.Left,
             }, slotCell)
             local star = create("TextLabel", {
@@ -1028,7 +1049,7 @@ do
             }, slotCell)
             hiveCells.GridSlot[slot] = {
                 Frame = slotCell, Stroke = slotStroke,
-                Level = levelText, Type = typeText, Star = star,
+                Level = levelText, Face = faceIcon, Star = star,
             }
         end
 
@@ -1291,7 +1312,7 @@ function UI.SetHiveGrid(entries)
             cell.Stroke.Color = T.Stroke
             cell.Stroke.Transparency = 0.5
             cell.Level.Text = ""
-            cell.Type.Text = ""
+            cell.Face.Image = ""
             cell.Star.Visible = false
         end)
     end
@@ -1307,13 +1328,16 @@ function UI.SetHiveGrid(entries)
             local cell = hiveCells.GridSlot[slot]
             if cell then
                 local gifted = entry.Gifted and true or false
+                -- Mặt ong thật (cache theo loại; model không có thì ô chỉ còn
+                -- nền màu + level + sao - không vỡ layout).
+                local face = beeFaceTexture(entry.Type)
                 pcall(function()
                     cell.Frame.BackgroundColor3 = hiveFamilyColor(entry.Type)
-                    cell.Frame.BackgroundTransparency = gifted and 0 or 0.15
+                    cell.Frame.BackgroundTransparency = 0.5
                     cell.Stroke.Color = gifted and T.Accent or T.Stroke
                     cell.Stroke.Transparency = gifted and 0 or 0.5
                     cell.Level.Text = tostring(tonumber(entry.Level) or "")
-                    cell.Type.Text = tostring(entry.Type):gsub("%s*[Bb]ee$", "")
+                    cell.Face.Image = face or ""
                     cell.Star.Visible = gifted
                 end)
             end
@@ -1337,7 +1361,13 @@ local function readHiveCell(cell)
     local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
     if not (cellType and cellType:IsA("ValueBase")) then return nil end
     local beeType = tostring(cellType.Value)
-    if beeType == "" or beeType == "None" or beeType == "nil" then return nil end
+    -- Cell trống của game ghi "Empty" - phải lọc đủ cả 4 dạng (v1.2
+    -- beeTypePresent) kẻo 50 ô "Empty" + COMB 50/50 như bản trước.
+    local normalizedType = normalizeImageName(beeType)
+    if normalizedType == "" or normalizedType == "none"
+        or normalizedType == "empty" or normalizedType == "nil" then
+        return nil
+    end
     local level
     for _, name in ipairs({"Level", "BeeLevel", "CellLevel"}) do
         local value = cell:FindFirstChild(name)
