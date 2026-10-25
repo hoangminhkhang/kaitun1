@@ -254,6 +254,10 @@ local DEFAULT_CONFIG = {
     -- Damage-dodge nudge: this many studs PAST the threat radius (a short
     -- hop out of the swing band at DEFAULT game speed, not a boosted sprint).
     AvoidMobNudgeStuds = 6,
+    -- CAMP-DEADLOCK BREAKER: when a stationary mob parks inside the threat
+    -- band for this many seconds (no damage because the bounce immunity
+    -- works), run the escape anyway instead of bouncing in place forever.
+    AvoidMobCampEscapeSeconds = 3,
     MobThreatRadius = 16,
     MobThreatHoldSeconds = 4,
     FireflyScanInterval = 0.25,
@@ -266,6 +270,9 @@ local DEFAULT_CONFIG = {
     SproutScanInterval = 0.25,
     SproutFarmSlice = 3,
     SproutMaxFarmSeconds = 180,
+    -- TOTAL cap per sprout (weak collectors need several 180s passes; the
+    -- sprout itself despawns after roughly 10-15 minutes).
+    SproutMaxTotalSeconds = 900,
     SproutDropWindow = 20,
     ViciousRespectHiveLevel = true,
     MaterialFarmSeconds = 10,
@@ -6064,9 +6071,22 @@ task.spawn(function()
                 Runtime.AvoidingMob = true
                 -- Kill any in-flight glide/farm move: the retreat owns the character.
                 if damaged then Runtime.Glide = nil end
+                -- CAMP-DEADLOCK BREAKER: a stationary mob parked inside the
+                -- threat band keeps `threatening` true forever, and the
+                -- continuous bounce makes us immune so `damaged` NEVER fires
+                -- the escape - the old bot stood in place bouncing until the
+                -- mob died. Track how long the threat has persisted; past the
+                -- camp threshold run the SAME default-speed nudge WITHOUT
+                -- needing damage, then restart the window (a persistent
+                -- follower gets kited out of the field nudge by nudge).
+                Runtime.MobThreatSince = Runtime.MobThreatSince or now
+                local camped = now - Runtime.MobThreatSince
+                    >= math.max(1, tonumber(Config.AvoidMobCampEscapeSeconds) or 3)
                 local relocateCooldown = math.max(0.5, tonumber(Config.AvoidMobRelocateCooldown) or 2.5)
-                if damaged and now - (Runtime.MobLastDamageAt or -math.huge) >= relocateCooldown then
+                if (damaged or camped)
+                    and now - (Runtime.MobLastDamageAt or -math.huge) >= relocateCooldown then
                     Runtime.MobLastDamageAt = now
+                    Runtime.MobThreatSince = now
                     Runtime.TweenGeneration += 1
                     releaseTweenRoot()
                     -- Dodge at the GAME'S DEFAULT speed (drop the field move
@@ -6100,7 +6120,8 @@ task.spawn(function()
                             + math.max(1.5, tonumber(Config.AvoidMobRelocateTimeout) or 4)
                         Runtime.MobHoldPosition = nil
                         humanoid:MoveTo(escape)
-                        setStatus("Avoid mob", "Hit - nudging out at default speed")
+                        setStatus("Avoid mob", damaged and "Hit - nudging out at default speed"
+                            or "Mob camping - walking out at default speed")
                     else
                         -- Nowhere safe: hold + bounce (airborne swings whiff).
                         Runtime.MobRelocating = false
@@ -6136,6 +6157,7 @@ task.spawn(function()
                 Runtime.MobRelocating = false
                 Runtime.MobRelocateTarget = nil
                 Runtime.MobRelocateUntil = 0
+                Runtime.MobThreatSince = nil
             end
             -- Hop-free proximity response: a CLOSE mob (not yet threat-range)
             -- triggers a short backstep glide away from it. The threat branch
@@ -6172,6 +6194,7 @@ task.spawn(function()
             Runtime.MobRelocating = false
             Runtime.MobRelocateTarget = nil
             Runtime.MobRelocateUntil = 0
+            Runtime.MobThreatSince = nil
             Runtime.MobLastHumanoid = nil
             Runtime.MobLastHealth = nil
         end
@@ -6513,33 +6536,46 @@ function MaterialSystem.FarmSprout()
     Runtime.SproutField = field.Name
     Runtime.CurrentField = field.Name
     local handled, popped = false, false
-    local deadline = os.clock() + math.max(15, tonumber(Config.SproutMaxFarmSeconds) or 180)
-
+    -- Sprouts despawn after roughly 10-15 minutes: cap the TOTAL farm time
+    -- so a collector too weak to ever finish one cannot loop on it forever.
+    local totalDeadline = os.clock()
+        + math.max(60, tonumber(Config.SproutMaxTotalSeconds) or 900)
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
-        and os.clock() < deadline do
+        and os.clock() < totalDeadline do
+        -- PER-PASS deadline: when it expires with the sprout STILL ALIVE,
+        -- extend with a fresh pass instead of tearing the whole farm down
+        -- (the old code cleaned up and re-walked the field every 180s).
+        local passDeadline = os.clock()
+            + math.max(15, tonumber(Config.SproutMaxFarmSeconds) or 180)
+        while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+            and os.clock() < passDeadline do
+            if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then break end
+            -- POP = OUR sprout instance is GONE. A DIFFERENT sprout merely
+            -- being nearer now (multi-sprout events) is NOT a pop - the old
+            -- instance-compare against FindSprout() mistook that, counted a
+            -- fake "popped" (SproutsFarmed++) and wasted the 20s drop window.
+            if not (sprout.Parent ~= nil and sprout:IsDescendantOf(workspace)) then
+                popped = true
+                break
+            end
+            -- Convert immediately when the bag fills and return if the marker survives. Without
+            -- this step, small-bag accounts would stall on the Sprout forever.
+            if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
+                Runtime.Digging = false
+                convertPollen()
+            else
+                local worked = farmStep(math.max(0.5, tonumber(Config.SproutFarmSlice) or 3),
+                    field, "Auto Sprout", "Breaking Sprout | " .. field.Name)
+                handled = worked or handled
+            end
+            task.wait(0.05)
+        end
+        if popped or not Runtime.Running or Runtime.MeteorPriorityActive then break end
         if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then break end
-        local current, currentField = MaterialSystem.FindSprout()
-        if current ~= sprout then
-            popped = true
-            break
-        end
+        -- Pass done, sprout alive: refresh the field and keep going.
+        local _, currentField = MaterialSystem.FindSprout()
         if currentField then field = currentField end
-
-        -- Convert immediately when the bag fills and return if the marker survives. Without
-        -- this step, small-bag accounts would stall on the Sprout forever.
-        if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
-            Runtime.Digging = false
-            convertPollen()
-        else
-            local worked = farmStep(math.max(0.5, tonumber(Config.SproutFarmSlice) or 3),
-                field, "Auto Sprout", "Breaking Sprout | " .. field.Name)
-            handled = worked or handled
-        end
-        if not sprout.Parent then
-            popped = true
-            break
-        end
-        task.wait(0.05)
+        setStatus("Auto Sprout", "Sprout still standing | continuing | " .. field.Name)
     end
 
     if popped and not Runtime.MeteorPriorityActive then
