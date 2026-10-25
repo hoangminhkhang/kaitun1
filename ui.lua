@@ -886,24 +886,47 @@ local function hiveFamilyColor(beeType)
     return Color3.fromRGB(125, 125, 135) -- colorless
 end
 
--- MẶT ONG THẬT từ game: ReplicatedStorage.GiftedBeeModels.<Tên>.FaceTexture
--- (tên model = từ đầu của loại ong: "Bumble Bee" -> "Bumble"). Cache theo loại.
+-- MẶT ONG THẬT: nguồn chuẩn = BeeTypes.Thumbnails/<Tên> ( GiftedThumbnails
+-- cho ong gifted - đúng bộ asset UI hive của game tự dùng). Fallback:
+-- TopDecals rồi GiftedBeeModels.FaceTexture. Cache theo loại + gifted.
 local beeFaceCache = {}
-local function beeFaceTexture(beeType)
-    local key = tostring(beeType or "")
+local function beeFaceTexture(beeType, gifted)
+    local key = tostring(beeType or "") .. (gifted and "|g" or "")
     if beeFaceCache[key] ~= nil then return beeFaceCache[key] end
     local texture
-    local firstName = key:match("^(%S+)")
-    local models = ReplicatedStorage:FindFirstChild("GiftedBeeModels")
-    local model = models and firstName and models:FindFirstChild(firstName) or nil
-    if model then
-        local decal = model:FindFirstChild("FaceTexture")
-            or model:FindFirstChildWhichIsA("Decal", true)
-        if decal then
-            pcall(function() texture = decal.Texture end)
+    local firstName = tostring(beeType or ""):match("^(%S+)")
+    if firstName and firstName ~= "" then
+        local beeTypes = ReplicatedStorage:FindFirstChild("BeeTypes")
+        if beeTypes then
+            local folder = beeTypes:FindFirstChild(gifted and "GiftedThumbnails" or "Thumbnails")
+            texture = textureOf(folder and folder:FindFirstChild(firstName))
+            if not texture and folder then
+                -- Khớp CHUẨN HÓA (tránh lệch "Basic Bee" / "BasicBee"):
+                -- so tên loại (bỏ đuôi "bee") với tên child đã chuẩn hóa.
+                local wanted = normalizeImageName(beeType)
+                local wantedBare = wanted:gsub("bee$", "")
+                for _, child in ipairs(folder:GetChildren()) do
+                    local n = normalizeImageName(child.Name)
+                    if n == wanted or n == wantedBare then
+                        texture = textureOf(child)
+                        break
+                    end
+                end
+            end
+            if not texture then
+                local decals = beeTypes:FindFirstChild("TopDecals")
+                texture = textureOf(decals and decals:FindFirstChild(firstName))
+            end
+        end
+        if not texture then
+            local models = ReplicatedStorage:FindFirstChild("GiftedBeeModels")
+            texture = textureOf(models and models:FindFirstChild(firstName))
         end
     end
     beeFaceCache[key] = texture or false
+    if not texture then
+        print("[BSS UI] bee icon not found for: " .. tostring(beeType) .. " (gifted=" .. tostring(gifted and true or false) .. ")")
+    end
     return texture
 end
 local hiveCells
@@ -1052,18 +1075,6 @@ do
                 Level = levelText, Face = faceIcon, Star = star,
             }
         end
-
-        create("TextLabel", {
-            LayoutOrder = 30,
-            Size = UDim2.new(1, 0, 0, 16),
-            BackgroundTransparency = 1,
-            Font = Enum.Font.Gotham,
-            Text = "main: UI.SetHive{...} + UI.SetHiveGrid{{Type=,Gifted=,Level=,X=,Y=}}",
-            TextColor3 = T.TextDim,
-            TextSize = 10,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextTransparency = 0.35,
-        }, page)
     end
 end
 
@@ -1328,9 +1339,8 @@ function UI.SetHiveGrid(entries)
             local cell = hiveCells.GridSlot[slot]
             if cell then
                 local gifted = entry.Gifted and true or false
-                -- Mặt ong thật (cache theo loại; model không có thì ô chỉ còn
-                -- nền màu + level + sao - không vỡ layout).
-                local face = beeFaceTexture(entry.Type)
+                -- Mặt ong thật: bản gifted riêng (nền vàng) khi có sao.
+                local face = beeFaceTexture(entry.Type, gifted)
                 pcall(function()
                     cell.Frame.BackgroundColor3 = hiveFamilyColor(entry.Type)
                     cell.Frame.BackgroundTransparency = 0.5
@@ -1355,6 +1365,33 @@ end
 -- Level/BeeLevel/CellLevel (fallback qua ObjectValue "Bee"). Poll nhẹ mỗi
 -- 2.5s và tự cập nhật cả 6 ô stat + comb 50 slot.
 -- =============================================================================
+-- Level fallback: module stats của game - stats.Honeycomb["x,y"].Level
+-- (công thức hiveCellData của script chính). Lazy require, không yield.
+local statCacheModule
+local function getStatCache()
+    if statCacheModule ~= nil then return statCacheModule end
+    local module = ReplicatedStorage:FindFirstChild("ClientStatCache")
+    if not module then return nil end
+    local ok, result = pcall(require, module)
+    statCacheModule = (ok and type(result) == "table") and result or false
+    return statCacheModule
+end
+
+local function statHiveLevel(x, y)
+    local cache = getStatCache()
+    if type(cache) ~= "table" or type(cache.Get) ~= "function" then return nil end
+    local ok, stats = pcall(cache.Get, cache)
+    if not ok or type(stats) ~= "table" then return nil end
+    local honeycomb = stats.Honeycomb
+    if type(honeycomb) ~= "table" then return nil end
+    local cell = honeycomb[tostring(x) .. "," .. tostring(y)]
+        or honeycomb[tostring(x) .. ":" .. tostring(y)]
+    if type(cell) == "table" then
+        return tonumber(cell.Level or cell.BeeLevel or cell.CellLevel)
+    end
+    return nil
+end
+
 local function readHiveCell(cell)
     local x, y = cell.Name:match("^C(%d+),(%d+)$")
     if not x or not y then return nil end
@@ -1387,6 +1424,9 @@ local function readHiveCell(cell)
                 end
             end
         end
+    end
+    if not level then
+        level = statHiveLevel(tonumber(x), tonumber(y))
     end
     return {
         X = tonumber(x), Y = tonumber(y),
