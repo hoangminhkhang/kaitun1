@@ -1001,7 +1001,7 @@ do
         local gridFrame = corner(create("Frame", {
             Name = "HiveGrid",
             LayoutOrder = 20,
-            Size = UDim2.new(1, 0, 0, 208),
+            Size = UDim2.new(1, 0, 0, 158),
             BackgroundColor3 = T.Panel,
         }, page), R_CARD)
         strokeOf(gridFrame, T.Stroke, 1, 0.6)
@@ -1016,27 +1016,26 @@ do
             TextXAlignment = Enum.TextXAlignment.Left,
         }, gridFrame)
         hiveCells.GridCount = gridCountLabel
+        -- LOGIC HIVE THẬT: 5 hàng × 10 cột = tối đa 50 slot, hàng so le
+        -- nửa ô như tổ ong (staggered honeycomb) - không còn grid vuông xấu.
+        local CELL_W, CELL_H, PAD_X, ROW_STEP = 40, 28, 3, 24
         local gridHolder = create("Frame", {
-            Size = UDim2.new(1, -12, 0, 178),
+            Size = UDim2.new(1, -12, 0, 5 * ROW_STEP + CELL_H - ROW_STEP + 4),
             Position = UDim2.fromOffset(6, 21),
             BackgroundTransparency = 1,
         }, gridFrame)
-        create("UIGridLayout", {
-            CellSize = UDim2.fromOffset(44, 30),
-            CellPadding = UDim2.fromOffset(3, 2),
-            FillDirection = Enum.FillDirection.Horizontal,
-            HorizontalAlignment = Enum.HorizontalAlignment.Center,
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, gridHolder)
-
         hiveCells.GridSlot = {}
         for slot = 1, 50 do
+            local row = math.floor((slot - 1) / 10)
+            local col = (slot - 1) % 10
+            local stagger = (row % 2 == 1) and (CELL_W + PAD_X) * 0.5 or 0
             local slotCell = corner(create("Frame", {
                 Name = "Slot" .. slot,
-                LayoutOrder = slot,
                 BackgroundColor3 = T.PanelLight,
                 BackgroundTransparency = 0.35,
-            }, gridHolder), 6)
+                Position = UDim2.fromOffset(col * (CELL_W + PAD_X) + stagger, row * ROW_STEP),
+                Size = UDim2.fromOffset(CELL_W, CELL_H),
+            }, gridHolder), 10)
             local slotStroke = create("UIStroke", {
                 Color = T.Stroke, Thickness = 1, Transparency = 0.5,
             }, slotCell)
@@ -1045,8 +1044,8 @@ do
             local faceIcon = create("ImageLabel", {
                 Name = "Face",
                 AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.new(0.5, 0, 0.5, 1),
-                Size = UDim2.fromOffset(26, 26),
+                Position = UDim2.new(0.5, 0, 0.5, 0),
+                Size = UDim2.fromOffset(22, 22),
                 BackgroundTransparency = 1,
                 Image = "",
                 ScaleType = Enum.ScaleType.Fit,
@@ -1314,12 +1313,14 @@ end
 --   Type = "Basic Bee", Gifted = true/false, Level = 7,
 --   X = col 1-10, Y = row 1-5 (tuỳ chọn - thiếu thì điền tuần tự)}.
 -- Ô màu theo họ (blue đỏ / red đỏ / event vàng), gifted = sao ⭐ + viền vàng.
-function UI.SetHiveGrid(entries)
+function UI.SetHiveGrid(entries, existingSlots)
     if type(hiveCells) ~= "table" or type(hiveCells.GridSlot) ~= "table" then return end
-    -- Reset về trống.
+    -- Reset: ẩn hết, chỉ hiện slot đã MỞ trong hive (tổ thật chỉ có ô đã
+    -- unlock). existingSlots = mảng {X=,Y=} các ô tồn tại; nil = hiện đủ 50.
     for slot = 1, 50 do
         local cell = hiveCells.GridSlot[slot]
         pcall(function()
+            cell.Frame.Visible = false
             cell.Frame.BackgroundColor3 = T.PanelLight
             cell.Frame.BackgroundTransparency = 0.35
             cell.Stroke.Color = T.Stroke
@@ -1328,6 +1329,20 @@ function UI.SetHiveGrid(entries)
             cell.Face.Image = ""
             cell.Star.Visible = false
         end)
+    end
+    if type(existingSlots) == "table" then
+        for _, slot in ipairs(existingSlots) do
+            if type(slot) == "table" and type(slot.X) == "number" and type(slot.Y) == "number" then
+                local index = math.clamp(math.floor((slot.Y - 1) * 10 + slot.X + 0.5), 1, 50)
+                local cell = hiveCells.GridSlot[index]
+                if cell then pcall(function() cell.Frame.Visible = true end) end
+            end
+        end
+    else
+        for slot = 1, 50 do
+            local cell = hiveCells.GridSlot[slot]
+            pcall(function() cell.Frame.Visible = true end)
+        end
     end
     local list = type(entries) == "table" and entries or {}
     local filled = 0
@@ -1396,9 +1411,19 @@ local function statHiveLevel(x, y)
     if not ok or type(stats) ~= "table" then return nil end
     local honeycomb = stats.Honeycomb
     if type(honeycomb) ~= "table" then return nil end
-    -- Đủ 4 nhánh dò như hiveCellData: "x,y" / "x:y" / row lồng / scan tọa độ.
-    local cell = honeycomb[tostring(x) .. "," .. tostring(y)]
-        or honeycomb[tostring(x) .. ":" .. tostring(y)]
+    -- Dạng THẬT của bảng (khám phá từ atlas): Honeycomb["x<col>"]["y<row>"],
+    -- level field tên "Lvl". Thử đủ các biến thể key cho chắc.
+    local column = honeycomb["x" .. tostring(x)]
+        or honeycomb[x] or honeycomb[tostring(x)]
+        or honeycomb[tostring(x) .. "," .. tostring(y)]
+    local cell = nil
+    if type(column) == "table" then
+        cell = column["y" .. tostring(y)]
+            or column[y] or column[tostring(y)]
+    end
+    if type(cell) ~= "table" and type(column) == "table" then
+        cell = column -- dạng phẳng "x,y" trả thẳng cell
+    end
     if type(cell) ~= "table" then
         local row = honeycomb[x] or honeycomb[tostring(x)]
         if type(row) == "table" then
@@ -1418,7 +1443,7 @@ local function statHiveLevel(x, y)
         end
     end
     if type(cell) == "table" then
-        return tonumber(cell.Level or cell.BeeLevel or cell.CellLevel)
+        return tonumber(cell.Lvl or cell.Level or cell.BeeLevel or cell.CellLevel)
     end
     return nil
 end
@@ -1478,6 +1503,7 @@ function UI.AutoHive(intervalSeconds)
             local cellsFolder = hive and hive:FindFirstChild("Cells")
             if cellsFolder then
                 local entries = {}
+                local slotList = {}
                 local bees, giftedCount = 0, 0
                 local blueCount, redCount, eventCount = 0, 0, 0
                 local levelTotal, levelCount = 0, 0
@@ -1485,6 +1511,7 @@ function UI.AutoHive(intervalSeconds)
                     local entry = readHiveCell(cell)
                     if entry then
                         table.insert(entries, entry)
+                        table.insert(slotList, {X = entry.X, Y = entry.Y})
                         bees += 1
                         if entry.Gifted then giftedCount += 1 end
                         if entry.Level then
@@ -1500,9 +1527,16 @@ function UI.AutoHive(intervalSeconds)
                         elseif n:find("red", 1, true) then
                             redCount += 1
                         end
+                    else
+                        -- Ô đã mở nhưng trống: vẫn vẽ placeholder cho đúng
+                        -- hình dáng tổ thật.
+                        local ex, ey = cell.Name:match("^C(%d+),(%d+)$")
+                        if ex and ey then
+                            table.insert(slotList, {X = tonumber(ex), Y = tonumber(ey)})
+                        end
                     end
                 end
-                UI.SetHiveGrid(entries)
+                UI.SetHiveGrid(entries, slotList)
                 UI.SetHive{
                     Bees = bees,
                     Gifted = giftedCount,
