@@ -284,6 +284,9 @@ local DEFAULT_CONFIG = {
     ViciousRespectHiveLevel = true,
     MaterialFarmSeconds = 10,
     MaterialCombatSeconds = 18,
+    -- Ride height EXTRA above the vic/bonus-mob head (trên nửa thân + số này).
+    -- Nâng từ 3 lên 5: vẫn dính đòn khi mob nhấp nhô lúc lunge.
+    ViciousRideExtraStuds = 5,
     MaterialStatsInterval = 2,
     MaterialPlanterHarvestPercent = 0.98,
     MaterialPlanterActionCooldown = 5,
@@ -3712,6 +3715,10 @@ do
             if ok and sizeX and sizeX >= 9 and sizeX <= 11 then
                 Runtime.TelegraphAvoid[object] = 8 -- vicious spike disk
             end
+        elseif lowered == "waitingthorn" then
+            -- Vicious sting telegraph (atlas-exact: tracked.avoid radius 8) -
+            -- the ACTUAL damage source near a vic, previously untracked.
+            Runtime.TelegraphAvoid[object] = 8
         elseif lowered == "spinner" then
             local part = object:FindFirstChild("Part")
             if part then
@@ -3732,20 +3739,34 @@ do
         while Runtime.Running do
             local particles = workspace:FindFirstChild("Particles")
             if particles then
-                for _, object in ipairs(particles:GetChildren()) do
-                    pcall(trackTelegraph, object)
+                -- Generic folder watcher: tracks telegraph children AND, for
+                -- the vicious "WTs" subfolder (where WaitingThorn lives one
+                -- level deep), attaches the same watch recursively.
+                local conns = {}
+                local function watchFolder(folder)
+                    for _, object in ipairs(folder:GetChildren()) do
+                        if object.Name == "WTs" then
+                            watchFolder(object)
+                        else
+                            pcall(trackTelegraph, object)
+                        end
+                    end
+                    table.insert(conns, connect(folder.ChildAdded, function(object)
+                        if object.Name == "WTs" then
+                            watchFolder(object)
+                        else
+                            pcall(trackTelegraph, object)
+                        end
+                    end))
+                    table.insert(conns, connect(folder.ChildRemoved, function(object)
+                        Runtime.TelegraphAvoid[object] = nil
+                        local inner = object:FindFirstChild("Part")
+                        if inner then Runtime.TelegraphAvoid[inner] = nil end
+                    end))
                 end
-                local addedConn = connect(particles.ChildAdded, function(object)
-                    pcall(trackTelegraph, object)
-                end)
-                local removedConn = connect(particles.ChildRemoved, function(object)
-                    Runtime.TelegraphAvoid[object] = nil
-                    local inner = object:FindFirstChild("Part")
-                    if inner then Runtime.TelegraphAvoid[inner] = nil end
-                end)
-                -- The Particles folder can be rebuilt on server hop: rescan.
+                watchFolder(particles)
                 local gone = false
-                local goneConn = connect(particles.Destroying, function() gone = true end)
+                table.insert(conns, connect(particles.Destroying, function() gone = true end))
                 while Runtime.Running and not gone and particles.Parent do
                     task.wait(2)
                     -- Prune entries whose instance vanished (defensive).
@@ -3755,9 +3776,7 @@ do
                         end
                     end
                 end
-                addedConn:Disconnect()
-                removedConn:Disconnect()
-                goneConn:Disconnect()
+                for _, conn in ipairs(conns) do pcall(function() conn:Disconnect() end) end
                 Runtime.TelegraphAvoid = {}
             else
                 task.wait(2)
@@ -6920,11 +6939,13 @@ function MaterialSystem.FarmVicious()
         local mobPosition = objectPosition(mob)
         local _, humanoid, root = getCharacter(1)
         if not humanoid or not root or not mobPosition then break end
-        -- Feet ON the mob's head: half the model height plus hip height.
+        -- Feet ON the mob's head: half the model height plus a config-driven
+        -- extra clearance (raised 3->5: contact damage during lunges).
         local mobHeight = 8
         pcall(function() mobHeight = mob:GetExtentsSize().Y end)
         local rideTarget = CFrame.new(mobPosition
-            + Vector3.new(0, math.clamp(mobHeight * 0.5, 3, 10) + 3, 0))
+            + Vector3.new(0, math.clamp(mobHeight * 0.5, 3, 10)
+                + math.max(1, tonumber(Config.ViciousRideExtraStuds) or 5), 0))
         -- A mid-fight cancelMovement clears MaterialCombat; re-assert so the
         -- avoid-mob worker never treats the mob we are riding as a threat.
         Runtime.MaterialCombat = true
