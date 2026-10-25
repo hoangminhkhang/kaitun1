@@ -1001,7 +1001,7 @@ do
         local gridFrame = corner(create("Frame", {
             Name = "HiveGrid",
             LayoutOrder = 20,
-            Size = UDim2.new(1, 0, 0, 158),
+            Size = UDim2.new(1, 0, 0, 21 + 9 * 34 + 38 + 12),
             BackgroundColor3 = T.Panel,
         }, page), R_CARD)
         strokeOf(gridFrame, T.Stroke, 1, 0.6)
@@ -1016,18 +1016,19 @@ do
             TextXAlignment = Enum.TextXAlignment.Left,
         }, gridFrame)
         hiveCells.GridCount = gridCountLabel
-        -- LOGIC HIVE THẬT: 5 hàng × 10 cột = tối đa 50 slot, hàng so le
-        -- nửa ô như tổ ong (staggered honeycomb) - không còn grid vuông xấu.
-        local CELL_W, CELL_H, PAD_X, ROW_STEP = 40, 28, 3, 24
+        -- LOGIC HIVE THẬT (atlas 62501: cột x chạy 1..5, hàng y 1..10):
+        -- 5 CỘT × 10 HÀNG, hàng so le nửa ô như tổ ong, ô gần vuông.
+        -- Trang tự scroll nên comb cao không sao.
+        local CELL_W, CELL_H, PAD_X, ROW_STEP = 54, 38, 5, 34
         local gridHolder = create("Frame", {
-            Size = UDim2.new(1, -12, 0, 5 * ROW_STEP + CELL_H - ROW_STEP + 4),
+            Size = UDim2.new(1, -12, 0, 9 * ROW_STEP + CELL_H + 4),
             Position = UDim2.fromOffset(6, 21),
             BackgroundTransparency = 1,
         }, gridFrame)
         hiveCells.GridSlot = {}
         for slot = 1, 50 do
-            local row = math.floor((slot - 1) / 10)
-            local col = (slot - 1) % 10
+            local row = math.floor((slot - 1) / 5)   -- Y 1..10
+            local col = (slot - 1) % 5                -- X 1..5
             local stagger = (row % 2 == 1) and (CELL_W + PAD_X) * 0.5 or 0
             local slotCell = corner(create("Frame", {
                 Name = "Slot" .. slot,
@@ -1333,7 +1334,8 @@ function UI.SetHiveGrid(entries, existingSlots)
     if type(existingSlots) == "table" then
         for _, slot in ipairs(existingSlots) do
             if type(slot) == "table" and type(slot.X) == "number" and type(slot.Y) == "number" then
-                local index = math.clamp(math.floor((slot.Y - 1) * 10 + slot.X + 0.5), 1, 50)
+                -- 5 cột × 10 hàng: index = (Y-1)*5 + X.
+                local index = math.clamp(math.floor((slot.Y - 1) * 5 + slot.X + 0.5), 1, 50)
                 local cell = hiveCells.GridSlot[index]
                 if cell then pcall(function() cell.Frame.Visible = true end) end
             end
@@ -1351,7 +1353,8 @@ function UI.SetHiveGrid(entries, existingSlots)
             filled += 1
             local slot = index
             if type(entry.X) == "number" and type(entry.Y) == "number" then
-                slot = math.clamp(math.floor((entry.Y - 1) * 10 + entry.X + 0.5), 1, 50)
+                -- 5 cột × 10 hàng (hive thật): index = (Y-1)*5 + X.
+                slot = math.clamp(math.floor((entry.Y - 1) * 5 + entry.X + 0.5), 1, 50)
             end
             local cell = hiveCells.GridSlot[slot]
             if cell then
