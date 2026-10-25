@@ -1052,14 +1052,16 @@ do
                 ScaleType = Enum.ScaleType.Fit,
             }, slotCell)
             local levelText = create("TextLabel", {
-                Size = UDim2.new(1, -4, 0, 9),
+                Size = UDim2.new(1, -4, 0, 10),
                 Position = UDim2.fromOffset(3, 0),
                 BackgroundTransparency = 1,
-                Font = Enum.Font.Gotham,
+                Font = Enum.Font.GothamBold,
                 Text = "",
-                TextColor3 = T.TextDim,
-                TextSize = 9,
+                TextColor3 = T.Text,
+                TextSize = 10,
                 TextXAlignment = Enum.TextXAlignment.Left,
+                TextStrokeTransparency = 0.6,
+                ZIndex = 3,
             }, slotCell)
             local star = create("TextLabel", {
                 Size = UDim2.fromOffset(12, 12),
@@ -1377,15 +1379,44 @@ local function getStatCache()
     return statCacheModule
 end
 
+local statCacheLastUpdate = 0
 local function statHiveLevel(x, y)
     local cache = getStatCache()
-    if type(cache) ~= "table" or type(cache.Get) ~= "function" then return nil end
+    if type(cache) ~= "table" then return nil end
+    -- Get trước; nếu chưa có bảng Honeycomb (cache lạnh) thì Update một
+    -- nhịp rồi Get lại - đúng vòng getStats của script chính.
     local ok, stats = pcall(cache.Get, cache)
+    if not ok or type(stats) ~= "table" or type(stats.Honeycomb) ~= "table" then
+        if type(cache.Update) == "function" and os.clock() - statCacheLastUpdate > 2 then
+            statCacheLastUpdate = os.clock()
+            pcall(cache.Update, cache)
+            ok, stats = pcall(cache.Get, cache)
+        end
+    end
     if not ok or type(stats) ~= "table" then return nil end
     local honeycomb = stats.Honeycomb
     if type(honeycomb) ~= "table" then return nil end
+    -- Đủ 4 nhánh dò như hiveCellData: "x,y" / "x:y" / row lồng / scan tọa độ.
     local cell = honeycomb[tostring(x) .. "," .. tostring(y)]
         or honeycomb[tostring(x) .. ":" .. tostring(y)]
+    if type(cell) ~= "table" then
+        local row = honeycomb[x] or honeycomb[tostring(x)]
+        if type(row) == "table" then
+            cell = row[y] or row[tostring(y)]
+        end
+    end
+    if type(cell) ~= "table" then
+        for _, entry in pairs(honeycomb) do
+            if type(entry) == "table" then
+                local cx = tonumber(entry.CellX or entry.X or entry.Column)
+                local cy = tonumber(entry.CellY or entry.Y or entry.Row)
+                if cx == x and cy == y then
+                    cell = entry
+                    break
+                end
+            end
+        end
+    end
     if type(cell) == "table" then
         return tonumber(cell.Level or cell.BeeLevel or cell.CellLevel)
     end
