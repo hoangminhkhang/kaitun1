@@ -106,6 +106,18 @@ local DEFAULT_CONFIG = {
     TweenSpeed = 100,
     TokenTweenSpeed = 150,
     SmartMove = true,
+    -- Atlas-style physics flight: far travel drives the character with
+    -- AlignPosition/AlignOrientation constraints (Humanoid Physics state)
+    -- instead of anchoring + stepping the CFrame every frame. The character
+    -- stays physics-simulated the whole way: no anchor toggles, natural
+    -- accel/decel (Responsiveness), and supersede/cancel paths tear the
+    -- constraints down through the shared releaseTweenRoot funnel.
+    -- false = legacy anchored glide.
+    PhysicsFlight = true,
+    -- Responsiveness of the far-travel AlignPosition pull (atlas tweenTo =
+    -- 20, gentle; 200 is reserved for token chases and feels rubber-bandy
+    -- over long legs).
+    FlightResponsiveness = 20,
     FieldMoveSpeed = 120,
     SmartWalkDistance = 10,
     SmartArrivalDistance = 6,
@@ -368,6 +380,14 @@ local DEFAULT_CONFIG = {
     FixLagHideDecorations = true,
     FixLagDeleteDecorations = true,
     FixLagHidePlayers = true,
+    -- Atlas "Hide BSS UI" port: disable the game's own ScreenGuis (pure
+    -- render cost for a bot - the script reads workspace/remotes, not GUI).
+    FixLagHideGameUI = true,
+    -- Atlas-EXACT player removal (Character:Destroy on everyone else).
+    -- Zero render/physics cost but brutal: if the game re-creates or reads
+    -- other characters it can misbehave, so the transparency hide above
+    -- stays the default and this is opt-in.
+    FixLagDestroyPlayers = false,
     FixLagHideWeather = true,
     FixLagRemoveTextures = true,
     FixLagPlasticMaterials = true,
@@ -376,6 +396,10 @@ local DEFAULT_CONFIG = {
     FixLagScanBatch = 350,
     FixLagHideSky = true,
     FixLagBrightness = 0.65,
+    -- Executor-side frame cap (setfpscap): a farming bot gains nothing past
+    -- 60fps but the GPU pays for every frame. 0 disables. Re-applied by the
+    -- 12s anti-lag loop because some executors reset it on teleport.
+    FixLagFpsCap = 60,
     -- Early material codes only; boost codes stay in BoostCodes to avoid wasting field boosts.
     PromoCodes = {
         "BeesBuzz123", "38217", "BopMaster", "Connoisseur",
@@ -1176,7 +1200,120 @@ end
         return Vector3.new(cf.Position.X, atY or cf.Position.Y, cf.Position.Z)
     end
 
+    -- ATLAS PHYSICS FLIGHT (mined from atlasbss flyTo): movement by
+    -- AlignPosition (OneAttachment, Responsiveness 200, MaxForce huge,
+    -- MaxVelocity capped) + AlignOrientation (rigid, heading frozen) while
+    -- the Humanoid sits in Physics state. No anchor, no per-frame CFrame
+    -- writes. releaseTweenRoot funnels releaseFlight so EVERY existing
+    -- supersede/cancel path (cancelMovement, glide runner, new tweenTo,
+    -- avoid-mob takeover) destroys the constraints - a leaked Physics state
+    -- or constraint would leave the character unable to walk.
+    local FLIGHT_POSITION_NAME = "BSSKaitunFlightPosition"
+    local FLIGHT_ORIENTATION_NAME = "BSSKaitunFlightOrientation"
+
+    local function releaseFlight()
+        if Runtime.FlightNoclipConnection then
+            pcall(Runtime.FlightNoclipConnection.Disconnect, Runtime.FlightNoclipConnection)
+            Runtime.FlightNoclipConnection = nil
+        end
+        local root = Runtime.FlightRoot
+        Runtime.FlightRoot = nil
+        if not root then return end
+        pcall(function()
+            for _, child in ipairs(root:GetChildren()) do
+                if child.Name == FLIGHT_POSITION_NAME
+                    or child.Name == FLIGHT_ORIENTATION_NAME then
+                    child:Destroy()
+                end
+            end
+            local humanoid = root.Parent
+                and root.Parent:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                -- Physics state ignores MoveTo: always hand control back,
+                -- even when the flight ended mid-air (atlas drops the same
+                -- Freefall on arrival).
+                humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+            end
+        end)
+    end
+
+    -- Atlas tuning: far travel pulls GENTLY (atlas tweenTo uses 20; the
+    -- snappy 200 is for token chases) - high responsiveness on long legs
+    -- rubber-bands and overshoots arrivals.
+    local function engageFlight(root, humanoid, position, maxVelocity, responsiveness)
+        releaseFlight()
+        local ok = pcall(function()
+            -- Stale constraints from a superseded flight (atlas cleans the
+            -- same way): two AlignPositions fighting is a hard stall.
+            for _, child in ipairs(root:GetChildren()) do
+                if child.Name == FLIGHT_POSITION_NAME
+                    or child.Name == FLIGHT_ORIENTATION_NAME then
+                    child:Destroy()
+                end
+            end
+            local attachment = root:FindFirstChild("RootAttachment")
+            if not attachment then error("RootAttachment missing") end
+            local alignPosition = Instance.new("AlignPosition")
+            alignPosition.Name = FLIGHT_POSITION_NAME
+            alignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
+            alignPosition.Attachment0 = attachment
+            alignPosition.Responsiveness = responsiveness or 200
+            alignPosition.MaxForce = math.huge
+            alignPosition.MaxVelocity = math.clamp(maxVelocity, 40, 300)
+            alignPosition.Position = position
+            alignPosition.Parent = root
+            local alignOrientation = Instance.new("AlignOrientation")
+            alignOrientation.Name = FLIGHT_ORIENTATION_NAME
+            alignOrientation.Attachment0 = attachment
+            alignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+            alignOrientation.RigidityEnabled = true
+            alignOrientation.CFrame = root.CFrame
+            alignOrientation.Parent = root
+            humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+            humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+        end)
+        if ok then
+            Runtime.FlightRoot = root
+            -- ATLAS NOCLIP FLIGHT (tweenTo 7003-7009): a physics pull would
+            -- stall on the first cliff/cave wall, so a PreSimulation writer
+            -- keeps every character part CanCollide=false for the whole
+            -- flight. No manual restore on teardown: the humanoid re-asserts
+            -- limb collisions itself the moment the writer is gone (atlas's
+            -- stopMovement relies on exactly this).
+            local character = root.Parent
+            local noclipOk, noclipConnection = pcall(function()
+                return RunService.PreSimulation:Connect(function()
+                    -- Destroyed-character hardening: stop churning a dead
+                    -- subtree the frames between destroy and releaseFlight.
+                    if not character.Parent then return end
+                    for _, part in ipairs(character:GetDescendants()) do
+                        if part:IsA("BasePart") and part.CanCollide then
+                            part.CanCollide = false
+                        end
+                    end
+                end)
+            end)
+            if noclipOk and noclipConnection then
+                Runtime.FlightNoclipConnection = noclipConnection
+            end
+        else
+            -- releaseFlight is a no-op here (FlightRoot is only set on
+            -- success): tear down whatever got parented before the throw -
+            -- a half-attached AlignPosition drags the character forever.
+            pcall(function()
+                for _, child in ipairs(root:GetChildren()) do
+                    if child.Name == FLIGHT_POSITION_NAME
+                        or child.Name == FLIGHT_ORIENTATION_NAME then
+                        child:Destroy()
+                    end
+                end
+            end)
+        end
+        return ok
+    end
+
     local function releaseTweenRoot()
+    releaseFlight()
     local root = Runtime.TweenRoot
     if root then
         pcall(function()
@@ -1286,9 +1423,11 @@ end
 -- CanCollide=false, so fields are FLAT AND OBSTACLE-FREE and the Roblox
 -- navmesh inside them is empty: PathfindingService.ComputeAsync could only
 -- ever return the straight line back (pure latency + async stalls). Detours
--- are therefore computed GEOMETRICALLY: one midpoint offset perpendicular to
--- the straight segment, around the blocking threat circle. Instant, smooth,
--- zero service calls. Used by the stuck-watchdog walk AND token detours.
+-- are therefore computed GEOMETRICALLY: a candidate ladder of midpoint arcs
+-- (offset perpendicular to the straight segment, far side of the threat
+-- first, both legs threat-verified, midpoint clamped into the field).
+-- Instant, smooth, zero service calls. Used by the stuck-watchdog walk AND
+-- token detours.
 local function computeFieldPath(rootPosition, position, startField)
     local margin = math.max(0, tonumber(Config.TokenPathMargin) or 4)
     local threat = type(Runtime.SegmentThreat) == "function"
@@ -1305,21 +1444,55 @@ local function computeFieldPath(rootPosition, position, startField)
     local flatThreat = Vector3.new(threat.Position.X, 0, threat.Position.Z)
     local mid = from:Lerp(to, 0.5)
     local perp = Vector3.new(-direction.Z, 0, direction.X)
-    -- Detour on the side of the line FARTHER from the threat.
-    local side = (mid + perp * 8 - flatThreat).Magnitude
+    -- Detour on the side of the line FARTHER from the threat first.
+    local farSide = (mid + perp * 8 - flatThreat).Magnitude
         >= (mid - perp * 8 - flatThreat).Magnitude and 1 or -1
-    local offsetDist = math.max(threat.Radius + margin + 4, 10)
-    local midPoint = mid + perp * (side * offsetDist)
-    -- Keep the arc inside the field (narrow fields): outside -> give up on the
-    -- detour and let the straight walk + avoid worker handle it.
-    if startField and flowerFieldAtPosition(Vector3.new(midPoint.X, rootPosition.Y, midPoint.Z), 0) ~= startField then
-        return nil
+    -- Field clamp: in narrow fields the arc midpoint would exit the bounds.
+    -- Project it back INSIDE (5-stud inset) instead of failing the whole
+    -- detour - the old give-up made narrow-field detours impossible.
+    if startField then
+        local boundsCFrame, boundsSize = fieldBoundsOf(startField)
+        if boundsCFrame and boundsSize then
+            local inverse = boundsCFrame:Inverse()
+            local localMid = inverse * Vector3.new(
+                mid.X, boundsCFrame.Position.Y, mid.Z)
+            local halfX = math.max(0, boundsSize.X / 2 - 5)
+            local halfZ = math.max(0, boundsSize.Z / 2 - 5)
+            local clamped = boundsCFrame * Vector3.new(
+                math.clamp(localMid.X, -halfX, halfX), localMid.Y,
+                math.clamp(localMid.Z, -halfZ, halfZ))
+            mid = Vector3.new(clamped.X, 0, clamped.Z)
+        end
     end
+    -- Candidate ladder: far side then near side, offset growing. The first
+    -- arc whose BOTH legs are threat-clear wins; arcing around one threat
+    -- straight into a second used to kill the detour downstream, now it
+    -- just tries the next candidate (threats are 0.5s-cached: cheap).
+    local baseOffset = math.max(threat.Radius + margin + 4, 10)
     local height = math.max(rootPosition.Y, position.Y)
-    return {
-        {Position = Vector3.new(midPoint.X, height, midPoint.Z)},
-        {Position = Vector3.new(to.X, height, to.Z)},
-    }
+    local goal = {Position = Vector3.new(to.X, height, to.Z)}
+    for _, grow in ipairs({0, 6, 12}) do
+        for _, sideSign in ipairs({farSide, -farSide}) do
+            local midPoint = mid + perp * (sideSign * (baseOffset + grow))
+            if not startField
+                or flowerFieldAtPosition(
+                    Vector3.new(midPoint.X, rootPosition.Y, midPoint.Z), 0) == startField then
+                local waypoint = {Position = Vector3.new(midPoint.X, height, midPoint.Z)}
+                if not Runtime.SegmentThreat(rootPosition, waypoint.Position, margin)
+                    and not Runtime.SegmentThreat(waypoint.Position, goal.Position, margin) then
+                    -- Consumers (walkFieldPath, Runtime.DetourWaypoints) walk
+                    -- from index 2 assuming usable[1] is the START node - the
+                    -- PathfindingService contract this replaced. Returning
+                    -- {waypoint, goal} silently skipped the detour leg (and
+                    -- made DetourWaypoints re-test the blocked straight line,
+                    -- rejecting every geometric detour).
+                    local start = {Position = Vector3.new(from.X, height, from.Z)}
+                    return {start, waypoint, goal}
+                end
+            end
+        end
+    end
+    return nil
 end
 
 -- Obstacle memory: positions where walking recently ground to a halt. New
@@ -1612,6 +1785,104 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
             Runtime.MovementOwner = nil
             return false, "walk timeout"
         end
+    end
+
+    -- ATLAS PHYSICS FLIGHT branch: far travel without anchoring. Arrival
+    -- semantics match the legacy glide (generation-supersede aware, deadline
+    -- capped); supersede paths kill the constraints via releaseTweenRoot ->
+    -- releaseFlight. Falls through to the anchored glide when disabled.
+    -- preferGlide (vic/crab head-rides) keeps the legacy chained-anchor
+    -- glide: those retarget up to 20 Hz and per-tick flight cycles would
+    -- churn constraints and Freefall-flicker on the mob's head.
+    if Config.PhysicsFlight and not preferGlide then
+        releaseTweenRoot()
+        local flightSpeed = math.clamp(moveSpeed, 40, 300)
+
+        -- ATLAS CAVE RELAY (tweenTo 6961-6969): when the straight ray to the
+        -- goal crosses workspace.Cave, fly to a relay field first and
+        -- continue from there - pulling straight through the cave wedges the
+        -- character into geometry even with noclip. Atlas relays via Spider
+        -- Field from 60 above (<25 bees) or Mountain Top from 20 below (25+);
+        -- Spider works for every hive, so it is used unconditionally here.
+        local relayTarget = position
+        if distance > 60 then
+            local cave = workspace:FindFirstChild("Cave")
+            if cave then
+                local relayOk, blocked = pcall(function()
+                    local params = RaycastParams.new()
+                    params.FilterDescendantsInstances = {cave}
+                    params.FilterType = Enum.RaycastFilterType.Include
+                    local direction = position - root.Position
+                    return workspace:Raycast(root.Position, direction, params) ~= nil
+                end)
+                if relayOk and blocked then
+                    local zones = workspace:FindFirstChild("FlowerZones")
+                    local relayZone = zones and zones:FindFirstChild("Spider Field")
+                    -- Model-zone safe (the field stack defends against Models
+                    -- everywhere else - this path must too or the relay
+                    -- silently never fires and we pull straight through the
+                    -- cave we just detected).
+                    local relayBase = nil
+                    if relayZone then
+                        if relayZone:IsA("BasePart") then
+                            relayBase = relayZone.Position
+                        else
+                            local part = relayZone:FindFirstChildWhichIsA("BasePart", true)
+                            relayBase = part and part.Position or nil
+                        end
+                    end
+                    if relayBase then
+                        relayTarget = relayBase + Vector3.new(0, 60, 0)
+                    else
+                        setStatus("Smart move", "Cave crossing - no relay zone")
+                    end
+                end
+            end
+        end
+
+        local routeSucceeded = Runtime.Running and Runtime.TweenGeneration == generation
+            and humanoid.Health > 0 and root.Parent ~= nil
+
+        local function flyLeg(goal)
+            if not engageFlight(root, humanoid, goal, flightSpeed,
+                tonumber(Config.FlightResponsiveness) or 20) then
+                return false
+            end
+            local duration = math.clamp(
+                (goal - root.Position).Magnitude / flightSpeed, 0.05, 30)
+            local deadline = os.clock() + duration + 1.5
+            while Runtime.Running and Runtime.TweenGeneration == generation
+                and humanoid.Health > 0 and Runtime.FlightRoot ~= nil
+                and os.clock() < deadline do
+                if (root.Position - goal).Magnitude <= Config.SmartArrivalDistance then
+                    break
+                end
+                task.wait(0.05)
+            end
+            -- Ownership guard: a superseding tweenTo already tore OUR
+            -- constraints down (and may have engaged ITS OWN flight) - a
+            -- blind release here would kill the successor's fresh flight.
+            if Runtime.TweenGeneration == generation then releaseFlight() end
+            return Runtime.TweenGeneration == generation
+                and root.Parent ~= nil
+                and (root.Position - goal).Magnitude <= Config.SmartArrivalDistance + 2
+        end
+
+        if routeSucceeded then
+            if relayTarget ~= position then
+                routeSucceeded = flyLeg(relayTarget)
+                if routeSucceeded then routeSucceeded = flyLeg(position) end
+            else
+                routeSucceeded = flyLeg(position)
+            end
+        end
+        if Runtime.TweenGeneration == generation then
+            Runtime.MovementOwner = nil
+            restoreFieldMoveSpeed(generation)
+        end
+        return routeSucceeded
+            and root.Parent ~= nil
+            and (root.Position - position).Magnitude <= Config.SmartArrivalDistance + 4
     end
 
     -- Reuse the root still anchored by the previous glide when its grace window
@@ -3622,16 +3893,55 @@ local function sweepTokens(duration, owner)
     return collected
 end
 
+-- Is a placed sprinkler still standing near this field's center? (They
+-- despawn when their duration ends - throttled shallow scan.)
+local function fieldHasActiveSprinkler(field)
+    if os.clock() < (Runtime.SprinklerCheckAt or 0) then
+        return Runtime.SprinklerFieldHas ~= nil and Runtime.SprinklerFieldHas == field.Name
+    end
+    Runtime.SprinklerCheckAt = os.clock() + 2
+    local center = fieldCenterPosition(field)
+    local found = false
+    if center then
+        local flatCenter = Vector3.new(center.X, 0, center.Z)
+        for _, object in ipairs(workspace:GetChildren()) do
+            if string.find(string.lower(object.Name), "sprinkler", 1, true) then
+                local position = objectPosition(object)
+                if position
+                    and (Vector3.new(position.X, 0, position.Z) - flatCenter).Magnitude <= 25 then
+                    found = true
+                    break
+                end
+            end
+        end
+    end
+    Runtime.SprinklerFieldHas = found and field.Name or nil
+    return found
+end
+
 local function placeSprinklerIfNeeded(field)
     if not Config.AutoPlaceSprinkler or not field then return false end
     if beeCount() < Config.MinSprinklerBees then return false end
     local fieldName = field.Name
-    local due = os.clock() - Runtime.LastSprinklerPlace >= Config.SprinklerPlaceInterval
-    if not due and Runtime.LastSprinklerField == fieldName then return false end
+    -- ONE sprinkler per field entry, dropped at the field CENTER (widest tile
+    -- coverage), then pure farming: re-place ONLY when the field changes or
+    -- the placed one despawned - no more re-drops every few seconds.
+    if Runtime.LastSprinklerField == fieldName and fieldHasActiveSprinkler(field) then
+        return false
+    end
+    local center = fieldCenterPosition(field)
+    if not center then return false end
+    -- The active drops at the player's feet: stand the center before firing.
+    setStatus("Sprinkler", fieldName .. " | center drop")
+    tweenTo(CFrame.new(center), Config.TweenSpeed, "Sprinkler")
+    task.wait(0.25)
     local ok = remoteCall("PlayerActivesCommand", {Name = "Sprinkler Builder"})
     if ok then
         Runtime.LastSprinklerPlace = os.clock()
         Runtime.LastSprinklerField = fieldName
+        Runtime.SprinklerFieldHas = fieldName
+        Runtime.SprinklerCheckAt = os.clock() + 2
+        setStatus("Sprinkler", fieldName .. " | placed at center")
     end
     return ok
 end
@@ -5595,10 +5905,12 @@ task.spawn(function()
                 and humanoid ~= nil and root ~= nil and not root.Anchored
             -- While GLIDING the root is anchored, so the threat branch above can
             -- never run - without this, a glide path straight through a mob eats
-            -- every hit. Cancel the glide on damage: the root unanchors and the
-            -- normal jump-dodge/retreat takes over on the next tick.
+            -- every hit. Cancel the glide (or an atlas-style physics flight -
+            -- same rule, different mover) on damage: the mover is torn down and
+            -- the normal jump-dodge/retreat takes over on the next tick.
             if damaged and nearestDistance ~= nil and nearestDistance <= threatRadius
-                and humanoid ~= nil and root ~= nil and root.Anchored then
+                and humanoid ~= nil and root ~= nil
+                and (root.Anchored or Runtime.FlightRoot ~= nil) then
                 Runtime.Glide = nil
                 releaseTweenRoot()
                 Runtime.MobThreatUntil = os.clock()
@@ -7502,6 +7814,15 @@ local function applyLowGraphics(enabled)
     local function applyLightingSettings()
         pcall(function() workspace.GlobalWind = Vector3.zero end)
         pcall(function() settings().Rendering.AntiAliasing = false end)
+        -- Executor frame cap: permanent GPU headroom for a farming bot.
+        -- Guarded - setfpscap only exists on executor environments, and a
+        -- 0/nil cap means "leave it alone".
+        do
+            local cap = tonumber(Config.FixLagFpsCap) or 0
+            if cap > 0 and setfpscap then
+                pcall(setfpscap, math.floor(cap))
+            end
+        end
         pcall(function()
             Lighting.GlobalShadows = false
             Lighting.Brightness = math.clamp(tonumber(Config.FixLagBrightness) or 0.65, 0, 3)
@@ -7677,11 +7998,54 @@ local function applyLowGraphics(enabled)
         end
         local function bindPlayer(otherPlayer)
             if otherPlayer == Player then return end
+            -- Atlas-exact option (opt-in): destroy the character outright -
+            -- zero render/animation/physics cost, versus the transparency
+            -- hide below which only stops rendering + animations.
+            if Config.FixLagDestroyPlayers then
+                if otherPlayer.Character then
+                    pcall(function() otherPlayer.Character:Destroy() end)
+                end
+                connect(otherPlayer.CharacterAdded, function(character)
+                    if Runtime.Running and Config.FixLagDestroyPlayers then
+                        pcall(function() character:Destroy() end)
+                    end
+                end)
+                -- Respawn raced the Destroy->Connect window: catch the
+                -- character that appeared in between (otherwise it stays
+                -- visible until the NEXT respawn).
+                if otherPlayer.Character then
+                    pcall(function() otherPlayer.Character:Destroy() end)
+                end
+                return
+            end
             if otherPlayer.Character then hideCharacter(otherPlayer.Character) end
             connect(otherPlayer.CharacterAdded, hideCharacter)
         end
         for _, otherPlayer in ipairs(Players:GetPlayers()) do bindPlayer(otherPlayer) end
         connect(Players.PlayerAdded, bindPlayer)
+    end
+    -- Atlas "Hide BSS UI" port: the game's own ScreenGuis are pure render
+    -- cost for a bot. Flatten every top-level ScreenGui (the script's own
+    -- card is excepted for the UI build) and keep new ones off - disabling
+    -- only stops rendering; instances stay alive for any signal the game
+    -- reads from them.
+    if Config.FixLagHideGameUI then
+        local function flattenGameUi(playerGui)
+            for _, screen in ipairs(playerGui:GetChildren()) do
+                if screen:IsA("ScreenGui") and screen.Name ~= "BSSKaitunCard" then
+                    pcall(function() screen.Enabled = false end)
+                end
+            end
+        end
+        local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+        if playerGui then
+            flattenGameUi(playerGui)
+            connect(playerGui.ChildAdded, function(child)
+                if child:IsA("ScreenGui") and child.Name ~= "BSSKaitunCard" then
+                    pcall(function() child.Enabled = false end)
+                end
+            end)
+        end
     end
     task.spawn(function()
         while Runtime.Running and Config.LowGraphics do
