@@ -259,7 +259,14 @@ local DEFAULT_CONFIG = {
     -- works), run the escape anyway instead of bouncing in place forever.
     AvoidMobCampEscapeSeconds = 3,
     MobThreatRadius = 16,
-    MobThreatHoldSeconds = 4,
+    -- STANCE MODE (mặc định, theo spec user): khi CÓ mob sống trong field
+    -- đang farm -> DỪNG farming, đứng tại chỗ NHẢY LIÊN TỤC (trên không =
+    -- miễn nhiễm) cho tới khi mob trong field chết hết. Không đi né, không
+    -- farm tranh thủ lúc đánh nhau. Tắt (false) để dùng mode né chủ động.
+    AvoidMobStance = true,
+    -- ACTIVE danger radius (chỉ dùng khi AvoidMobStance = false).
+    MobActiveRadius = 11,
+    MobThreatHoldSeconds = 2,
     FireflyScanInterval = 0.25,
     FireflyLandingVelocity = 0.15,
     FireflyMaxFieldHeight = 4,
@@ -6049,8 +6056,19 @@ task.spawn(function()
                 mobNear = nearestDistance ~= nil
                     and nearestDistance <= jumpRadius
             end
-            threatening = nearestDistance ~= nil and nearestDistance <= threatRadius
-                and humanoid ~= nil and root ~= nil and not root.Anchored
+            -- STANCE MODE (default): ANY live mob in the working field parks
+            -- the bot - hold position and bounce (airborne = immune) until
+            -- the field is clear. No farming mid-fight, no walking away.
+            -- Non-stance mode keeps the active-danger rule instead (hold
+            -- only inside the small active radius or right after a hit).
+            if Config.AvoidMobStance then
+                threatening = #mobs > 0 and humanoid ~= nil and root ~= nil and not root.Anchored
+            else
+                threatening = humanoid ~= nil and root ~= nil and not root.Anchored
+                    and nearestDistance ~= nil
+                    and (nearestDistance <= math.max(6, tonumber(Config.MobActiveRadius) or 11)
+                        or (damaged and nearestDistance <= threatRadius))
+            end
             -- While GLIDING the root is anchored, so the threat branch above can
             -- never run - without this, a glide path straight through a mob eats
             -- every hit. Cancel the glide (or an atlas-style physics flight -
@@ -6083,7 +6101,9 @@ task.spawn(function()
                 local camped = now - Runtime.MobThreatSince
                     >= math.max(1, tonumber(Config.AvoidMobCampEscapeSeconds) or 3)
                 local relocateCooldown = math.max(0.5, tonumber(Config.AvoidMobRelocateCooldown) or 2.5)
-                if (damaged or camped)
+                -- Stance mode: NO escape - the spec is to stand and bounce
+                -- until the field clears, never walk away.
+                if not Config.AvoidMobStance and (damaged or camped)
                     and now - (Runtime.MobLastDamageAt or -math.huge) >= relocateCooldown then
                     Runtime.MobLastDamageAt = now
                     Runtime.MobThreatSince = now
@@ -6150,6 +6170,12 @@ task.spawn(function()
                     Runtime.MobHoldPosition = Runtime.MobHoldPosition or root.Position
                     humanoid:Move(Vector3.zero, false)
                     humanoid:MoveTo(Runtime.MobHoldPosition)
+                    if Config.AvoidMobStance and not Runtime.StanceAnnouncedAt then
+                        Runtime.StanceAnnouncedAt = now
+                        setStatus("Avoid mob", string.format(
+                            "%d mob in %s - standing + bouncing until clear",
+                            #mobs, tostring(field and field.Name or "?")))
+                    end
                 end
             elseif os.clock() >= (Runtime.MobThreatUntil or 0) then
                 Runtime.AvoidingMob = false
@@ -6158,6 +6184,7 @@ task.spawn(function()
                 Runtime.MobRelocateTarget = nil
                 Runtime.MobRelocateUntil = 0
                 Runtime.MobThreatSince = nil
+                Runtime.StanceAnnouncedAt = nil
             end
             -- Hop-free proximity response: a CLOSE mob (not yet threat-range)
             -- triggers a short backstep glide away from it. The threat branch
@@ -6178,13 +6205,14 @@ task.spawn(function()
                 tweenTo(CFrame.new(away), Config.TokenTweenSpeed, "MobBackstep", nil, true)
             end
             -- Danger jump (game mechanic): mobs only connect hits while the
-            -- character is GROUNDED, so for the WHOLE threat hold (mob in
-            -- band or the post-hit hold window) the bot BOUNCES CONTINUOUSLY
-            -- - Jump is re-asserted every grounded tick, so it re-hops the
-            -- instant it lands. The old 0.5s rate gate left the mob's swing
-            -- window open half the time - the "lúc nhảy lúc không" dodge.
+            -- character is GROUNDED, so while HOLDING under active threat the
+            -- bot BOUNCES CONTINUOUSLY - Jump is re-asserted every grounded
+            -- tick. EXCEPT while relocating: constant re-jumping kills the
+            -- MoveTo's horizontal progress (the humanoid hops vertically in
+            -- place), so an escaping character WALKS and only a HOLDING one
+            -- bounces.
             if (threatening or Runtime.AvoidingMob) and humanoid and root
-                and not root.Anchored
+                and not root.Anchored and not Runtime.MobRelocating
                 and humanoid.FloorMaterial ~= Enum.Material.Air then
                 humanoid.Jump = true
             end
@@ -6195,6 +6223,7 @@ task.spawn(function()
             Runtime.MobRelocateTarget = nil
             Runtime.MobRelocateUntil = 0
             Runtime.MobThreatSince = nil
+            Runtime.StanceAnnouncedAt = nil
             Runtime.MobLastHumanoid = nil
             Runtime.MobLastHealth = nil
         end
