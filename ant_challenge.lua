@@ -148,19 +148,23 @@ end
 -- avoid list: {position, radius} - gom ant/giant/fire/mower/lane
 local function buildAvoidList(rootPosition)
     local list = {}
-    local monsters = workspace:FindFirstChild("Monsters")
-    if monsters then
-        for _, mob in ipairs(monsters:GetChildren()) do
-            local humanoid = mob:FindFirstChildOfClass("Humanoid")
-            if humanoid and humanoid.Health > 0 then
-                local name = mob.Name
-                if name:find("Ant", 1, true) then
-                    local antRoot = mob:FindFirstChild("HumanoidRootPart")
-                        or mob:FindFirstChildWhichIsA("BasePart", true)
-                    if antRoot then
-                        local radius = name:find("Giant", 1, true)
-                            and Config.GiantAntRadius or Config.AntRadius
-                        table.insert(list, {Position = antRoot.Position, Radius = radius, Kind = "ant"})
+    -- Ants spawn ở Monsters (server) HOẶC FEMonsters (client-side spawns -
+    -- folder riêng cho mob replication-filtered, có trong place thật).
+    for _, folderName in ipairs({"Monsters", "FEMonsters"}) do
+        local monsters = workspace:FindFirstChild(folderName)
+        if monsters then
+            for _, mob in ipairs(monsters:GetChildren()) do
+                local humanoid = mob:FindFirstChildOfClass("Humanoid")
+                if humanoid and humanoid.Health > 0 then
+                    local name = mob.Name
+                    if name:find("Ant", 1, true) then
+                        local antRoot = mob:FindFirstChild("HumanoidRootPart")
+                            or mob:FindFirstChildWhichIsA("BasePart", true)
+                        if antRoot then
+                            local radius = name:find("Giant", 1, true)
+                                and Config.GiantAntRadius or Config.AntRadius
+                            table.insert(list, {Position = antRoot.Position, Radius = radius, Kind = "ant"})
+                        end
                     end
                 end
             end
@@ -243,6 +247,39 @@ local function nearestThreat(rootPosition, list)
     return best, bestKind
 end
 
+-- ESCAPE FAN: thử 7 hướng quạt quanh hướng thoát, clamp điểm vào trong
+-- field (lane sát tường không còn trượt dọc lane), CHỈ nhận hướng mà cả
+-- đoạn đi lẫn điểm đích đều ngoài MỌI threat - hết oscillate giữa đàn ant.
+local function findEscape(root, threat, avoid)
+    local away = Vector3.new(root.X - threat.Position.X, 0, root.Z - threat.Position.Z)
+    if away.Magnitude < 0.5 then away = Vector3.new(1, 0, 0) end
+    local baseAngle = math.atan2(away.Z, away.X)
+    local cf, size = antFieldZone()
+    for _, deltaDeg in ipairs({0, 40, -40, 80, -80, 120, -120, 180}) do
+        local angle = baseAngle + math.rad(deltaDeg)
+        local point = root + Vector3.new(math.cos(angle), 0, math.sin(angle)) * Config.EvadeStep
+        if cf and size then
+            local localPoint = cf:PointToObjectSpace(point)
+            localPoint = Vector3.new(
+                math.clamp(localPoint.X, -size.X * 0.5 + 4, size.X * 0.5 - 4), localPoint.Y,
+                math.clamp(localPoint.Z, -size.Z * 0.5 + 4, size.Z * 0.5 - 4))
+            point = cf:PointToWorldSpace(localPoint)
+        end
+        if not blockedByAvoid(root, point, avoid, 1) then
+            return point
+        end
+    end
+    -- Mọi hướng bị chặn: điểm xa threat nhất có thể (clamp phía đối diện).
+    if cf and size then
+        local localPoint = cf:PointToObjectSpace(root + away.Unit * Config.EvadeStep)
+        localPoint = Vector3.new(
+            math.clamp(localPoint.X, -size.X * 0.5 + 4, size.X * 0.5 - 4), localPoint.Y,
+            math.clamp(localPoint.Z, -size.Z * 0.5 + 4, size.Z * 0.5 - 4))
+        return cf:PointToWorldSpace(localPoint)
+    end
+    return root + away.Unit * Config.EvadeStep
+end
+
 -- =============================================================================
 -- Movement: MoveTo thuan (arena dong, khong tween khong flight)
 -- =============================================================================
@@ -262,6 +299,86 @@ local function walkTo(position, timeout)
         task.wait(0.1)
     end
     return false
+end
+
+-- Tween cho CHUYEN DAI (platform/dispenser xa): anchored glide nhanh, giu
+-- huong character. Trong arena van dung MoveTo (dodge can physics that).
+local TweenService = game:GetService("TweenService")
+local function tweenTo(position, speed)
+    local humanoid, root = getCharacter(2)
+    if not root then return false end
+    local distance = (position - root.Position).Magnitude
+    if distance < 6 then return true end
+    local duration = math.clamp(distance / math.max(20, speed or 100), 0.1, 25)
+    local rotation = root.CFrame - root.CFrame.Position
+    local wasAnchored = root.Anchored
+    root.Anchored = true
+    root.AssemblyLinearVelocity = Vector3.zero
+    local tween = TweenService:Create(root,
+        TweenInfo.new(duration, Enum.EasingStyle.Linear),
+        {CFrame = CFrame.new(position) * rotation})
+    tween:Play()
+    tween.Completed:Wait()
+    root.Anchored = wasAnchored
+    return true
+end
+
+-- =============================================================================
+-- ANT PASS: dem tu ClientStatCache (scan de quy nhu kaitun) + claim dispenser
+-- =============================================================================
+local function statCount(key)
+    local module = ReplicatedStorage:FindFirstChild("ClientStatCache")
+    if not module then return nil end
+    local ok, cache = pcall(require, module)
+    if not ok or type(cache) ~= "table" or type(cache.Get) ~= "function" then return nil end
+    local okGet, stats = pcall(cache.Get, cache)
+    if not okGet or type(stats) ~= "table" then return nil end
+    local found
+    local visited = {}
+    local function scan(value, depth)
+        if found or type(value) ~= "table" or visited[value] or depth > 4 then return end
+        visited[value] = true
+        for k, child in pairs(value) do
+            if k == key and tonumber(child) then found = tonumber(child) return end
+            if type(child) == "table" then scan(child, depth + 1) end
+        end
+    end
+    scan(stats, 0)
+    return found
+end
+
+-- Claim Ant Pass tu dispenser (10 tickets/1 pass, cooldown server 5 phut)
+local function ensureAntPass()
+    local have = statCount("AntPass")
+    if have and have >= 1 then return true end
+    local tickets = statCount("Tickets") or statCount("Ticket")
+    if tickets and tickets < 10 then
+        status(string.format("Khong du dieu kien: AntPass=%s Tickets=%s (can 1 pass hoac 10 tickets)",
+            tostring(have), tostring(tickets)))
+        return false
+    end
+    local dispenser = workspace:FindFirstChild("Toys")
+        and workspace.Toys:FindFirstChild("Ant Pass Dispenser")
+    if not dispenser then
+        status("Khong thay Ant Pass Dispenser")
+        return false
+    end
+    local platform = dispenser:FindFirstChild("Platform")
+        or dispenser:FindFirstChildWhichIsA("BasePart", true)
+    if platform then
+        status("Tween den Ant Pass Dispenser - claim pass")
+        tweenTo(platform.Position + Vector3.new(0, 3, 0), 100)
+        task.wait(0.4)
+    end
+    pcall(function()
+        local events = ReplicatedStorage:FindFirstChild("Events")
+        local toyEvent = events and events:FindFirstChild("ToyEvent")
+        toyEvent:FireServer("Ant Pass Dispenser")
+    end)
+    task.wait(2)
+    local after = statCount("AntPass")
+    status(string.format("Claim xong - AntPass: %s -> %s", tostring(have), tostring(after)))
+    return (after or 1) >= 1
 end
 
 -- =============================================================================
@@ -302,24 +419,18 @@ local function challengeLoop()
 
         local avoid = buildAvoidList(root.Position)
 
-        -- 1) DANGER EVADE: threat trong ban kinh - buoc ra xa + hop
+        -- 1) DANGER EVADE: threat trong ban kinh - escape fan co clearance
         local threat, kind = nearestThreat(root.Position, avoid)
         if threat then
-            local away = Vector3.new(root.Position.X - threat.Position.X, 0,
-                root.Position.Z - threat.Position.Z)
-            if away.Magnitude < 0.5 then away = Vector3.new(1, 0, 0) end
-            local escape = root.Position + away.Unit * Config.EvadeStep
-            if inAntField(escape, -2) then
-                humanoid:MoveTo(escape)
-            else
-                -- sat tuong: chay vuong goc vao trong field
-                local tangent = Vector3.new(-away.Z, 0, away.X)
-                humanoid:MoveTo(root.Position + tangent.Unit * Config.EvadeStep)
-            end
+            local escape = findEscape(root.Position, threat, avoid)
+            humanoid:MoveTo(escape)
             if humanoid.FloorMaterial ~= Enum.Material.Air then
                 humanoid.Jump = true -- ant chi cam khi grounded
             end
-            status("Evading " .. tostring(kind))
+            if os.clock() - (State.LastEvadeLog or 0) > 1 then
+                State.LastEvadeLog = os.clock()
+                status("Evading " .. tostring(kind))
+            end
         else
             -- 2) TOKEN: gan nhat trong field, duong di khong cross avoid
             local token = nearestToken(root.Position)
@@ -369,12 +480,19 @@ local function startChallenge()
         return false
     end
 
+    -- Can 1 Ant Pass: dem tu stats, het thi claim dispenser (10 tickets).
+    if not ensureAntPass() then
+        task.wait(30)
+        return false
+    end
+
     local humanoid, root = getCharacter(3)
     if not humanoid then return false end
     local platform = toy:FindFirstChild("Platform")
     if platform then
-        status("Di den Platform de activate")
-        walkTo(Vector3.new(platform.Position.X, root.Position.Y, platform.Position.Z), 20)
+        status("Tween den Platform de activate")
+        tweenTo(Vector3.new(platform.Position.X, platform.Position.Y + 3, platform.Position.Z), 100)
+        walkTo(Vector3.new(platform.Position.X, root.Position.Y, platform.Position.Z), 8)
     end
     task.wait(0.3)
 
@@ -430,15 +548,16 @@ task.spawn(function()
                 if not okLoop then
                     status("challengeLoop error: " .. tostring(errLoop))
                 end
-                -- hut not token con lai sau khi xong
+                -- hut not token con lai sau khi xong (tween nhanh)
                 local _, root = getCharacter(2)
                 if root then
-                    local endTime = os.clock() + 4
+                    local endTime = os.clock() + 6
                     while os.clock() < endTime do
                         local token = nearestToken(root.Position)
                         if not token then break end
                         local position = token:IsA("BasePart") and token.Position or token:GetPivot().Position
-                        walkTo(position, 6)
+                        tweenTo(position, 120)
+                        task.wait(0.15)
                     end
                 end
                 status(string.format("Lan %d xong", State.Challenges))
