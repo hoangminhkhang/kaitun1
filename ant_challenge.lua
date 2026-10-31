@@ -1,0 +1,468 @@
+-- =============================================================================
+-- BSS ANT CHALLENGE BOT  (ant_challenge.lua)  --  standalone test file
+-- =============================================================================
+-- File RIENG de test Ant Challenge, khong phu thuoc kaitun. Ground truth lay
+-- tu place that (MCP probe) + co che atlas:
+--   * Toy: workspace.Toys["Ant Challenge"] - Busy(BoolValue) = flag dang choi,
+--     CostType="AntPass" x1, Platform @91,30,545 (dung day de activate),
+--     Walls.WallLeft/Right.Door1/2/3 @Z=574/593/612 (lane may cay),
+--     Obstacles = folder may cay spawn runtime, Meter/TimeBoard = progress.
+--   * Activate: ReplicatedStorage.Events.ToyEvent:FireServer("Ant Challenge")
+--     (toy khong co ProximityPrompt trong place - ToyEvent la kenh chuan).
+--   * Ants: workspace.Monsters, ten chua "Ant" - thuong avoid 15, Giant 25.
+--   * FIRE: patch luc chay = "FireParticles" con tren tile hoa trong
+--     workspace.Flowers (atlas tracked.antfire) -> avoid tile do ban kinh 8.
+--   * Lawnmower: Door color "Really red" -> lane do; + LUON avoid lane Z=612.
+--   * Tokens drop vao workspace.Collectibles - nhat trong bounds Ant Field.
+--
+-- CHAY: execute file trong BSS (place 1537690962). Dung bang:
+--   getgenv().__BSS_ANT.Stop()
+-- Config nhanh: getgenv().BSS_ANT_CONFIG = { AutoRestart = true, ... }
+-- =============================================================================
+
+local ENV = (getgenv and getgenv()) or _G
+if ENV.__BSS_ANT and type(ENV.__BSS_ANT.Stop) == "function" then
+    pcall(ENV.__BSS_ANT.Stop)
+    task.wait(0.2)
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local BSS_PLACE_ID = 1537690962
+if game.PlaceId ~= BSS_PLACE_ID then
+    warn("[BSS Ant] Wrong place " .. tostring(game.PlaceId) .. " - chay trong BSS thoi")
+    return
+end
+
+local Player = Players.LocalPlayer
+repeat task.wait() until game:IsLoaded() and Player
+
+local Config = {
+    Enabled = true,
+    AutoRestart = false,        -- xong quai thi di tiep (can Ant Pass moi lan)
+    ChallengeTimeout = 300,     -- atlas cap 300s
+    AntRadius = 15,             -- ant thuong (atlas)
+    GiantAntRadius = 25,        -- Giant Ant (atlas)
+    FireRadius = 8,             -- fire tile (atlas)
+    MowerRadius = 14,           -- may cay runtime
+    MowerLaneRadius = 20,       -- lane theo door do (atlas: 20)
+    AlwaysAvoidLaneZ = 612,     -- atlas: LUON avoid hang Z=612
+    EvadeStep = 10,             -- so stud buoc thoat khi danger qua gan
+    Tick = 0.2,
+    TokenMaxDistance = 90,      -- token xa hon thi bo
+}
+do
+    local overrides = ENV.BSS_ANT_CONFIG
+    if type(overrides) == "table" then
+        for key, value in pairs(overrides) do Config[key] = value end
+    end
+end
+
+local State = {
+    Running = true,
+    Status = "starting",
+    Challenges = 0,
+}
+
+local function status(text)
+    State.Status = text
+    print("[BSS Ant] " .. text)
+end
+
+-- =============================================================================
+-- Character helpers
+-- =============================================================================
+local function getCharacter(timeout)
+    local deadline = os.clock() + (timeout or 2)
+    while os.clock() < deadline do
+        local character = Player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if humanoid and root and humanoid.Health > 0 then
+            return humanoid, root
+        end
+        task.wait(0.1)
+    end
+    return nil, nil
+end
+
+local function antFieldZone()
+    local zones = workspace:FindFirstChild("FlowerZones")
+    local zone = zones and zones:FindFirstChild("Ant Field")
+    if zone and zone:IsA("BasePart") then
+        return zone.CFrame, zone.Size
+    end
+    return nil, nil
+end
+
+local function inAntField(position, margin)
+    local cf, size = antFieldZone()
+    if not cf or not size then return false end
+    local localPoint = cf:PointToObjectSpace(position)
+    local extra = margin or 0
+    return math.abs(localPoint.X) <= size.X * 0.5 + extra
+        and math.abs(localPoint.Z) <= size.Z * 0.5 + extra
+end
+
+-- =============================================================================
+-- Threat sources: ants + fire tiles + mower
+-- =============================================================================
+local fireTiles = {}          -- [tile] = true (FireParticles con ton tai)
+local watchingFire = false
+
+local function watchFireTiles()
+    if watchingFire then return end
+    watchingFire = true
+    task.spawn(function()
+        while State.Running do
+            local flowers = workspace:FindFirstChild("Flowers")
+            if flowers then
+                local added = flowers.DescendantAdded:Connect(function(descendant)
+                    if descendant.Name == "FireParticles" and descendant.Parent then
+                        fireTiles[descendant.Parent] = true
+                    end
+                end)
+                local removed = flowers.DescendantRemoving:Connect(function(descendant)
+                    if descendant.Name == "FireParticles" then
+                        fireTiles[descendant.Parent] = nil
+                    end
+                end)
+                -- bat fire da ton tai san + quet lai moi 5s (mower moi round)
+                while State.Running and flowers.Parent do
+                    for _, descendant in ipairs(flowers:GetDescendants()) do
+                        if descendant.Name == "FireParticles" and descendant.Parent then
+                            fireTiles[descendant.Parent] = true
+                        end
+                    end
+                    task.wait(5)
+                end
+                added:Disconnect()
+                removed:Disconnect()
+            end
+            task.wait(2)
+        end
+    end)
+end
+
+-- avoid list: {position, radius} - gom ant/giant/fire/mower/lane
+local function buildAvoidList(rootPosition)
+    local list = {}
+    local monsters = workspace:FindFirstChild("Monsters")
+    if monsters then
+        for _, mob in ipairs(monsters:GetChildren()) do
+            local humanoid = mob:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                local name = mob.Name
+                if name:find("Ant", 1, true) then
+                    local antRoot = mob:FindFirstChild("HumanoidRootPart")
+                        or mob:FindFirstChildWhichIsA("BasePart", true)
+                    if antRoot then
+                        local radius = name:find("Giant", 1, true)
+                            and Config.GiantAntRadius or Config.AntRadius
+                        table.insert(list, {Position = antRoot.Position, Radius = radius, Kind = "ant"})
+                    end
+                end
+            end
+        end
+    end
+    for tile in pairs(fireTiles) do
+        if tile.Parent then
+            local position = tile:IsA("BasePart") and tile.Position
+                or (tile:IsA("Model") and tile:GetPivot().Position or nil)
+            if position then
+                table.insert(list, {Position = position, Radius = Config.FireRadius, Kind = "fire"})
+            end
+        else
+            fireTiles[tile] = nil
+        end
+    end
+    local toy = workspace:FindFirstChild("Toys") and workspace.Toys:FindFirstChild("Ant Challenge")
+    if toy then
+        -- lane may cay: door mau "Really red" = lane dang chay + lane hang dinh
+        local walls = toy:FindFirstChild("Walls")
+        if walls then
+            local lanes = {}
+            for _, wallName in ipairs({"WallLeft", "WallRight"}) do
+                local wall = walls:FindFirstChild(wallName)
+                if wall then
+                    for _, door in ipairs(wall:GetChildren()) do
+                        if door:IsA("BasePart") and door.BrickColor.Name == "Really red" then
+                            lanes[door.Position.Z] = true
+                        end
+                    end
+                end
+            end
+            lanes[Config.AlwaysAvoidLaneZ] = true
+            for z in pairs(lanes) do
+                table.insert(list, {Position = Vector3.new(rootPosition.X, 0, z), Radius = Config.MowerLaneRadius, Kind = "lane", Flat = true})
+            end
+        end
+        -- may cay runtime (Obstacles)
+        local obstacles = toy:FindFirstChild("Obstacles")
+        if obstacles then
+            for _, mower in ipairs(obstacles:GetChildren()) do
+                local part = mower:IsA("BasePart") and mower
+                    or mower:FindFirstChildWhichIsA("BasePart", true)
+                if part then
+                    table.insert(list, {Position = part.Position, Radius = Config.MowerRadius, Kind = "mower"})
+                end
+            end
+        end
+    end
+    return list
+end
+
+local function blockedByAvoid(from, to, list, margin)
+    local flatFrom = Vector3.new(from.X, 0, from.Z)
+    local flatTo = Vector3.new(to.X, 0, to.Z)
+    local length = (flatTo - flatFrom).Magnitude
+    if length < 2 then return nil end
+    local steps = math.max(1, math.ceil(length / 4))
+    for _, threat in ipairs(list) do
+        local flatThreat = Vector3.new(threat.Position.X, 0, threat.Position.Z)
+        for step = 0, steps do
+            local point = flatFrom:Lerp(flatTo, step / steps)
+            if (point - flatThreat).Magnitude <= threat.Radius + (margin or 0) then
+                return threat
+            end
+        end
+    end
+    return nil
+end
+
+local function nearestThreat(rootPosition, list)
+    local best, bestDistance, bestKind
+    for _, threat in ipairs(list) do
+        local flat = (Vector3.new(rootPosition.X, 0, rootPosition.Z)
+            - Vector3.new(threat.Position.X, 0, threat.Position.Z)).Magnitude
+        if flat <= threat.Radius and (not bestDistance or flat < bestDistance) then
+            best, bestDistance, bestKind = threat, flat, threat.Kind
+        end
+    end
+    return best, bestKind
+end
+
+-- =============================================================================
+-- Movement: MoveTo thuan (arena dong, khong tween khong flight)
+-- =============================================================================
+local function walkTo(position, timeout)
+    local deadline = os.clock() + (timeout or 10)
+    local nextIssue = 0
+    while os.clock() < deadline do
+        local humanoid, root = getCharacter(1)
+        if not humanoid then return false end
+        local flat = Vector3.new(position.X, 0, position.Z)
+        local here = Vector3.new(root.Position.X, 0, root.Position.Z)
+        if (flat - here).Magnitude <= 4 then return true end
+        if os.clock() >= nextIssue then
+            nextIssue = os.clock() + 0.4
+            humanoid:MoveTo(position)
+        end
+        task.wait(0.1)
+    end
+    return false
+end
+
+-- =============================================================================
+-- Token sweep (Collectibles trong bounds Ant Field)
+-- =============================================================================
+local function nearestToken(rootPosition)
+    local folder = workspace:FindFirstChild("Collectibles")
+    if not folder then return nil end
+    local best, bestDistance
+    for _, token in ipairs(folder:GetChildren()) do
+        local position = token:IsA("BasePart") and token.Position
+            or (token:IsA("Model") and token:GetPivot().Position or nil)
+        if position and inAntField(position, 8) then
+            local distance = (position - rootPosition).Magnitude
+            if distance <= Config.TokenMaxDistance and (not bestDistance or distance < bestDistance) then
+                best, bestDistance = token, distance
+            end
+        end
+    end
+    return best, bestDistance
+end
+
+-- =============================================================================
+-- CHALLENGE LOOP
+-- =============================================================================
+local function challengeLoop()
+    local deadline = os.clock() + Config.ChallengeTimeout
+    while State.Running and os.clock() < deadline do
+        local toy = workspace:FindFirstChild("Toys") and workspace.Toys:FindFirstChild("Ant Challenge")
+        local stillActive = toy and toy:FindFirstChild("Busy") and toy.Busy.Value
+        local _, rootNow = getCharacter(1)
+        -- Xong khi: flag tat HOAC bi teleport ra khoi arena (ket thuc that su)
+        if not stillActive or (rootNow and not inAntField(rootNow.Position, 40)) then
+            break
+        end
+        local humanoid, root = getCharacter(1)
+        if not humanoid then task.wait(0.5) continue end
+
+        local avoid = buildAvoidList(root.Position)
+
+        -- 1) DANGER EVADE: threat trong ban kinh - buoc ra xa + hop
+        local threat, kind = nearestThreat(root.Position, avoid)
+        if threat then
+            local away = Vector3.new(root.Position.X - threat.Position.X, 0,
+                root.Position.Z - threat.Position.Z)
+            if away.Magnitude < 0.5 then away = Vector3.new(1, 0, 0) end
+            local escape = root.Position + away.Unit * Config.EvadeStep
+            if inAntField(escape, -2) then
+                humanoid:MoveTo(escape)
+            else
+                -- sat tuong: chay vuong goc vao trong field
+                local tangent = Vector3.new(-away.Z, 0, away.X)
+                humanoid:MoveTo(root.Position + tangent.Unit * Config.EvadeStep)
+            end
+            if humanoid.FloorMaterial ~= Enum.Material.Air then
+                humanoid.Jump = true -- ant chi cam khi grounded
+            end
+            status("Evading " .. tostring(kind))
+        else
+            -- 2) TOKEN: gan nhat trong field, duong di khong cross avoid
+            local token = nearestToken(root.Position)
+            local moved = false
+            if token then
+                local position = token:IsA("BasePart") and token.Position or token:GetPivot().Position
+                if not blockedByAvoid(root.Position, position, avoid, 2) then
+                    humanoid:MoveTo(position)
+                    moved = true
+                end
+            end
+            -- 3) WANDER: diem random trong field, clear avoid
+            if not moved then
+                local cf, size = antFieldZone()
+                if cf and size then
+                    for _ = 1, 8 do
+                        local x = (math.random() - 0.5) * size.X * 0.8
+                        local z = (math.random() - 0.5) * size.Z * 0.8
+                        local point = cf:PointToWorldSpace(Vector3.new(x, 0, z))
+                        if not blockedByAvoid(root.Position, point, avoid, 2)
+                            and (Vector3.new(point.X, 0, point.Z)
+                                - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude > 6 then
+                            humanoid:MoveTo(Vector3.new(point.X, root.Position.Y, point.Z))
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(Config.Tick)
+    end
+end
+
+-- =============================================================================
+-- START: Platform -> ToyEvent -> confirm Busy
+-- =============================================================================
+local function startChallenge()
+    local toy = workspace:FindFirstChild("Toys") and workspace.Toys:FindFirstChild("Ant Challenge")
+    if not toy or not toy:FindFirstChild("Busy") then
+        status("Khong thay toy Ant Challenge")
+        return false
+    end
+    -- Busy la flag CHUNG ca server: Busy=true co the la NGUOI KHAC dang choi.
+    -- Khong duoc tin Busy khi chua activate - xac nhan bang teleport vao arena.
+    if toy.Busy.Value then
+        status("Co nguoi khac dang lam challenge - cho luot")
+        return false
+    end
+
+    local humanoid, root = getCharacter(3)
+    if not humanoid then return false end
+    local platform = toy:FindFirstChild("Platform")
+    if platform then
+        status("Di den Platform de activate")
+        walkTo(Vector3.new(platform.Position.X, root.Position.Y, platform.Position.Z), 20)
+    end
+    task.wait(0.3)
+
+    -- Activate: ToyEvent voi ten toy (kenh chuan cua BSS toy, place khong co prompt)
+    local ok = pcall(function()
+        local events = ReplicatedStorage:FindFirstChild("Events")
+        local toyEvent = events and events:FindFirstChild("ToyEvent")
+        toyEvent:FireServer("Ant Challenge")
+    end)
+    if not ok then
+        status("Fire ToyEvent that bai")
+        return false
+    end
+
+    -- Confirm THUC SU bat dau: Busy flip true + minh duoc teleport vao arena
+    -- (activation thanh cong dua player vao khu Ant Field/Hill). Neu co nguoi
+    -- khác chiem luot trong khoang nay, minh khong duoc teleport -> fail.
+    local deadline = os.clock() + 5
+    while os.clock() < deadline do
+        local _, nowRoot = getCharacter(1)
+        if nowRoot and toy.Busy.Value and inAntField(nowRoot.Position, 40) then
+            status("Challenge ACTIVE (da vao arena)")
+            return true
+        end
+        task.wait(0.2)
+    end
+    status("Activate khong xac nhan duoc (het Ant Pass / co nguoi tranh luot?) - cho")
+    return false
+end
+
+-- =============================================================================
+-- MAIN
+-- =============================================================================
+watchFireTiles()
+
+task.spawn(function()
+    while State.Running do
+        if not Config.Enabled then
+            task.wait(0.5)
+        else
+            State.Challenges += 1
+            status(string.format("Lan %d - bat dau", State.Challenges))
+            local started = false
+            local okStart, errStart = xpcall(startChallenge, debug.traceback)
+            if not okStart then
+                status("startChallenge error: " .. tostring(errStart))
+                task.wait(5)
+            else
+                started = errStart -- startChallenge tra true/false
+            end
+            if started then
+                local okLoop, errLoop = xpcall(challengeLoop, debug.traceback)
+                if not okLoop then
+                    status("challengeLoop error: " .. tostring(errLoop))
+                end
+                -- hut not token con lai sau khi xong
+                local _, root = getCharacter(2)
+                if root then
+                    local endTime = os.clock() + 4
+                    while os.clock() < endTime do
+                        local token = nearestToken(root.Position)
+                        if not token then break end
+                        local position = token:IsA("BasePart") and token.Position or token:GetPivot().Position
+                        walkTo(position, 6)
+                    end
+                end
+                status(string.format("Lan %d xong", State.Challenges))
+                if not Config.AutoRestart then
+                    State.Running = false
+                    break
+                end
+                task.wait(3)
+            else
+                task.wait(10) -- cooldown / chua du dieu kien
+            end
+        end
+    end
+    status("Da dung")
+end)
+
+ENV.__BSS_ANT = {
+    Stop = function()
+        State.Running = false
+        status("Stop requested")
+    end,
+    State = State,
+    Config = Config,
+}
+
+status("Loaded - AutoRestart=" .. tostring(Config.AutoRestart))
+return ENV.__BSS_ANT
