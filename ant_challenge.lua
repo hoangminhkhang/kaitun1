@@ -49,6 +49,11 @@ local Config = {
     MowerLaneRadius = 20,       -- lane theo door do (atlas: 20)
     AlwaysAvoidLaneZ = 612,     -- atlas: LUON avoid hang Z=612
     EvadeStep = 10,             -- so stud buoc thoat khi danger qua gan
+    EvadeStepClose = 15,        -- ant ap sat rát: buoc dai hon
+    JumpBiteDistance = 9,       -- chi jump khi ant gan toi muc cam (hop lien tuc lam cham chay)
+    ThreatExitMargin = 5,       -- hysteresis: van coi la danger den khi xa them moi nay
+    FarmCellSize = 16,          -- kich thuoc o coverage grid khi khong co ant gan
+    TokenFarmDistance = 60,     -- token trong tam nay se uu tien tren duong farm
     Tick = 0.2,
     TokenMaxDistance = 90,      -- token xa hon thi bo
 }
@@ -235,29 +240,111 @@ local function blockedByAvoid(from, to, list, margin)
     return nil
 end
 
-local function nearestThreat(rootPosition, list)
+local function nearestThreat(rootPosition, list, extraMargin)
     local best, bestDistance, bestKind
     for _, threat in ipairs(list) do
         local flat = (Vector3.new(rootPosition.X, 0, rootPosition.Z)
             - Vector3.new(threat.Position.X, 0, threat.Position.Z)).Magnitude
-        if flat <= threat.Radius and (not bestDistance or flat < bestDistance) then
+        if flat <= threat.Radius + (extraMargin or 0)
+            and (not bestDistance or flat < bestDistance) then
             best, bestDistance, bestKind = threat, flat, threat.Kind
         end
     end
-    return best, bestKind
+    return best, bestDistance, bestKind
+end
+
+-- =============================================================================
+-- COVERAGE FARM: het ant gan -> chay quanh field theo grid xao tron (kieu
+-- kaitun farmCoveragePoint), duong di co DETOUR arc quanh threat (midpoint
+-- vuong goc, verify 2 chan) - token tren duong duoc uu tien.
+-- =============================================================================
+local coverageQueue = {}
+
+local function rebuildCoverage()
+    coverageQueue = {}
+    local cf, size = antFieldZone()
+    if not cf or not size then return end
+    local cols = math.clamp(math.floor(size.X / Config.FarmCellSize + 0.5), 2, 8)
+    local rows = math.clamp(math.floor(size.Z / Config.FarmCellSize + 0.5), 2, 5)
+    for row = 1, rows do
+        for col = 1, cols do
+            table.insert(coverageQueue, {Col = col, Row = row, Cols = cols, Rows = rows})
+        end
+    end
+    for index = #coverageQueue, 2, -1 do
+        local swap = math.random(index)
+        coverageQueue[index], coverageQueue[swap] = coverageQueue[swap], coverageQueue[index]
+    end
+end
+
+local function cellCenter(entry)
+    local cf, size = antFieldZone()
+    if not cf or not size then return nil end
+    local x = (entry.Col - 0.5) / entry.Cols * size.X - size.X * 0.5
+    local z = (entry.Row - 0.5) / entry.Rows * size.Z - size.Z * 0.5
+    local jitterX = (math.random() - 0.5) * (size.X / entry.Cols) * 0.5
+    local jitterZ = (math.random() - 0.5) * (size.Z / entry.Rows) * 0.5
+    return cf:PointToWorldSpace(Vector3.new(x + jitterX, 0, z + jitterZ))
+end
+
+-- Diem coverage tiep theo: bo o bi threat chiem (giu lai queue de thu lai),
+-- duong thang bi chan thi tra ve {Mid, Goal} detour 2 chan da verify.
+local function nextCoveragePoint(rootPosition, avoid)
+    if #coverageQueue == 0 then rebuildCoverage() end
+    local attempts = math.min(#coverageQueue, 4)
+    for _ = 1, attempts do
+        local entry = table.remove(coverageQueue, 1)
+        local point = cellCenter(entry)
+        if point then
+            local threat = blockedByAvoid(rootPosition, point, avoid, 2)
+            if not threat then
+                return {point}
+            end
+            -- DETOUR arc: midpoint vuong goc, phia xa threat, offset tam ve
+            -- trong field; ca 2 chan phai sach moi nhan.
+            local flatFrom = Vector3.new(rootPosition.X, 0, rootPosition.Z)
+            local flatTo = Vector3.new(point.X, 0, point.Z)
+            local direction = flatTo - flatFrom
+            local length = direction.Magnitude
+            if length >= 8 then
+                direction = direction / length
+                local mid = flatFrom:Lerp(flatTo, 0.5)
+                local perp = Vector3.new(-direction.Z, 0, direction.X)
+                local flatThreat = Vector3.new(threat.Position.X, 0, threat.Position.Z)
+                local side = (mid + perp * 8 - flatThreat).Magnitude
+                    >= (mid - perp * 8 - flatThreat).Magnitude and 1 or -1
+                local midPoint = mid + perp * (side * (threat.Radius + 8))
+                local cf, size = antFieldZone()
+                if cf and size then
+                    local localMid = cf:PointToObjectSpace(midPoint)
+                    midPoint = cf:PointToWorldSpace(Vector3.new(
+                        math.clamp(localMid.X, -size.X * 0.5 + 4, size.X * 0.5 - 4), localMid.Y,
+                        math.clamp(localMid.Z, -size.Z * 0.5 + 4, size.Z * 0.5 - 4)))
+                end
+                if not blockedByAvoid(rootPosition, midPoint, avoid, 2)
+                    and not blockedByAvoid(midPoint, point, avoid, 2) then
+                    return {midPoint, point}
+                end
+            end
+            -- Detour that bai: day o ve cuoi queue (thu lai sau), thu o khac
+            table.insert(coverageQueue, entry)
+        end
+    end
+    return nil
 end
 
 -- ESCAPE FAN: thử 7 hướng quạt quanh hướng thoát, clamp điểm vào trong
 -- field (lane sát tường không còn trượt dọc lane), CHỈ nhận hướng mà cả
 -- đoạn đi lẫn điểm đích đều ngoài MỌI threat - hết oscillate giữa đàn ant.
-local function findEscape(root, threat, avoid)
+local function findEscape(root, threat, avoid, step)
+    step = step or Config.EvadeStep
     local away = Vector3.new(root.X - threat.Position.X, 0, root.Z - threat.Position.Z)
     if away.Magnitude < 0.5 then away = Vector3.new(1, 0, 0) end
     local baseAngle = math.atan2(away.Z, away.X)
     local cf, size = antFieldZone()
     for _, deltaDeg in ipairs({0, 40, -40, 80, -80, 120, -120, 180}) do
         local angle = baseAngle + math.rad(deltaDeg)
-        local point = root + Vector3.new(math.cos(angle), 0, math.sin(angle)) * Config.EvadeStep
+        local point = root + Vector3.new(math.cos(angle), 0, math.sin(angle)) * step
         if cf and size then
             local localPoint = cf:PointToObjectSpace(point)
             localPoint = Vector3.new(
@@ -277,7 +364,7 @@ local function findEscape(root, threat, avoid)
             math.clamp(localPoint.Z, -size.Z * 0.5 + 4, size.Z * 0.5 - 4))
         return cf:PointToWorldSpace(localPoint)
     end
-    return root + away.Unit * Config.EvadeStep
+    return root + away.Unit * step
 end
 
 -- =============================================================================
@@ -418,50 +505,69 @@ local function challengeLoop()
         if not humanoid then task.wait(0.5) continue end
 
         local avoid = buildAvoidList(root.Position)
+        local flatRoot = Vector3.new(root.Position.X, 0, root.Position.Z)
 
-        -- 1) DANGER EVADE: threat trong ban kinh - escape fan co clearance
-        local threat, kind = nearestThreat(root.Position, avoid)
+        -- 1) DANGER (hysteresis: giu nen them ThreatExitMargin de khong flicker)
+        local threat, threatDistance, kind = nearestThreat(flatRoot, avoid, Config.ThreatExitMargin)
         if threat then
-            local escape = findEscape(root.Position, threat, avoid)
+            -- Step scale theo muc nguy cap: ap sat rat -> buoc dai (khong
+            -- mutate Config - truyen param)
+            local step = threatDistance <= threat.Radius * 0.5
+                and Config.EvadeStepClose or Config.EvadeStep
+            local escape = findEscape(flatRoot, threat, avoid, step)
             humanoid:MoveTo(escape)
-            if humanoid.FloorMaterial ~= Enum.Material.Air then
-                humanoid.Jump = true -- ant chi cam khi grounded
+            -- Jump CHI khi ant gan muc cam (hop lien tuc lam cham di chuyen);
+            -- lane/fire/mower la tinh da: di ra khoi, khong can nhay.
+            if kind == "ant" and threatDistance <= Config.JumpBiteDistance
+                and humanoid.FloorMaterial ~= Enum.Material.Air then
+                humanoid.Jump = true
             end
             if os.clock() - (State.LastEvadeLog or 0) > 1 then
                 State.LastEvadeLog = os.clock()
                 status("Evading " .. tostring(kind))
             end
         else
-            -- 2) TOKEN: gan nhat trong field, duong di khong cross avoid
-            local token = nearestToken(root.Position)
-            local moved = false
-            if token then
-                local position = token:IsA("BasePart") and token.Position or token:GetPivot().Position
-                if not blockedByAvoid(root.Position, position, avoid, 2) then
-                    humanoid:MoveTo(position)
-                    moved = true
-                end
+            -- 2) FARM MODE: token tren duong uu tien, khong thi coverage grid
+            --    co detour. Target dang di: doi khi den noi hoac moi tick moi.
+            local target = State.FarmTarget
+            local arrived = true
+            if target then
+                arrived = (Vector3.new(target.X, 0, target.Z) - flatRoot).Magnitude <= 5
             end
-            -- 3) WANDER: diem random trong field, clear avoid
-            if not moved then
-                local cf, size = antFieldZone()
-                if cf and size then
-                    for _ = 1, 8 do
-                        local x = (math.random() - 0.5) * size.X * 0.8
-                        local z = (math.random() - 0.5) * size.Z * 0.8
-                        local point = cf:PointToWorldSpace(Vector3.new(x, 0, z))
-                        if not blockedByAvoid(root.Position, point, avoid, 2)
-                            and (Vector3.new(point.X, 0, point.Z)
-                                - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude > 6 then
-                            humanoid:MoveTo(Vector3.new(point.X, root.Position.Y, point.Z))
-                            break
-                        end
+            if arrived then
+                State.FarmTarget = nil
+                State.FarmPath = nil
+                -- Token gan nhat, duong di sach -> uu tien bat
+                local token = nearestToken(root.Position)
+                if token then
+                    local position = token:IsA("BasePart") and token.Position or token:GetPivot().Position
+                    if (position - root.Position).Magnitude <= Config.TokenFarmDistance
+                        and not blockedByAvoid(flatRoot, position, avoid, 2) then
+                        State.FarmTarget = position
                     end
                 end
+                -- Khong token: o coverage kep theo (detour arc neu can)
+                if not State.FarmTarget then
+                    local path = nextCoveragePoint(flatRoot, avoid)
+                    if path then
+                        State.FarmPath = path
+                        State.FarmTarget = path[1]
+                    end
+                end
+            elseif State.FarmPath and #State.FarmPath > 1
+                and (Vector3.new(State.FarmPath[1].X, 0, State.FarmPath[1].Z) - flatRoot).Magnitude <= 5 then
+                -- Detour 2 chan: leg 1 xong -> chuyen leg 2
+                table.remove(State.FarmPath, 1)
+                State.FarmTarget = State.FarmPath[1]
+            end
+            if State.FarmTarget then
+                humanoid:MoveTo(Vector3.new(State.FarmTarget.X, root.Position.Y, State.FarmTarget.Z))
             end
         end
         task.wait(Config.Tick)
     end
+    State.FarmTarget = nil
+    State.FarmPath = nil
 end
 
 -- =============================================================================
