@@ -417,6 +417,11 @@ local DEFAULT_CONFIG = {
     FixLagDisableLights = true,
     FixLagStopBeeAnimations = true,
     FixLagScanBatch = 350,
+    -- FLOWER LIFECYCLE (game mechanic): dug tiles SINK and later REGROW -
+    -- the regrow animation restores Transparency, so a one-time hide fades
+    -- back. Maintenance re-applies only CHANGED properties (compare-before-
+    -- write) on the priority folders at this interval (seconds).
+    FixLagRehideInterval = 8,
     FixLagHideSky = true,
     FixLagBrightness = 0.65,
     -- Executor-side frame cap (setfpscap): a farming bot gains nothing past
@@ -873,6 +878,10 @@ local Runtime = {
     SproutsFarmed = 0,
     LowGraphicsBound = false,
     LowGraphicsWatched = setmetatable({}, {__mode = "k"}),
+    -- Weak-keyed set of instances the priority fast-hide already handled:
+    -- the generic workspace sweep skips them (41k flower nodes would
+    -- otherwise pay optimizeObject TWICE).
+    FastHidden = setmetatable({}, {__mode = "k"}),
     HoneyRateSamples = {},
     HoneyRateTotal = 0,
     TreatCycleStart = nil,
@@ -6502,7 +6511,10 @@ function MaterialSystem.Field(material)
         Honeysuckle = {"Sunflower Field", "Blue Flower Field", "Rose Field"},
         Coconut = {"Coconut Field"},
         MagicBean = {"Clover Field", "Sunflower Field"},
-        RoyalJelly = {"Pineapple Patch", "Clover Field", "Sunflower Field"},
+        -- RJ material farm (user spec): Pine Tree Forest khi zone đã unlock
+        -- (>= 15 ong), chưa thì rơi xuống blue field gần nhất - Bamboo
+        -- (>= 5 ong), cuối cùng Blue Flower cho account mới (0 ong).
+        RoyalJelly = {"Pine Tree Forest", "Bamboo Field", "Blue Flower Field"},
         Neonberry = {"Cactus Field", "Pineapple Patch", "Clover Field"},
         Bitterberry = {"Cactus Field", "Pineapple Patch", "Clover Field"},
         ComfortingVial = {"Dandelion Field", "Bamboo Field", "Pine Tree Forest"},
@@ -6542,16 +6554,41 @@ function MaterialSystem.HasGatherableMaterial(deficits)
 end
 
 function MaterialSystem.FindSprout()
+    -- Sprout markers live in RUNTIME-ONLY containers (verified via MCP probe
+    -- of the live place: workspace.Sprouts exists but is empty in the file,
+    -- Particles.Folder2 is also created on demand). The old code scanned
+    -- ONLY Particles, so on builds that spawn markers under
+    -- workspace.Sprouts a sprout in ANY field went undetected - the visible
+    -- "sprout in another field is never farmed" bug. Scan BOTH containers;
+    -- the Particles fallback stays descendants-only (the permanent
+    -- "Sprout Summoner" toy MeshPart lives under Workspace.Toys and must
+    -- never poison the nearest-first pick).
+    local candidates = {}
     local particles = workspace:FindFirstChild("Particles")
-    if not particles then return nil end
-    -- The game puts real Sprout markers in Particles.Folder2. Only fall back to
-    -- descendants on older game builds to avoid confusing visuals also named Sprout.
-    local folder = particles:FindFirstChild("Folder2")
-    local objects = folder and folder:GetChildren() or particles:GetDescendants()
+    local folder2 = particles and particles:FindFirstChild("Folder2")
+    if folder2 then
+        for _, object in ipairs(folder2:GetChildren()) do
+            table.insert(candidates, object)
+        end
+    end
+    local sproutsFolder = workspace:FindFirstChild("Sprouts")
+    if sproutsFolder then
+        for _, object in ipairs(sproutsFolder:GetChildren()) do
+            -- Prefix match: markers may be "Sprout", "Sprout1", "SproutModel"...
+            if string.sub(object.Name, 1, 6) == "Sprout" then
+                table.insert(candidates, object)
+            end
+        end
+    end
+    if #candidates == 0 and particles then
+        for _, object in ipairs(particles:GetDescendants()) do
+            table.insert(candidates, object)
+        end
+    end
     local _, _, root = getCharacter(1)
     local best, bestField, bestDistance
-    for _, object in ipairs(objects) do
-        if object.Name == "Sprout" then
+    for _, object in ipairs(candidates) do
+        if object.Name == "Sprout" or string.sub(object.Name, 1, 6) == "Sprout" then
             local position = objectPosition(object)
             local field = position and flowerFieldAtPosition(position, 12) or nil
             if position and field and fieldUnlocked(field.Name) then
@@ -6926,12 +6963,13 @@ function MaterialSystem.FarmVicious()
         until not Runtime.Running or Runtime.MeteorPriorityActive or not thorn or os.clock() >= spawnDeadline
     end
 
-    -- Phase 2: RIDE the Vicious - stand ON its head and follow continuously.
-    -- The old design hovered 14 studs up and only re-tweened after a 5-stud
-    -- drift, so the glide anchor expired between moves and the character FELL
-    -- every time the mob moved. Small glide retargets every 0.05s chain inside
-    -- the 0.45s anchor-grace window, keeping the root anchored for the whole
-    -- fight: no falling, and the player tracks the mob wherever it goes.
+    -- Phase 2 (ATLAS TECHNIQUE, mined from atlasbss 58301-58336): NO riding.
+    -- Stand at GROUND level beside the WaitingThorn telegraph (thorn position
+    -- + (0,0,5), arrive within 6 studs) whenever it is up, and otherwise farm
+    -- points AROUND the vic (atlas: origin vic-15Y, range 30) with the thorn
+    -- in the shared avoid map (radius 8 - the telegraph watcher now tracks
+    -- it). Damage safety comes from dodging the thorn circle, NOT from
+    -- hovering - the ride took hits during lunges.
     local deadline = os.clock() + Config.MaterialCombatSeconds
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         local mob = select(1, MaterialSystem.FindVicious())
@@ -6939,33 +6977,57 @@ function MaterialSystem.FarmVicious()
         local mobPosition = objectPosition(mob)
         local _, humanoid, root = getCharacter(1)
         if not humanoid or not root or not mobPosition then break end
-        -- Feet ON the mob's head: half the model height plus a config-driven
-        -- extra clearance (raised 3->5: contact damage during lunges).
-        local mobHeight = 8
-        pcall(function() mobHeight = mob:GetExtentsSize().Y end)
-        local rideTarget = CFrame.new(mobPosition
-            + Vector3.new(0, math.clamp(mobHeight * 0.5, 3, 10)
-                + math.max(1, tonumber(Config.ViciousRideExtraStuds) or 5), 0))
         -- A mid-fight cancelMovement clears MaterialCombat; re-assert so the
-        -- avoid-mob worker never treats the mob we are riding as a threat.
+        -- avoid-mob worker never treats the vic we are fighting as a threat.
         Runtime.MaterialCombat = true
         Runtime.Digging = true
-        if (root.Position - rideTarget.Position).Magnitude > 2 then
-            tweenTo(rideTarget, Config.TokenTweenSpeed, "Vicious", nil, true)
+
+        -- Direct thorn lookup (FindVicious's second return only fires when
+        -- the vic itself is gone).
+        local particles = workspace:FindFirstChild("Particles")
+        local wts = particles and particles:FindFirstChild("WTs")
+        local thornInstance = wts and wts:FindFirstChild("WaitingThorn")
+        local thornPosition = thornInstance and objectPosition(thornInstance) or nil
+
+        if thornPosition then
+            -- atlas: walkTo(thorn.Position + (0,0,5)), 6-stud arrival band.
+            local stand = Vector3.new(thornPosition.X, root.Position.Y, thornPosition.Z + 5)
+            if (root.Position - stand).Magnitude > 6 then
+                tweenTo(CFrame.new(stand), Config.TweenSpeed, "Vicious", true)
+            else
+                humanoid:Move(Vector3.zero, false)
+                humanoid:MoveTo(root.Position)
+            end
         else
-            -- Already on the head: keep the anchor alive by refreshing the
-            -- grace deadline - otherwise a stationary mob lets the 0.45s
-            -- glide-grace expire and the character drops off mid-fight.
-            humanoid:Move(Vector3.zero, false)
-            Runtime.TweenRootReleaseAt = os.clock() + GLIDE_ANCHOR_GRACE
+            -- atlas: farmStep around the vic (origin vic ground, range ~30).
+            -- Port: threat-clear candidate points in a disc at the vic's
+            -- ground level - the shared threat map already carries the thorn.
+            local ground = Vector3.new(mobPosition.X, root.Position.Y, mobPosition.Z)
+            local point
+            for _ = 1, 6 do
+                local angle = math.random() * math.pi * 2
+                local radius = 8 + math.random() * 18
+                local candidate = ground
+                    + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                if flowerFieldAtPosition(candidate, 0) == field
+                    and Runtime.SegmentThreat(root.Position, candidate, 4) == nil then
+                    point = candidate
+                    break
+                end
+            end
+            if point then
+                tweenTo(CFrame.new(point), Config.TweenSpeed, "Vicious", true)
+            else
+                task.wait(0.15)
+            end
         end
-        -- ToolCollect stays rate-limited: the ride loop ticks at 0.05s but the
-        -- remote only needs the usual dig cadence.
+        -- ToolCollect stays rate-limited (the dig worker also fires while
+        -- Digging is held).
         if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
             Runtime.LastVicToolCollect = os.clock()
             remoteCall("ToolCollect")
         end
-        task.wait(0.05)
+        task.wait(0.1)
     end
     sweepTokens(3, "ViciousDrop")
     Runtime.MaterialCombat = false
@@ -8182,34 +8244,67 @@ local function applyLowGraphics(enabled)
     end
     -- PRIORITY FAST-HIDE: the big visual folders go FIRST in one shallow
     -- recursive pass (no per-object ancestor walks, no decoration checks) -
-    -- thousands of flower tiles sit at the END of the generic GetDescendants
-    -- sweep, which is why flowers used to fade in long after everything else.
-    local function fastHideTree(root)
+    -- Flowers alone is ~41k descendants (measured), so this pass is written
+    -- HOT: no per-node pcall closures (41k closures = GC churn), compare-
+    -- before-write (a read never dirties the property; most nodes are
+    -- already hidden on re-runs), and processed nodes are marked in the
+    -- weak FastHidden set so the generic sweep skips them.
+    local function fastHideNode(node)
+        if node:IsA("BasePart") then
+            if node.LocalTransparencyModifier ~= 1 then node.LocalTransparencyModifier = 1 end
+            if node.Transparency ~= 1 then node.Transparency = 1 end
+            -- CastShadow write skipped: GlobalShadows=false (forced above)
+            -- already zeroes sun shadow cost for every part.
+            Runtime.FastHidden[node] = true
+        elseif node:IsA("Decal") or node:IsA("Texture") then
+            if node.Transparency ~= 1 then node.Transparency = 1 end
+            Runtime.FastHidden[node] = true
+        elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
+            if node.Enabled then node.Enabled = false end
+            Runtime.FastHidden[node] = true
+        elseif node:IsA("ParticleEmitter") then
+            if node.Enabled then node.Enabled = false end
+            if node.Rate ~= 0 then node.Rate = 0 end
+            Runtime.FastHidden[node] = true
+        end
+    end
+
+    local function fastWalk(root, handler, yieldBatch)
         local stack = {root}
         local processed = 0
         while #stack > 0 do
             local node = table.remove(stack)
             if node ~= root then
-                pcall(function()
-                    if node:IsA("BasePart") then
-                        node.LocalTransparencyModifier = 1
-                        node.Transparency = 1
-                        node.CastShadow = false
-                    elseif node:IsA("Decal") or node:IsA("Texture") then
-                        node.Transparency = 1
-                    elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
-                        node.Enabled = false
-                    elseif node:IsA("ParticleEmitter") then
-                        node.Enabled = false
-                        node.Rate = 0
-                    elseif node:IsA("Model") and not Player.Character:IsDescendantOf(node) then
-                        node.LevelOfDetail = Enum.ModelLevelOfDetail.StreamingMesh
-                    end
-                end)
+                handler(node)
                 processed += 1
-                if processed % 400 == 0 then task.wait() end
+                if processed % yieldBatch == 0 then task.wait() end
             end
             for _, child in ipairs(node:GetChildren()) do table.insert(stack, child) end
+        end
+    end
+
+    local function fastHideTree(root)
+        fastWalk(root, fastHideNode, 1500)
+    end
+
+    -- RE-HIDE MAINTENANCE (the actual sink/regrow fix): dug flower tiles
+    -- sink, the game regrows them and the regrow animation restores
+    -- Transparency - a one-time hide visibly fades back over minutes. This
+    -- pass re-applies ONLY properties the game changed back (compare-before-
+    -- write), so a steady-state pass over 41k flower nodes is 41k cheap
+    -- reads, not 41k writes.
+    local function fastRehideNode(node)
+        if node:IsA("BasePart") then
+            if node.Transparency ~= 1 then node.Transparency = 1 end
+            if node.LocalTransparencyModifier ~= 1 then node.LocalTransparencyModifier = 1 end
+        elseif node:IsA("Decal") or node:IsA("Texture") then
+            if node.Transparency ~= 1 then node.Transparency = 1 end
+        elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
+            if not node.Enabled then return end
+            node.Enabled = false
+        elseif node:IsA("ParticleEmitter") then
+            if node.Enabled then node.Enabled = false end
+            if node.Rate ~= 0 then node.Rate = 0 end
         end
     end
     local priorityFolders = {}
@@ -8228,7 +8323,11 @@ local function applyLowGraphics(enabled)
     end
     local scanBatch = math.max(50, tonumber(Config.FixLagScanBatch) or 350)
     for index, object in ipairs(workspace:GetDescendants()) do
-        pcall(optimizeObject, object)
+        -- Priority-hidden nodes (41k flower descendants...) skip the full
+        -- optimizeObject - one hash lookup instead of the whole cascade.
+        if not Runtime.FastHidden[object] then
+            pcall(optimizeObject, object)
+        end
         if index % scanBatch == 0 then task.wait() end
     end
     for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
@@ -8270,6 +8369,20 @@ local function applyLowGraphics(enabled)
             Lighting.EnvironmentDiffuseScale = 0
             Lighting.EnvironmentSpecularScale = 0
         end)
+    end)
+    -- FLOWER SINK/REGROW maintenance: re-hide restored properties forever,
+    -- not just once at boot. Scoped to the priority folders (the game only
+    -- re-animates flowers/hives there), batched, compare-before-write.
+    task.spawn(function()
+        local interval = math.max(2, tonumber(Config.FixLagRehideInterval) or 8)
+        while Runtime.Running and Config.LowGraphics do
+            task.wait(interval)
+            for _, folder in ipairs(priorityFolders) do
+                if folder and folder.Parent then
+                    fastWalk(folder, fastRehideNode, 2000)
+                end
+            end
+        end
     end)
     task.defer(function()
         remoteCall("PlayerSettingsEvent", "PollenPopUps", false)
