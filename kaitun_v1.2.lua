@@ -403,9 +403,6 @@ local DEFAULT_CONFIG = {
     FixLagHideDecorations = true,
     FixLagDeleteDecorations = true,
     FixLagHidePlayers = true,
-    -- Atlas "Hide BSS UI" port: disable the game's own ScreenGuis (pure
-    -- render cost for a bot - the script reads workspace/remotes, not GUI).
-    FixLagHideGameUI = true,
     -- Atlas-EXACT player removal (Character:Destroy on everyone else).
     -- Zero render/physics cost but brutal: if the game re-creates or reads
     -- other characters it can misbehave, so the transparency hide above
@@ -2140,7 +2137,16 @@ local function playerHas(entry, refresh)
     if livePlayerHas(entry) then return true end
     if type(entry.SupersededBy) == "table" then
         for _, itemType in ipairs(entry.SupersededBy) do
+            -- FULL battery, không chỉ stats: accessory tốt hơn đang ĐEO trên
+            -- người / nằm trong backpack / có trong SeedGear snapshot nhưng
+            -- chưa kịp replicate vào stats thì CŨNG phải tính là đã có -
+            -- nếu không bot vẫn mua cái cũ (đúng case "cũ chưa mua mà đã
+            -- có đồ better thì bỏ qua cái cũ").
+            local pseudoEntry = {Category = entry.Category, Type = itemType, Item = itemType}
+            if Runtime.SeedGear and (Runtime.SeedGear[tostring(itemType)]) then return true end
+            if currentGearAtLeast(pseudoEntry, stats) then return true end
             if rawPackageHas({Category = entry.Category, Type = itemType}, stats) then return true end
+            if livePlayerHas(pseudoEntry) then return true end
         end
     end
     if entry.Category == "Eggs" and stats and stats.Eggs then
@@ -5692,6 +5698,10 @@ do
     if rewardRemote and rewardRemote:IsA("RemoteEvent") then
         connect(rewardRemote.OnClientEvent, function(...)
             if Runtime.AmuletRewardDumped or not Config.AutoCompareAmulets then return end
+            -- "InitChar" = broadcast khoi tao nhan vat cua server (payload
+            -- first arg la user-id string) - KHONG phai amulet, bo qua im.
+            local firstArg = select(1, ...)
+            if tostring(firstArg) == "InitChar" then return end
             Runtime.AmuletRewardDumped = true
             local pieces = {}
             for i = 1, math.min(select("#", ...), 4) do
@@ -8443,29 +8453,7 @@ local function applyLowGraphics(enabled)
         for _, otherPlayer in ipairs(Players:GetPlayers()) do bindPlayer(otherPlayer) end
         connect(Players.PlayerAdded, bindPlayer)
     end
-    -- Atlas "Hide BSS UI" port: the game's own ScreenGuis are pure render
-    -- cost for a bot. Flatten every top-level ScreenGui (the script's own
-    -- card is excepted for the UI build) and keep new ones off - disabling
-    -- only stops rendering; instances stay alive for any signal the game
-    -- reads from them.
-    if Config.FixLagHideGameUI then
-        local function flattenGameUi(playerGui)
-            for _, screen in ipairs(playerGui:GetChildren()) do
-                if screen:IsA("ScreenGui") and screen.Name ~= "BSSKaitunCard" then
-                    pcall(function() screen.Enabled = false end)
-                end
-            end
-        end
-        local playerGui = Player:FindFirstChildOfClass("PlayerGui")
-        if playerGui then
-            flattenGameUi(playerGui)
-            connect(playerGui.ChildAdded, function(child)
-                if child:IsA("ScreenGui") and child.Name ~= "BSSKaitunCard" then
-                    pcall(function() child.Enabled = false end)
-                end
-            end)
-        end
-    end
+    -- (Hide game UI removed per user request: game's own ScreenGuis stay ON.)
     task.spawn(function()
         while Runtime.Running and Config.LowGraphics do
             applyLightingSettings()
