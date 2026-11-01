@@ -37,6 +37,32 @@ if ENV.__BSS_BEAR_QUEST and type(ENV.__BSS_BEAR_QUEST.Shutdown) == "function" th
     task.wait(0.2)
 end
 
+-- Older builds hid the game's ScreenGuis (hide-game-UI feature, removed).
+-- Shutdown kills the old threads but the ALREADY-disabled ScreenGuis stay
+-- off - restore every one of them at boot so the game UI always comes back.
+do
+    local restorePlayer = game:GetService("Players").LocalPlayer
+    local deadline = os.clock() + 5
+    while not (restorePlayer and restorePlayer:FindFirstChildOfClass("PlayerGui"))
+        and os.clock() < deadline do
+        task.wait(0.1)
+        restorePlayer = game:GetService("Players").LocalPlayer
+    end
+    local playerGui = restorePlayer and restorePlayer:FindFirstChildOfClass("PlayerGui")
+    if playerGui then
+        local restored = 0
+        for _, screen in ipairs(playerGui:GetChildren()) do
+            if screen:IsA("ScreenGui") and not screen.Enabled then
+                pcall(function() screen.Enabled = true end)
+                restored += 1
+            end
+        end
+        if restored > 0 then
+            print("[BSS Kaitun] Restored " .. restored .. " ScreenGui(s) hidden by an older build")
+        end
+    end
+end
+
 -- ==========================================================================
 --  USER SETTINGS - the keys players actually flip. One per line.
 --  Everything below keeps safe internal defaults; no need to edit further.
@@ -4044,6 +4070,27 @@ local function fieldHasActiveSprinkler(field)
         return Runtime.SprinklerFieldHas ~= nil and Runtime.SprinklerFieldHas == field.Name
     end
     Runtime.SprinklerCheckAt = os.clock() + 2
+    -- PRIMARY: instance tu track - sau khi fire remote, watcher 3s bat dung
+    -- model sprinkler BAT KU noi nao trong workspace (khong dua vao ten cha
+    -- hay folder cu the). Con song trong bounds field = dang hoat dong.
+    local tracked = Runtime.SprinklerInstance
+    if tracked and tracked.Parent then
+        local position = objectPosition(tracked)
+        if position then
+            local boundsCFrame, boundsSize = fieldBoundsOf(field)
+            if boundsCFrame and boundsSize then
+                local localPoint = boundsCFrame:PointToObjectSpace(position)
+                if math.abs(localPoint.X) <= boundsSize.X * 0.5 + 10
+                    and math.abs(localPoint.Z) <= boundsSize.Z * 0.5 + 10 then
+                    Runtime.SprinklerFieldHas = field.Name
+                    return true
+                end
+            end
+        end
+    else
+        Runtime.SprinklerInstance = nil
+    end
+    -- FALLBACK: scan cu (con tre cua workspace, ten chua sprinkler, gan center)
     local center = fieldCenterPosition(field)
     local found = false
     if center then
@@ -4053,6 +4100,7 @@ local function fieldHasActiveSprinkler(field)
                 local position = objectPosition(object)
                 if position
                     and (Vector3.new(position.X, 0, position.Z) - flatCenter).Magnitude <= 25 then
+                    Runtime.SprinklerInstance = object
                     found = true
                     break
                 end
@@ -4061,6 +4109,22 @@ local function fieldHasActiveSprinkler(field)
     end
     Runtime.SprinklerFieldHas = found and field.Name or nil
     return found
+end
+
+-- Watcher: bat model sprinkler xuat hien sau khi fire remote (bat ky parent
+-- nao trong workspace, khong quan ten folder).
+local function watchSprinklerSpawn()
+    local deadline = os.clock() + 3
+    local conn
+    conn = workspace.DescendantAdded:Connect(function(object)
+        if os.clock() > deadline then return end
+        if string.find(string.lower(tostring(object.Name)), "sprinkler", 1, true) then
+            Runtime.SprinklerInstance = object -- part hoac model, giu nguyen
+        end
+    end)
+    task.delay(3.2, function()
+        pcall(function() conn:Disconnect() end)
+    end)
 end
 
 local function placeSprinklerIfNeeded(field)
@@ -4075,16 +4139,32 @@ local function placeSprinklerIfNeeded(field)
     end
     local center = fieldCenterPosition(field)
     if not center then return false end
+    -- ANTI-BURN: neu vua fire ma watcher khong thay sprinkler nao xuat hien
+    -- (het sprinkler trong nguoi / server tu choi) thi DUNG re-fire lien -
+    -- toi da 1 lan moi 30s thay vi moi 2s (cu de dang dot sach sprinkler).
+    if os.clock() < (Runtime.SprinklerRetryAt or 0) then
+        return false
+    end
     -- The active drops at the player's feet: stand the center before firing.
     setStatus("Sprinkler", fieldName .. " | center drop")
     tweenTo(CFrame.new(center), Config.TweenSpeed, "Sprinkler")
     task.wait(0.25)
+    watchSprinklerSpawn()
     local ok = remoteCall("PlayerActivesCommand", {Name = "Sprinkler Builder"})
     if ok then
         Runtime.LastSprinklerPlace = os.clock()
         Runtime.LastSprinklerField = fieldName
         Runtime.SprinklerFieldHas = fieldName
-        Runtime.SprinklerCheckAt = os.clock() + 2
+        Runtime.SprinklerCheckAt = os.clock() + 4
+        -- Neu sau 3.5s khong thay sprinkler xuat hien -> coi nhu fire hoong,
+        -- backoff 30s (thay vi quet lai thay khong co -> fire tiep moi 2s).
+        task.delay(3.5, function()
+            if Runtime.Running and not Runtime.SprinklerInstance then
+                Runtime.SprinklerRetryAt = os.clock() + 30
+                Runtime.SprinklerFieldHas = nil
+                setStatus("Sprinkler", fieldName .. " | no sprinkler appeared - backoff 30s")
+            end
+        end)
         setStatus("Sprinkler", fieldName .. " | placed at center")
     end
     return ok
@@ -5140,7 +5220,10 @@ function Runtime.FeedQuestTreats(objective)
     local treats = questTreatStock(treatKey, stats)
     -- Goal + remaining computed UP FRONT so shortages are remembered exactly.
     local taskText = string.lower(tostring(objective and objective.Description or ""))
-    local goal = tonumber(string.match(taskText, "feed%s+(%d+)"))
+    -- SO CO PHAY: "Feed 1,000 Treats" - %d+ don le dung o dau phay -> goal=1
+    -- -> feed tung vien (bug "bao h xong"). Bat ca day so+phay roi lam sach.
+    local goalText = string.match(taskText, "feed%s+([%d%,%.]+)")
+    local goal = goalText and tonumber((goalText:gsub("[%,%.]", ""))) or nil
     local ratio = 0
     if goal and goal >= 1 then
         -- Progress shape is version-dependent: {current, goal} AND
@@ -10058,4 +10141,4 @@ task.spawn(function()
     end
 end)
 
-print("[BSS Kaitun] Loaded successfully (v1.2 no-UI test build)")
+print("[BSS Kaitun] Loaded (v1.2 build 1101 | hideGameUI=REMOVED | sprout=duo-container)")
