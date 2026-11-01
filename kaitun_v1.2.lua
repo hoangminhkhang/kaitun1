@@ -4112,17 +4112,21 @@ local function fieldHasActiveSprinkler(field)
 end
 
 -- Watcher: bat model sprinkler xuat hien sau khi fire remote (bat ky parent
--- nao trong workspace, khong quan ten folder).
+-- nao trong workspace). Tu ngay khi bat duoc + tu ngat het window - handlers
+-- DescendantAdded ban khi game regrow hang nghin flower tile, arm lau = event storm.
 local function watchSprinklerSpawn()
     local deadline = os.clock() + 3
     local conn
     conn = workspace.DescendantAdded:Connect(function(object)
-        if os.clock() > deadline then return end
-        if string.find(string.lower(tostring(object.Name)), "sprinkler", 1, true) then
-            Runtime.SprinklerInstance = object -- part hoac model, giu nguyen
+        local name = object.Name
+        if #name >= 9 and name:lower():find("sprinkler", 1, true) then
+            Runtime.SprinklerInstance = object
+            Runtime.SprinklerWatchUntil = 0
+            pcall(function() conn:Disconnect() end)
         end
     end)
     task.delay(3.2, function()
+        Runtime.SprinklerWatchUntil = 0
         pcall(function() conn:Disconnect() end)
     end)
 end
@@ -4131,20 +4135,21 @@ local function placeSprinklerIfNeeded(field)
     if not Config.AutoPlaceSprinkler or not field then return false end
     if beeCount() < Config.MinSprinklerBees then return false end
     local fieldName = field.Name
-    -- ONE sprinkler per field entry, dropped at the field CENTER (widest tile
-    -- coverage), then pure farming: re-place ONLY when the field changes or
-    -- the placed one despawned - no more re-drops every few seconds.
-    if Runtime.LastSprinklerField == fieldName and fieldHasActiveSprinkler(field) then
-        return false
+    -- TRONG WATCH WINDOW sau lan fire truoc: return false TUC THI, khong
+    -- tween khong fire - day la loop yank player ve center + tween churn
+    -- gay fps drop khi detection hut.
+    if os.clock() < (Runtime.SprinklerWatchUntil or 0) then return false end
+    -- Backoff sau 1 lan fire hong (het sprinkler / server tu choi): nghi dai.
+    if os.clock() < (Runtime.SprinklerRetryAt or 0) then return false end
+    -- Per-field ONCE: lan dau tien den field hoac khi maintenance xac nhan
+    -- sprinkler cu DA CHET (LastSprinklerField bi maintenance clear). Cac
+    -- lan goi trong cung field-visit: chi check detection gia, khong move.
+    if Runtime.LastSprinklerField == fieldName then
+        if fieldHasActiveSprinkler(field) then return false end
+        -- tracked instance chet (het han) -> cho phep place lai xuong duoi
     end
     local center = fieldCenterPosition(field)
     if not center then return false end
-    -- ANTI-BURN: neu vua fire ma watcher khong thay sprinkler nao xuat hien
-    -- (het sprinkler trong nguoi / server tu choi) thi DUNG re-fire lien -
-    -- toi da 1 lan moi 30s thay vi moi 2s (cu de dang dot sach sprinkler).
-    if os.clock() < (Runtime.SprinklerRetryAt or 0) then
-        return false
-    end
     -- The active drops at the player's feet: stand the center before firing.
     setStatus("Sprinkler", fieldName .. " | center drop")
     tweenTo(CFrame.new(center), Config.TweenSpeed, "Sprinkler")
@@ -4156,13 +4161,14 @@ local function placeSprinklerIfNeeded(field)
         Runtime.LastSprinklerField = fieldName
         Runtime.SprinklerFieldHas = fieldName
         Runtime.SprinklerCheckAt = os.clock() + 4
-        -- Neu sau 3.5s khong thay sprinkler xuat hien -> coi nhu fire hoong,
-        -- backoff 30s (thay vi quet lai thay khong co -> fire tiep moi 2s).
-        task.delay(3.5, function()
+        Runtime.SprinklerWatchUntil = os.clock() + 4
+        -- Khong thay sprinkler nao xuat hien trong window -> fire da hong:
+        -- GIU LastSprinklerField (dung re-fire trong visit nay) + backoff 60s.
+        task.delay(4, function()
             if Runtime.Running and not Runtime.SprinklerInstance then
-                Runtime.SprinklerRetryAt = os.clock() + 30
+                Runtime.SprinklerRetryAt = os.clock() + 60
                 Runtime.SprinklerFieldHas = nil
-                setStatus("Sprinkler", fieldName .. " | no sprinkler appeared - backoff 30s")
+                setStatus("Sprinkler", fieldName .. " | no sprinkler appeared - stop this visit")
             end
         end)
         setStatus("Sprinkler", fieldName .. " | placed at center")
@@ -8470,6 +8476,14 @@ local function applyLowGraphics(enabled)
         local interval = math.max(2, tonumber(Config.FixLagRehideInterval) or 8)
         while Runtime.Running and Config.LowGraphics do
             task.wait(interval)
+            -- Sprinkler liveness: tracked instance chet (het han) -> clear
+            -- flag de farm pass ke tiep dat lai DUNG MOT LAN.
+            if Runtime.LastSprinklerField and Runtime.SprinklerInstance
+                and not Runtime.SprinklerInstance.Parent then
+                Runtime.SprinklerInstance = nil
+                Runtime.LastSprinklerField = nil
+                Runtime.SprinklerFieldHas = nil
+            end
             for _, folder in ipairs(priorityFolders) do
                 if folder and folder.Parent then
                     fastWalk(folder, fastRehideNode, 2000)
