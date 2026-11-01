@@ -290,6 +290,11 @@ local DEFAULT_CONFIG = {
     -- miễn nhiễm) cho tới khi mob trong field chết hết. Không đi né, không
     -- farm tranh thủ lúc đánh nhau. Tắt (false) để dùng mode né chủ động.
     AvoidMobStance = true,
+    -- STANCE OVERTIME CAP: mob của người CHƠI KHÁC park trong field không
+    -- bao giờ chết bởi bees của mình -> stance đứng vĩnh viễn = farm chết
+    -- (Pine Tree etc). Quá N giây stance liên tục -> hạ xuống active-dodge
+    -- (vẫn nhảy khi mob áp sát) để farm chay tiếp.
+    AvoidMobStanceMaxSeconds = 90,
     -- ACTIVE danger radius (chỉ dùng khi AvoidMobStance = false).
     MobActiveRadius = 11,
     MobThreatHoldSeconds = 2,
@@ -346,7 +351,7 @@ local DEFAULT_CONFIG = {
         "Pepper Patch",
     },
     NectarCondenserCooldown = 10,
-    BlenderCheckInterval = 2,
+    BlenderCheckInterval = 10,
     BlenderMovePosition = Vector3.new(-431.53, 68.78, 41.02),
     ProgressionTargetBees = 45,
     EventBeeCheckInterval = 0.5,
@@ -443,8 +448,9 @@ local DEFAULT_CONFIG = {
     -- FLOWER LIFECYCLE (game mechanic): dug tiles SINK and later REGROW -
     -- the regrow animation restores Transparency, so a one-time hide fades
     -- back. Maintenance re-applies only CHANGED properties (compare-before-
-    -- write) on the priority folders at this interval (seconds).
-    FixLagRehideInterval = 8,
+    -- write) on the priority folders at this interval (seconds). 15s = đủ
+    -- nhanh che regrow mà không đốt CPU quét 41k node quá fréquemment.
+    FixLagRehideInterval = 15,
     FixLagHideSky = true,
     FixLagBrightness = 0.65,
     -- Executor-side frame cap (setfpscap): a farming bot gains nothing past
@@ -6189,7 +6195,21 @@ task.spawn(function()
             -- Non-stance mode keeps the active-danger rule instead (hold
             -- only inside the small active radius or right after a hit).
             if Config.AvoidMobStance then
-                threatening = #mobs > 0 and humanoid ~= nil and root ~= nil and not root.Anchored
+                -- Stance OVERTIME cap: mob cua nguoi khac park trong field
+                -- khong bao gio chet -> sau N giay ha xuong active-dodge
+                -- (van nhay khi mob ap sat) thay vi dung vien forever.
+                Runtime.StanceSince = (#mobs > 0)
+                    and (Runtime.StanceSince or os.clock()) or nil
+                local stanceOvertime = Runtime.StanceSince ~= nil
+                    and os.clock() - Runtime.StanceSince
+                        >= math.max(30, tonumber(Config.AvoidMobStanceMaxSeconds) or 90)
+                if not stanceOvertime then
+                    threatening = #mobs > 0 and humanoid ~= nil and root ~= nil and not root.Anchored
+                else
+                    threatening = humanoid ~= nil and root ~= nil and not root.Anchored
+                        and nearestDistance ~= nil
+                        and nearestDistance <= math.max(6, tonumber(Config.MobActiveRadius) or 11)
+                end
             else
                 threatening = humanoid ~= nil and root ~= nil and not root.Anchored
                     and nearestDistance ~= nil
@@ -6312,6 +6332,7 @@ task.spawn(function()
                 Runtime.MobRelocateUntil = 0
                 Runtime.MobThreatSince = nil
                 Runtime.StanceAnnouncedAt = nil
+                Runtime.StanceSince = nil
             end
             -- Hop-free proximity response: a CLOSE mob (not yet threat-range)
             -- triggers a short backstep glide away from it. The threat branch
@@ -6351,6 +6372,7 @@ task.spawn(function()
             Runtime.MobRelocateUntil = 0
             Runtime.MobThreatSince = nil
             Runtime.StanceAnnouncedAt = nil
+            Runtime.StanceSince = nil
             Runtime.MobLastHumanoid = nil
             Runtime.MobLastHealth = nil
         end
@@ -8354,17 +8376,17 @@ local function applyLowGraphics(enabled)
             if node.Transparency ~= 1 then node.Transparency = 1 end
             -- CastShadow write skipped: GlobalShadows=false (forced above)
             -- already zeroes sun shadow cost for every part.
-            Runtime.FastHidden[node] = true
+            Runtime.FastHidden[node] = "part"
         elseif node:IsA("Decal") or node:IsA("Texture") then
             if node.Transparency ~= 1 then node.Transparency = 1 end
-            Runtime.FastHidden[node] = true
+            Runtime.FastHidden[node] = "decal"
         elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
             if node.Enabled then node.Enabled = false end
-            Runtime.FastHidden[node] = true
+            Runtime.FastHidden[node] = "gui"
         elseif node:IsA("ParticleEmitter") then
             if node.Enabled then node.Enabled = false end
             if node.Rate ~= 0 then node.Rate = 0 end
-            Runtime.FastHidden[node] = true
+            Runtime.FastHidden[node] = "emitter"
         end
     end
 
@@ -8393,15 +8415,19 @@ local function applyLowGraphics(enabled)
     -- write), so a steady-state pass over 41k flower nodes is 41k cheap
     -- reads, not 41k writes.
     local function fastRehideNode(node)
-        if node:IsA("BasePart") then
+        -- Kind map tu FastHidden: bo IsA per node (41k IsA moi pass = GC/CPU
+        -- churn) va skip node chua tung mark (models...).
+        local kind = Runtime.FastHidden[node]
+        if not kind then return end
+        if kind == "part" then
             if node.Transparency ~= 1 then node.Transparency = 1 end
             if node.LocalTransparencyModifier ~= 1 then node.LocalTransparencyModifier = 1 end
-        elseif node:IsA("Decal") or node:IsA("Texture") then
+        elseif kind == "decal" then
             if node.Transparency ~= 1 then node.Transparency = 1 end
-        elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
+        elseif kind == "gui" then
             if not node.Enabled then return end
             node.Enabled = false
-        elseif node:IsA("ParticleEmitter") then
+        elseif kind == "emitter" then
             if node.Enabled then node.Enabled = false end
             if node.Rate ~= 0 then node.Rate = 0 end
         end
