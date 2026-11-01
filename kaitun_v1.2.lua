@@ -3971,15 +3971,53 @@ local function findBestTokenInStandingField()
             -- No clear route to the best token: skip this sweep round.
             Runtime.LastTokenPlan = ""
             Runtime.LastTokenScore = 0
+            Runtime.TokenRouteCache = nil
             return nil, 0, {}
         end
     end
+    -- ROUTE CACHE: planner da tinh san ca route (score roi). sweepTokens pop
+    -- lan luot tu day thay vi FULL SCAN + DFS MOI LAN nhatis 1 token -
+    -- sprinkler flood tram token thi day chinh la cai fps drop.
+    Runtime.TokenRouteCache = {
+        At = os.clock(), Nodes = nodes, Route = route,
+        RootX = root.Position.X, RootZ = root.Position.Z,
+    }
     return first and first.Token or nil, score, route
 end
 
 Runtime.FindBestToken = function()
     local token, score = findBestTokenInStandingField()
     return token, score, Runtime.LastTokenPlan
+end
+
+-- Pop token TIEP THEO tu route planner da tinh san (khong re-scan). Token
+-- mat/het cooldown/het han tu nhay qua; cache het han (3s) hoac player
+-- di xa qua 25 studs thi vo hieu - luc do sweep se plan lai dung 1 lan.
+local function takeCachedRouteToken()
+    local cache = Runtime.TokenRouteCache
+    if not cache then return nil end
+    if os.clock() - cache.At > 3 then
+        Runtime.TokenRouteCache = nil
+        return nil
+    end
+    local _, _, root = getCharacter(1)
+    if not root
+        or (Vector3.new(root.Position.X, 0, root.Position.Z)
+            - Vector3.new(cache.RootX, 0, cache.RootZ)).Magnitude > 25 then
+        Runtime.TokenRouteCache = nil
+        return nil
+    end
+    while #cache.Route > 0 do
+        local index = table.remove(cache.Route, 1)
+        local node = cache.Nodes[index]
+        local token = node and node.Token
+        if token and token.Parent
+            and os.clock() >= (Runtime.TokenCooldowns[token] or 0) then
+            return token
+        end
+    end
+    Runtime.TokenRouteCache = nil
+    return nil
 end
 
 local function collectToken(token, owner)
@@ -4061,7 +4099,13 @@ local function sweepTokens(duration, owner)
     while Runtime.Running and Config.Enabled and os.clock() < deadline
         and (not Runtime.MeteorPriorityActive or meteorOwner)
         and collected < Config.TokenMaxPerSweep and attempts < Config.TokenMaxPerSweep * 2 do
-        local token = findBestTokenInStandingField()
+        -- ROUTE CACHE truoc: 1 plan phuc vu ca sweep - full scan + DFS chi
+        -- chay lai khi cache het/het han. (Sprinkler flood truoc day quet
+        -- lai toan bo token per token = fps drop.)
+        local token = takeCachedRouteToken()
+        if not token then
+            token = findBestTokenInStandingField()
+        end
         if not token then break end
         attempts += 1
         if collectToken(token, owner or "TokenSweep") then collected += 1 end
@@ -8146,14 +8190,20 @@ local function applyLowGraphics(enabled)
 
     local function optimizeObject(object)
         if not object or not object.Parent then return end
-        local disposable = disposableDecoration(object)
+        -- ONE ancestor walk truoc: root group quyet dinh ca hidden lẫn việc
+        -- có cần disposable check hay không. Disposable chi ton tai duoi
+        -- Decorations/Decor - object nam duoi Bees/Tokens/Flowers/Hives
+        -- (da so descendants moi khi sprinkler flood token) bo tron lan
+        -- ancestor walk thu hai.
+        local underBees, underTokens, underFlowers, underHives, underDecorations, weatherVisual = visualGroups(object)
+        local disposable = (underBees or underTokens or underFlowers or underHives)
+            and nil or disposableDecoration(object)
         if disposable and disposable.Parent then
             -- Remove only identified local-only decor groups; never touch 30BeeZone,
             -- gate, field, shop, NPC, toy, hive or any other gameplay folder.
             disposable:Destroy()
             return
         end
-        local underBees, underTokens, underFlowers, underHives, underDecorations, weatherVisual = visualGroups(object)
         local beeVisual = Config.FixLagHideBees and underBees
         local hidden = beeVisual or (Config.FixLagHideTokens and underTokens)
             or (Config.FixLagHideFlowers and underFlowers)
