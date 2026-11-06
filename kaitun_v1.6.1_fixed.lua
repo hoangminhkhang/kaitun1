@@ -17,7 +17,12 @@
     Early-game build leans blue per BSS Game Guide: prioritize sprinkler,
     Bubble Wand when macroing, Bubble Mask and endgame material preservation.
 ]]
-print("[BSS Kaitun] v1.6.1 boot - file loaded, PlaceId=" .. tostring(game.PlaceId))
+-- v1.6.2 fix: top 30 helpers are GLOBAL (not local) on purpose.
+-- Luau <=0.700 (Roblox/Delta) fails to compile this file with
+-- "Out of local registers ... exceeded limit 200" at processMilestone,
+-- loadstring then returns nil and the executor reports
+-- "attempt to call a nil value" at Line 1. Globals use 0 local registers.
+print("[BSS Kaitun] v1.6.2 boot - file loaded, PlaceId=" .. tostring(game.PlaceId))
 
 if game.PlaceId ~= 1537690962 then
     warn("[BSS Kaitun] Wrong game. Current PlaceId: " .. tostring(game.PlaceId))
@@ -79,7 +84,7 @@ end
 --  USER SETTINGS - the keys players actually flip. One per line.
 --  Everything below keeps safe internal defaults; no need to edit further.
 -- ==========================================================================
-local function buildUserDefaults()
+function buildUserDefaults()
     return {
     Enabled = true,
     AutoFarm = true,
@@ -148,7 +153,7 @@ local USER_DEFAULTS = buildUserDefaults()
 --  INTERNAL DEFAULTS - intervals, cooldowns, thresholds, positions and data
 --  tables. Leave untouched; override at runtime with getgenv().KaitunConfig.
 -- ==========================================================================
-local function buildDefaultConfig()
+function buildDefaultConfig()
     return {
     ConvertPercent = 1,
     ConvertFinishPercent = 0.01,
@@ -610,7 +615,7 @@ local function buildDefaultConfig()
 end
 local DEFAULT_CONFIG = buildDefaultConfig()
 
-local function deepCopy(value)
+function deepCopy(value)
     if type(value) ~= "table" then
         return value
     end
@@ -621,7 +626,7 @@ local function deepCopy(value)
     return copy
 end
 
-local function merge(target, source)
+function merge(target, source)
     if type(source) ~= "table" then
         return target
     end
@@ -841,7 +846,7 @@ end
 
 -- Boot requires with timeouts: the old no-timeout WaitForChild calls hung
 -- forever if a module was renamed/delayed, before Runtime/Shutdown existed.
-local function requireTimed(moduleName, timeout)
+function requireTimed(moduleName, timeout)
     local module = ReplicatedStorage:WaitForChild(moduleName, timeout)
     if not module then
         warn("[BSS Kaitun] Module not found: " .. moduleName .. " - continuing degraded")
@@ -1027,13 +1032,13 @@ local Runtime = {
 
 ENV.__BSS_KAITUN = Runtime
 
-local function connect(signal, callback)
+function connect(signal, callback)
     local connection = signal:Connect(callback)
     table.insert(Runtime.Connections, connection)
     return connection
 end
 
-local function setStatus(state, detail)
+function setStatus(state, detail)
     if Runtime.MeteorPriorityActive and Runtime.MeteorHandling and state ~= "Auto meteor" then return end
     Runtime.State = state or Runtime.State
     Runtime.Detail = detail or ""
@@ -1042,19 +1047,19 @@ end
 -- Background workers refresh the status line at most once per interval so the
 -- UI keeps showing the FOREGROUND activity (farm/quest) instead of flickering
 -- between systems every pass.
-local function setStatusBackground(state, detail, seconds)
+function setStatusBackground(state, detail, seconds)
     if os.clock() >= (Runtime.BackgroundStatusAt or 0) then
         Runtime.BackgroundStatusAt = os.clock() + (seconds or 30)
         setStatus(state, detail)
     end
 end
 
-local function reportError(scope, err)
+function reportError(scope, err)
     Runtime.LastError = tostring(scope) .. ": " .. tostring(err)
     warn("[BSS Kaitun] " .. Runtime.LastError)
 end
 
-local function getCharacter(timeout)
+function getCharacter(timeout)
     local deadline = os.clock() + (timeout or 20)
     repeat
         local character = Player.Character
@@ -1068,7 +1073,7 @@ local function getCharacter(timeout)
     return nil
 end
 
-local function liveCoreValue(name)
+function liveCoreValue(name)
     local coreStats = Player:FindFirstChild("CoreStats")
     local value = coreStats and coreStats:FindFirstChild(name)
     if value and value:IsA("ValueBase") then
@@ -1077,7 +1082,7 @@ local function liveCoreValue(name)
     return nil
 end
 
-local function coreValue(name, fallback)
+function coreValue(name, fallback)
     local value = liveCoreValue(name)
     if value ~= nil then return value end
     return fallback or 0
@@ -1109,7 +1114,7 @@ function Runtime.HoneyPerHour()
     return (last[2] - first[2]) / window * 3600
 end
 
-local function getStats(refresh)
+function getStats(refresh)
     if not okStat or not StatCache then
         return Runtime.LastStats
     end
@@ -1141,7 +1146,7 @@ local function getStats(refresh)
     return Runtime.LastStats
 end
 
-local function pollenRatio()
+function pollenRatio()
     local pollen = tonumber(coreValue("Pollen", 0)) or 0
     local capacity = tonumber(coreValue("Capacity", 0)) or 0
     if capacity <= 0 then
@@ -1150,7 +1155,7 @@ local function pollenRatio()
     return pollen / capacity, pollen, capacity
 end
 
-local function formatNumber(number)
+function formatNumber(number)
     number = tonumber(number) or 0
     local abs = math.abs(number)
     if abs >= 1e12 then return string.format("%.2fT", number / 1e12) end
@@ -1160,7 +1165,7 @@ local function formatNumber(number)
     return tostring(math.floor(number + 0.5))
 end
 
-local function remoteCall(name, ...)
+function remoteCall(name, ...)
     local remote = Events:FindFirstChild(name)
     if not remote then
         return false, "missing remote " .. name
@@ -1319,7 +1324,7 @@ function MaterialSystem.Display(material)
     return tostring(material):gsub("(%l)(%u)", "%1 %2")
 end
 
-local function objectPosition(object)
+function objectPosition(object)
     if not object then return nil end
     if object:IsA("BasePart") then return object.Position end
     if object:IsA("Attachment") then return object.WorldPosition end
@@ -1328,7 +1333,7 @@ local function objectPosition(object)
     return part and part.Position or nil
 end
 
-local function fieldContainsPosition(field, position, padding)
+function fieldContainsPosition(field, position, padding)
     if not field or not position then return false end
     local boundsCFrame, boundsSize
     if field:IsA("BasePart") then
@@ -1346,7 +1351,7 @@ local function fieldContainsPosition(field, position, padding)
         and math.abs(localPoint.Z) <= boundsSize.Z * 0.5 + extra
 end
 
-local function flowerFieldAtPosition(position, padding)
+function flowerFieldAtPosition(position, padding)
     local zones = workspace:FindFirstChild("FlowerZones")
     if not zones or not position then return nil end
     for _, field in ipairs(zones:GetChildren()) do
@@ -1521,7 +1526,7 @@ end
     Runtime.TweenRootWasAnchored = false
 end
 
-local function restoreFieldMoveSpeed(expectedGeneration)
+function restoreFieldMoveSpeed(expectedGeneration)
     if expectedGeneration ~= nil and Runtime.FieldSpeedGeneration ~= expectedGeneration then return end
     local humanoid = Runtime.FieldSpeedHumanoid
     local original = Runtime.FieldSpeedOriginal
@@ -1536,7 +1541,7 @@ local function restoreFieldMoveSpeed(expectedGeneration)
     Runtime.FieldSpeedGeneration = nil
 end
 
-local function applyFieldMoveSpeed(humanoid, generation)
+function applyFieldMoveSpeed(humanoid, generation)
     restoreFieldMoveSpeed()
     Runtime.FieldSpeedHumanoid = humanoid
     Runtime.FieldSpeedOriginal = humanoid.WalkSpeed
@@ -1551,7 +1556,7 @@ end
 -- token routes, vicious follow) no longer freeze between steps.
 local GLIDE_ANCHOR_GRACE = 0.45
 
-local function glideRunnerStep(deltaTime)
+function glideRunnerStep(deltaTime)
     local root = Runtime.TweenRoot
     if not root or not root.Parent then
         Runtime.Glide = nil
@@ -1602,7 +1607,7 @@ local function glideRunnerStep(deltaTime)
     end
 end
 
-local function ensureGlideRunner()
+function ensureGlideRunner()
     if Runtime.GlideRunnerConnection then return end
     -- Deliberately NOT via connect(): the runner disconnects and reconnects on
     -- every idle/grace cycle, and each register would leak a dead connection
@@ -1623,7 +1628,7 @@ end
 -- first, both legs threat-verified, midpoint clamped into the field).
 -- Instant, smooth, zero service calls. Used by the stuck-watchdog walk AND
 -- token detours.
-local function computeFieldPath(rootPosition, position, startField)
+function computeFieldPath(rootPosition, position, startField)
     local margin = math.max(0, tonumber(Config.TokenPathMargin) or 4)
     local threat = type(Runtime.SegmentThreat) == "function"
         and Runtime.SegmentThreat(rootPosition, position, margin) or nil
@@ -1693,7 +1698,7 @@ end
 -- Obstacle memory: positions where walking recently ground to a halt. New
 -- walks whose straight route passes a fresh memory pathfind IMMEDIATELY
 -- instead of re-stalling for the full 1.2s watchdog first.
-local function rememberStuckSpot(position)
+function rememberStuckSpot(position)
     local now = os.clock()
     Runtime.StuckSpots = Runtime.StuckSpots or {}
     -- Prune expired entries, then cap the list.
@@ -1706,7 +1711,7 @@ local function rememberStuckSpot(position)
     Runtime.StuckSpots = fresh
 end
 
-local function straightPassesStuckSpot(from, to)
+function straightPassesStuckSpot(from, to)
     local now = os.clock()
     local flatFrom = Vector3.new(from.X, 0, from.Z)
     local flatTo = Vector3.new(to.X, 0, to.Z)
@@ -1725,7 +1730,7 @@ local function straightPassesStuckSpot(from, to)
     return false
 end
 
-local function walkFieldPath(humanoid, root, position, generation)
+function walkFieldPath(humanoid, root, position, generation)
     local startField = flowerFieldAtPosition(root.Position, Config.TokenFieldPadding)
     local usable = computeFieldPath(root.Position, position, startField)
     if not usable then return false end
@@ -1771,7 +1776,7 @@ local function walkFieldPath(humanoid, root, position, generation)
     return (root.Position - position).Magnitude <= math.max(4, Config.SmartArrivalDistance + 2)
 end
 
-local function tweenTo(target, speed, owner, forceWalk, preferGlide)
+function tweenTo(target, speed, owner, forceWalk, preferGlide)
     local position
     local targetCFrame
     if typeof(target) == "CFrame" then
@@ -2136,7 +2141,7 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
     return arrived
 end
 
-local function cancelMovement()
+function cancelMovement()
     Runtime.TweenGeneration += 1
     Runtime.Glide = nil
     Runtime.TweenRootReleaseAt = nil
@@ -2180,7 +2185,7 @@ function Runtime.Shutdown()
     if ENV.__BSS_KAITUN == Runtime then ENV.__BSS_KAITUN = nil end
 end
 
-local function getPackage(entry)
+function getPackage(entry)
     return {Category = entry.Category, Type = entry.Type, Amount = entry.Amount}
 end
 
