@@ -244,6 +244,16 @@ local UI = {
     _built = {}, _themeListeners = {},
 }
 
+-- Show Hive viewport: hàm refresh thật được gán ở phần dựng trang
+-- "Show Hive" phía dưới (tab bar dựng trước trang đó). Bấm tab Show Hive
+-- là gọi UI.RefreshHiveView() để hiện hive THẬT của player lúc đó.
+local refreshHiveViewFn = nil
+function UI.RefreshHiveView()
+    if type(refreshHiveViewFn) == "function" then
+        task.spawn(function() pcall(refreshHiveViewFn) end)
+    end
+end
+
 -- =============================================================================
 -- Window + shadow + title bar
 -- =============================================================================
@@ -400,7 +410,8 @@ local TAB_DEFS = {
     {Name = "Status", Icon = "📊"},
     {Name = "Farm", Icon = "🏡"},
     {Name = "Move", Icon = "👟"},
-    {Name = "Hive", Icon = "🍯"},
+    {Name = "Hive", Icon = "🐝"},
+    {Name = "Show Hive", Icon = "🍯"},
     {Name = "Lag", Icon = "⚡"},
     {Name = "Planter", Icon = "🪴"},
 }
@@ -418,12 +429,15 @@ do
         local button = corner(create("TextButton", {
             Name = def.Name,
             LayoutOrder = index,
-            Size = UDim2.new(0, 72, 1, 0),
+            -- Chia đều theo số tab (7 tab): vừa khít tabBar, không tràn
+            -- khi thêm tab mới. TextSize 10 để "🍯 Show Hive" không bị cắt.
+            Size = UDim2.new(1 / #TAB_DEFS, -5, 1, 0),
             BackgroundColor3 = T.PanelLight,
             Font = Enum.Font.GothamMedium,
             Text = def.Icon .. " " .. def.Name,
             TextColor3 = T.TextDim,
-            TextSize = 11,
+            TextSize = 10,
+            TextTruncate = Enum.TextTruncate.AtEnd,
         }, tabBar), R_CTRL)
         local underline = corner(create("Frame", {
             Name = "Underline",
@@ -484,6 +498,9 @@ do
             TweenService:Create(page, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {
                 Position = UDim2.fromOffset(0, 0),
             }):Play()
+            -- Bấm Show Hive = hiện hive thật của player lúc đó (clone mới
+            -- từ workspace, không dùng bản cache cũ).
+            if def.Name == "Show Hive" then UI.RefreshHiveView() end
         end)
         UI._tabs[def.Name] = button
         UI._pages[def.Name] = page
@@ -866,7 +883,8 @@ end
 
 -- =============================================================================
 -- =============================================================================
--- Hive page (tab 🍯): tổng quan tổ ong - cấp độ trung bình, gifted, màu.
+-- Hive page (tab 🐝): tổng quan tổ ong - cấp độ trung bình, gifted, màu.
+-- Chỉ 6 ô stat; lưới COMB nằm ở tab "Show Hive" riêng (xem dưới).
 -- Main đẩy dữ liệu qua UI.SetHive{...} và UI.SetHiveGrid{{Type=,Gifted=,Level=,X=,Y=}}.
 -- =============================================================================
 -- Phân loại màu ô ong (file-level để SetHiveGrid dùng được - local trong
@@ -996,12 +1014,232 @@ do
             }, cell)
             hiveCells[entry[1]] = valueLabel
         end
+    end
+end
+
+-- =============================================================================
+-- Show Hive page (tab 🍯 riêng): HIỆN HIVE THẬT CỦA PLAYER.
+-- Trên cùng là ViewportFrame clone hive thật trong workspace (bấm tab là
+-- clone lại mới nhất), dưới là lưới COMB 50 ô. Tab Hive giữ lại 6 ô stat.
+-- SetHiveGrid / AutoHive không đổi - vẫn ghi vào hiveCells.GridSlot.
+-- =============================================================================
+do
+    local page = UI._pages["Show Hive"]
+    if page then
+        hiveCells = hiveCells or {}
+        create("TextLabel", {
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 20),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            Text = "SHOW HIVE",
+            TextColor3 = T.AccentDim,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, page)
+
+        -- -----------------------------------------------------------------
+        -- VIEWPORT: hive thật của player (clone từ workspace, không phải
+        -- vẽ lại). Bấm tab Show Hive / nút ↻ là clone lại từ đầu.
+        -- -----------------------------------------------------------------
+        local hiveViewState = {
+            Model = nil,
+            Center = Vector3.new(0, 0, 0),
+            Size = Vector3.new(10, 10, 10),
+            Front = Vector3.new(0, 0, 1),
+            Distance = 30,
+            Angle = 0,
+        }
+        local viewportFrame = corner(create("Frame", {
+            Name = "HiveView",
+            LayoutOrder = 10,
+            Size = UDim2.new(1, 0, 0, 200),
+            BackgroundColor3 = T.Panel,
+        }, page), R_CARD)
+        strokeOf(viewportFrame, T.Stroke, 1, 0.6)
+        local hiveViewport = create("ViewportFrame", {
+            Name = "Viewport",
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundColor3 = Color3.fromRGB(18, 18, 22),
+            BorderSizePixel = 0,
+            Ambient = Color3.fromRGB(180, 180, 180),
+            LightColor = Color3.fromRGB(255, 255, 255),
+            LightDirection = Vector3.new(-0.5, -1, -0.5),
+        }, viewportFrame)
+        corner(hiveViewport, R_CARD)
+        local hiveCamera = Instance.new("Camera")
+        hiveCamera.Parent = hiveViewport
+        hiveViewport.CurrentCamera = hiveCamera
+        local hiveViewStatus = create("TextLabel", {
+            Name = "Status",
+            Size = UDim2.new(1, -12, 0, 16),
+            Position = UDim2.new(0, 6, 1, -20),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            Text = "Bấm tab Show Hive để xem hive của bạn",
+            TextColor3 = T.Text,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 3,
+        }, viewportFrame)
+        local hiveRefreshButton = corner(create("TextButton", {
+            Name = "RefreshHive",
+            Size = UDim2.fromOffset(118, 24),
+            Position = UDim2.new(1, -126, 0, 8),
+            BackgroundColor3 = T.PanelLight,
+            Font = Enum.Font.GothamBold,
+            Text = "↻ Xem lại hive",
+            TextColor3 = T.Text,
+            TextSize = 11,
+            ZIndex = 3,
+        }, viewportFrame), R_CTRL)
+        hoverify(hiveRefreshButton, T.PanelLight, T.PanelHover)
+        hiveRefreshButton.MouseButton1Click:Connect(function()
+            UI.RefreshHiveView()
+        end)
+
+        -- Tìm hive của player, giống findOwnedHive trong main: ưu tiên
+        -- Player.Honeycomb, fallback HivePlatforms.PlayerRef rồi Honeycombs.Owner.
+        local function findPlayerHive()
+            local reference = Player and Player:FindFirstChild("Honeycomb")
+            local hive = reference and reference:IsA("ObjectValue") and reference.Value or nil
+            if hive then return hive end
+            local platforms = workspace:FindFirstChild("HivePlatforms")
+            if platforms then
+                for _, platform in ipairs(platforms:GetChildren()) do
+                    local ref = platform:FindFirstChild("PlayerRef")
+                    if ref and ref:IsA("ObjectValue") and ref.Value == Player then
+                        local value = platform:FindFirstChild("Hive")
+                        if value and value:IsA("ObjectValue") and value.Value then
+                            return value.Value
+                        end
+                    end
+                end
+            end
+            local honeycombs = workspace:FindFirstChild("Honeycombs")
+            if honeycombs then
+                for _, candidate in ipairs(honeycombs:GetChildren()) do
+                    local owner = candidate:FindFirstChild("Owner")
+                        or candidate:FindFirstChild("PlayerRef")
+                    if owner and owner:IsA("ObjectValue") and owner.Value == Player then
+                        return candidate
+                    end
+                end
+            end
+            return nil
+        end
+
+        local function frameHiveCamera(angleOffset)
+            local state = hiveViewState
+            if not state.Model or not hiveCamera then return end
+            local angle = angleOffset or 0
+            -- Xoay mặt trước quanh trục Y (lệch ±35°) để thấy rõ mặt ong.
+            local cosA, sinA = math.cos(angle), math.sin(angle)
+            local front = state.Front
+            local dir = Vector3.new(
+                front.X * cosA + front.Z * sinA, 0,
+                -front.X * sinA + front.Z * cosA)
+            local pos = state.Center + dir * state.Distance
+                + Vector3.new(0, state.Size.Y * 0.18, 0)
+            pcall(function()
+                hiveCamera.CFrame = CFrame.lookAt(pos, state.Center)
+            end)
+        end
+
+        refreshHiveViewFn = function()
+            if not hiveViewport then return end
+            -- Xóa bản clone cũ, giữ lại camera.
+            for _, child in ipairs(hiveViewport:GetChildren()) do
+                if child ~= hiveCamera then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+            hiveViewState.Model = nil
+            setText(hiveViewStatus, "Đang tìm hive của bạn...")
+            local hive = findPlayerHive()
+            if not hive then
+                setText(hiveViewStatus, "Không tìm thấy hive — claim hive trước đã")
+                return
+            end
+            local ok, clone = pcall(function() return hive:Clone() end)
+            if not ok or not clone then
+                setText(hiveViewStatus, "Không clone được hive")
+                return
+            end
+            -- Hiện lại phần bị anti-lag ẩn (FixLagHideHives đặt
+            -- Transparency = 1): clone mang theo trạng thái ẩn đó.
+            for _, descendant in ipairs(clone:GetDescendants()) do
+                pcall(function()
+                    if descendant:IsA("BasePart") then
+                        descendant.Transparency = 0
+                    elseif descendant:IsA("Decal") or descendant:IsA("Texture") then
+                        descendant.Transparency = 0
+                    elseif descendant:IsA("Script") or descendant:IsA("LocalScript") then
+                        descendant:Destroy()
+                    end
+                end)
+            end
+            clone.Parent = hiveViewport
+            hiveViewState.Model = clone
+            local boxOk, boxCFrame, boxSize = pcall(function()
+                return clone:GetBoundingBox()
+            end)
+            if boxOk and boxCFrame then
+                hiveViewState.Center = boxCFrame.Position
+                hiveViewState.Size = boxSize
+                hiveViewState.Distance = math.max(boxSize.X, boxSize.Y, boxSize.Z) * 1.4 + 8
+                -- Mặt trước = hướng từ tâm tổ tới vị trí trung bình các
+                -- cell (cell nhô ra mặt trước của tổ).
+                local cellsFolder = clone:FindFirstChild("Cells")
+                if cellsFolder then
+                    local sum, count = Vector3.new(0, 0, 0), 0
+                    for _, cell in ipairs(cellsFolder:GetChildren()) do
+                        local pivotOk, pivot = pcall(function()
+                            return cell:GetPivot()
+                        end)
+                        if pivotOk and pivot then
+                            sum += pivot.Position
+                            count += 1
+                        end
+                    end
+                    if count > 0 then
+                        local delta = sum / count - boxCFrame.Position
+                        local flat = Vector3.new(delta.X, 0, delta.Z)
+                        if flat.Magnitude > 0.5 then
+                            hiveViewState.Front = flat.Unit
+                        end
+                    end
+                end
+            end
+            hiveViewState.Angle = 0
+            frameHiveCamera(0)
+            local cellCount = 0
+            local cellsFolder = hive:FindFirstChild("Cells")
+            if cellsFolder then cellCount = #cellsFolder:GetChildren() end
+            setText(hiveViewStatus, string.format("Hive của %s • %d ô",
+                Player and Player.Name or "bạn", cellCount))
+        end
+
+        -- Camera lắc nhẹ qua lại khi đang mở tab Show Hive.
+        task.spawn(function()
+            while rootGui.Parent do
+                if page.Visible and hiveViewState.Model then
+                    hiveViewState.Angle = math.sin(os.clock() * 0.35) * 0.6
+                    frameHiveCamera(hiveViewState.Angle)
+                end
+                task.wait(0.05)
+            end
+        end)
         -- SHOW HIVE: lưới 50 slot mô phỏng comb - ô màu theo họ ong
         -- (blue/red/event vàng), GIFTED = sao ⭐ + viền vàng, level góc trái.
+        -- Ô dàn đều hết chiều rộng trang: 5 cột x (460-4*5)/5 = 88.
+        local CELL_W, CELL_H, PAD_X, PAD_Y = 88, 48, 5, 5
         local gridFrame = corner(create("Frame", {
             Name = "HiveGrid",
             LayoutOrder = 20,
-            Size = UDim2.new(1, 0, 0, 21 + 9 * 34 + 38 + 12),
+            -- Đủ 10 hàng: header 21 + 10*CELL_H + 9*PAD_Y + padding dưới 8.
+            Size = UDim2.new(1, 0, 0, 21 + 10 * CELL_H + 9 * PAD_Y + 8),
             BackgroundColor3 = T.Panel,
         }, page), R_CARD)
         strokeOf(gridFrame, T.Stroke, 1, 0.6)
@@ -1019,9 +1257,8 @@ do
         -- LOGIC HIVE THẬT (atlas 62501: cột x 1..5, hàng y 1..10):
         -- THẲNG TẮP 5 cột × 10 hàng, không so le, viền VÀNG HONEY quanh ô
         -- như panel hive trong game. Ô gần vuông, page tự scroll.
-        local CELL_W, CELL_H, PAD_X, PAD_Y = 54, 38, 5, 5
         local gridHolder = create("Frame", {
-            Size = UDim2.new(1, -12, 0, 9 * (CELL_H + PAD_Y) + CELL_H + 4),
+            Size = UDim2.new(1, -12, 0, 10 * CELL_H + 9 * PAD_Y),
             Position = UDim2.fromOffset(6, 21),
             BackgroundTransparency = 1,
         }, gridFrame)
@@ -1045,7 +1282,7 @@ do
                 Name = "Face",
                 AnchorPoint = Vector2.new(0.5, 0.5),
                 Position = UDim2.new(0.5, 0, 0.5, 0),
-                Size = UDim2.fromOffset(22, 22),
+                Size = UDim2.fromOffset(28, 28),
                 BackgroundTransparency = 1,
                 Image = "",
                 ScaleType = Enum.ScaleType.Fit,
