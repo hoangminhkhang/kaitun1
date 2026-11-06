@@ -17,6 +17,7 @@
     Early-game build leans blue per BSS Game Guide: prioritize sprinkler,
     Bubble Wand when macroing, Bubble Mask and endgame material preservation.
 ]]
+print("[BSS Kaitun] v1.6.1 boot - file loaded, PlaceId=" .. tostring(game.PlaceId))
 
 if game.PlaceId ~= 1537690962 then
     warn("[BSS Kaitun] Wrong game. Current PlaceId: " .. tostring(game.PlaceId))
@@ -78,7 +79,8 @@ end
 --  USER SETTINGS - the keys players actually flip. One per line.
 --  Everything below keeps safe internal defaults; no need to edit further.
 -- ==========================================================================
-local USER_DEFAULTS = {
+local function buildUserDefaults()
+    return {
     Enabled = true,
     AutoFarm = true,
     AutoConvert = true,
@@ -138,13 +140,16 @@ local USER_DEFAULTS = {
     RJTargetGiftedTypes = 15,
     TreatBudgetPercent = 10,
     BlackScreenTransparency = 0.3,
-}
+    }
+end
+local USER_DEFAULTS = buildUserDefaults()
 
 -- ==========================================================================
 --  INTERNAL DEFAULTS - intervals, cooldowns, thresholds, positions and data
 --  tables. Leave untouched; override at runtime with getgenv().KaitunConfig.
 -- ==========================================================================
-local DEFAULT_CONFIG = {
+local function buildDefaultConfig()
+    return {
     ConvertPercent = 1,
     ConvertFinishPercent = 0.01,
     TweenSpeed = 100,
@@ -601,7 +606,9 @@ local DEFAULT_CONFIG = {
     MeteorTriggerInterval = 60,
     SprinklerPlaceInterval = 8,
     MaxDeferredPurchasesPerPass = 1,
-}
+    }
+end
+local DEFAULT_CONFIG = buildDefaultConfig()
 
 local function deepCopy(value)
     if type(value) ~= "table" then
@@ -646,7 +653,7 @@ for key, value in pairs(USER_DEFAULTS) do Config[key] = deepCopy(value) end
 local legacyOverrides = type(ENV.BSS_KAITUN_CONFIG) == "table" and ENV.BSS_KAITUN_CONFIG or nil
 local runtimeOverrides
 do
-    local ok, overrides = pcall(function() return getgenv().KaitunConfig end)
+    local ok, overrides = pcall(function() return ENV.KaitunConfig end)
     if ok and type(overrides) == "table" then runtimeOverrides = overrides end
 end
 if legacyOverrides then
@@ -815,7 +822,10 @@ local Lighting = game:GetService("Lighting")
 local HttpService = game:GetService("HttpService")
 
 local Player = Players.LocalPlayer
-repeat task.wait() until Player
+while not Player do
+    task.wait()
+    Player = Players.LocalPlayer
+end
 
 local Events
 for _ = 1, 3 do
