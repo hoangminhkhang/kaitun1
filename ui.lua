@@ -400,7 +400,8 @@ local TAB_DEFS = {
     {Name = "Status", Icon = "📊"},
     {Name = "Farm", Icon = "🏡"},
     {Name = "Move", Icon = "👟"},
-    {Name = "Hive", Icon = "🍯"},
+    {Name = "Hive", Icon = "🐝"},
+    {Name = "Show Hive", Icon = "🍯"},
     {Name = "Lag", Icon = "⚡"},
     {Name = "Planter", Icon = "🪴"},
 }
@@ -418,12 +419,15 @@ do
         local button = corner(create("TextButton", {
             Name = def.Name,
             LayoutOrder = index,
-            Size = UDim2.new(0, 72, 1, 0),
+            -- Chia đều theo số tab (7 tab): vừa khít tabBar, không tràn
+            -- khi thêm tab mới. TextSize 10 để "🍯 Show Hive" không bị cắt.
+            Size = UDim2.new(1 / #TAB_DEFS, -5, 1, 0),
             BackgroundColor3 = T.PanelLight,
             Font = Enum.Font.GothamMedium,
             Text = def.Icon .. " " .. def.Name,
             TextColor3 = T.TextDim,
-            TextSize = 11,
+            TextSize = 10,
+            TextTruncate = Enum.TextTruncate.AtEnd,
         }, tabBar), R_CTRL)
         local underline = corner(create("Frame", {
             Name = "Underline",
@@ -866,7 +870,8 @@ end
 
 -- =============================================================================
 -- =============================================================================
--- Hive page (tab 🍯): tổng quan tổ ong - cấp độ trung bình, gifted, màu.
+-- Hive page (tab 🐝): tổng quan tổ ong - cấp độ trung bình, gifted, màu.
+-- Chỉ 6 ô stat; lưới COMB nằm ở tab "Show Hive" riêng (xem dưới).
 -- Main đẩy dữ liệu qua UI.SetHive{...} và UI.SetHiveGrid{{Type=,Gifted=,Level=,X=,Y=}}.
 -- =============================================================================
 -- Phân loại màu ô ong (file-level để SetHiveGrid dùng được - local trong
@@ -996,12 +1001,37 @@ do
             }, cell)
             hiveCells[entry[1]] = valueLabel
         end
+    end
+end
+
+-- =============================================================================
+-- Show Hive page (tab 🍯 riêng): chỉ chứa lưới COMB 50 ô. Tab Hive giữ
+-- lại 6 ô stat cho gọn, không phải scroll qua lưới mới thấy số liệu.
+-- SetHiveGrid / AutoHive không đổi - vẫn ghi vào hiveCells.GridSlot.
+-- =============================================================================
+do
+    local page = UI._pages["Show Hive"]
+    if page then
+        hiveCells = hiveCells or {}
+        create("TextLabel", {
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 20),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            Text = "SHOW HIVE",
+            TextColor3 = T.AccentDim,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, page)
         -- SHOW HIVE: lưới 50 slot mô phỏng comb - ô màu theo họ ong
         -- (blue/red/event vàng), GIFTED = sao ⭐ + viền vàng, level góc trái.
+        -- Ô dàn đều hết chiều rộng trang: 5 cột x (460-4*5)/5 = 88.
+        local CELL_W, CELL_H, PAD_X, PAD_Y = 88, 48, 5, 5
         local gridFrame = corner(create("Frame", {
             Name = "HiveGrid",
             LayoutOrder = 20,
-            Size = UDim2.new(1, 0, 0, 21 + 9 * 34 + 38 + 12),
+            -- Đủ 10 hàng: header 21 + 10*CELL_H + 9*PAD_Y + padding dưới 8.
+            Size = UDim2.new(1, 0, 0, 21 + 10 * CELL_H + 9 * PAD_Y + 8),
             BackgroundColor3 = T.Panel,
         }, page), R_CARD)
         strokeOf(gridFrame, T.Stroke, 1, 0.6)
@@ -1019,9 +1049,8 @@ do
         -- LOGIC HIVE THẬT (atlas 62501: cột x 1..5, hàng y 1..10):
         -- THẲNG TẮP 5 cột × 10 hàng, không so le, viền VÀNG HONEY quanh ô
         -- như panel hive trong game. Ô gần vuông, page tự scroll.
-        local CELL_W, CELL_H, PAD_X, PAD_Y = 54, 38, 5, 5
         local gridHolder = create("Frame", {
-            Size = UDim2.new(1, -12, 0, 9 * (CELL_H + PAD_Y) + CELL_H + 4),
+            Size = UDim2.new(1, -12, 0, 10 * CELL_H + 9 * PAD_Y),
             Position = UDim2.fromOffset(6, 21),
             BackgroundTransparency = 1,
         }, gridFrame)
@@ -1045,7 +1074,7 @@ do
                 Name = "Face",
                 AnchorPoint = Vector2.new(0.5, 0.5),
                 Position = UDim2.new(0.5, 0, 0.5, 0),
-                Size = UDim2.fromOffset(22, 22),
+                Size = UDim2.fromOffset(28, 28),
                 BackgroundTransparency = 1,
                 Image = "",
                 ScaleType = Enum.ScaleType.Fit,
