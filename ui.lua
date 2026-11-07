@@ -1,97 +1,18 @@
--- ============================================================================
---  THROW FOOD FOR ANIMALS — MAIN FARM SCRIPT (v2.0, TUTORIAL-FIRST + FSM)
---  PlaceId: 120219252362013 | PlaceVersion 1221 (file .rbxl ngay 07/11/2026)
---  Chay bang Delta (LocalScript). Chi tu dong hoa thao tac nguoi choi van lam
---  bang tay (di toi cho, bam nut game ve ra, bam dung luc meter cao).
---
---  v2.0 VIET LAI TOAN BO SAU KHI 22 AGENT NGHIEN CUU (07/11/2026):
---  * Phat hien goc so 0: Brian chay nham ban v1.0 cu (log in "v1.0-gui-first"),
---    nen 3 fix cua v1.0.1 chua bao gio duoc chay. V2.0 in "v2.0" o boot print
---    de nhan dien ngay. HAY CHAC CHAN DANG CHAY FILE NAY (xem dong boot).
---  * Di chuyen: Humanoid:MoveTo chi di thang, tu ngat sau 8 GIAY, va check
---    toi noi bang khoang cach 3D < 3 KHONG BAO GIO dung vi HumanoidRootPart
---    khi dung cao hon mat dat ~3 studs (dich Y=2 -> cach toi thieu 3.5).
---    => Doi sang PathfindingService (tu tim duong vong vat can) + check toi
---    noi chi theo XZ + do ket theo "khoang cach toi dich khong giam" (nhay
---    len xuong theo Y khong con duoc tinh la tien nua).
---  * Dich Sell/FoodShop dung Y cua ZonePad lo lung (~8.5) thay vi vong
---    ActivationCircle tren mat dat (~2.5-2.6) => doi Y ve mat dat.
---  * goThrowLine xoay 180 do lam nhan vat quay lung ve biome (nhin ve +Z,
---    lobby) => BO xoay, dung nhin thang ve -Z (huong biome).
---  * Nem: cu cham dau tien CHINH LA cu nem (meter chay ngay khi vao zone),
---    nen bo cham "bat dau nem"; doi "TAP TO THROW" hien roi moi poll meter.
---    Meter doc bang so TextLabel la sai: meter that la thanh + mui ten chay;
---    so chi hien SAU khi nem ("+17 POWER"). => Doc fill Frame (ti le 0-1),
---    chi tin label so nao THAY DOI theo thoi gian.
---  * Tap luyen: xA KHOA cho toi khi xong tutorial; tap tu dong khi dung tren
---    pad; thoat bang nut STOP do trong UI (khong phai remote); tap bonus chi
---    bam dung nut popup, moi popup 1 lan.
---  * Thu tu game day: NEM (Carrot free, da equip san) -> NHAT -> DAT PLOT
---    -> MUA FOOD -> roi moi TAP XA. Vong cu tap truoc la nguoc game.
---  * Mua do: Shop chi hien 3 mon (1 da co + 2 tiep theo); nut BUY dau tien
---    tim duoc gan nhu chac chan la mon KHAC => mua theo THE (tim the theo
---    ten mon roi bam nut trong dung the do). Carrot gia 0 / da so huu => di
---    nhanh EQUIP, khong di nhanh BUY (vong cu bam BUY cua Apple $30 khi $0
---    roi lap vo han). Khong co hop xac nhan YES khi mua (mua xong bao
---    "Bought Apple!" roi bam EQUIP).
---  * Ban: nut Animals tren HUD la ImageButton icon chan thu KHONG CO TEXT
---    => tim bang Text khong bao gio thay => EQUIP BEST khong chay => ban
---    mat ca thu ngon trong Backpack. => Tim nut theo anh/icon. Sau SELL ALL
---    co hop xac nhan "Sell N animals for $X?" phai bam them 1 lan nua.
---  * Nhat thu: thu spawn trong biome roi DI BO toi cho do an; phai doi the
---    reveal (NEW! / ten loai / $/s) roi moi di; di toi DIEM ROI TINH va doi
---    thu toi, khong duoi theo thu dang di; timeout ti le theo khoang cach.
---  * He so size that (do tu billboard + allthings.how, khop nhau): Big 2.08x,
---    Large 4.31x, Huge 8.94x (cap so nhan ~2.07), KHONG phai bang cu cua PGG
---    (1.5x/2.25x/3.38x). Mutation dung (Gold 1.5x, Diamond 3x, Emerald 5x,
---    Ruby 10x, Rainbow 20x). Stack NHAN, khong cong. Quyet dinh giu/ban chi
---    dung $/s do live.
---  * Gia 42 mon da du (GameRant 06/11 + NerdsChalk 02/11): Shank $6.8T
---    (khong phai $618T), Fillet $57T, Phoenix Fillet $4Sx (khong phai $35Sx),
---    Caramel Apple $250Oc (khong phai $250Qc), Uranium Cake $9Qad (1 nguon).
---  * Plot: OwnerTag moi la tin hieu chinh (TrainingRig chi co khi dang tap);
---    so sanh chinh xac (khong chuoi con); thu lai khi chua load xong.
---  * Remote: BO Plot_SellAll khoi allowlist (recon cam probe no vi ban la
---    hanh dong pha huy; chi mo lai khi co bang chung hook). Them
---    Animations_Get (probe read-only dau tien) va Shop_ClaimFree vao nhom A.
---  * Trung: trung Halloween 80 Robux, event da het 01/11; Ring Rush khong
---    tu dong duoc bang GUI; Gift bo han. AutoEgg/AutoRingRush la config
---    chet o v1.x => XOA.
---  * Giong nguoi: muc tieu meter boc ngau nhien moi lan nem (65% 19-20,
---    25% 17-18, 10% 15-16/ho), tre phan ung 0.08-0.35s, click lech tam nut,
---    delay phan phoi tam giac, gioi han phien 60 phut + nghi 10-20 phut,
---    teleport toi da 3-5 lan/gio. KHONG BAO DAM khong bi ban — chi giam rui ro.
---
---  NGUYEN TAC COT LOI (khong doi): mac dinh KHONG GOI REMOTE NAO co the mat
---  tien hoac gian lan. Moi thao tac farm di qua GUI CUA GAME. Remote chi
---  duoc goi khi thoa: (1) no-arg, (2) nguoi dung bat RemoteCallsEnabled SAU
---  KHI chay recon (tffa_v1_single.lua) va thay server tra ve hop le, (3)
---  nam trong allowlist. Shop_Buy / Stand_Upgrade / Player_SetThrowPower /
---  Dev_Action / AdminAbuse_* KHONG BAO GIO duoc goi qua remote.
---
---  BAI HOC TU KAITUN: top-level locals < 30; moi thu trong bang TFFA; ham
---  goi nhau qua TFFA.*; khong dung `continue` / `+=` / `..=`; strip dau
---  phay khi parse so tien.
---
---  CANH BAO: auto-farm co the vi pham dieu khoan game/Roblox va co nguy co
---  bi kick/ban (thuong toi cham 2-4 tuan sau). Farm o muc giong nguoi, dung
---  chay 24/7, chi chay tren acc phu. Nguoi dung tu chiu trach nhiem.
---
---  CACH CHAY (Delta):
---    1. Tat ban recon truoc neu dang chay (getgenv().__TFFA.Stop()).
---    2. Luu file nay vao thu muc workspace cua Delta, mo file roi EXECUTE.
---       KHONG paste truc tiep vao o EXECUTE - mobile hay bi cat clipboard.
---    3. Nhin console: phai thay "=== TFFA Main boot: v2.0 ===" (neu thay
---       "v1.0" nghia la ban dang chay file cu — xoa file cu di).
---    4. Test tung pha theo huong dan o cuoi file (Pha 0-6), moi pha <= 5 phut.
--- ============================================================================
+-- TFFA Main v2.0.4 — Throw Food For Animals farm (Delta LocalScript).
+-- PlaceId 120219252362013. GUI-first: moi thao tac qua UI game, mac dinh
+-- KHONG goi remote nao. Remote chi khi RemoteCallsEnabled=true + nam trong
+-- allowlist no-arg (Animations_Get, Offline_Claim, Training_Start/Stop,
+-- Plot_EquipBest, Shop_ClaimFree). KHONG BAO GIO goi: Shop_Buy, Stand_Upgrade,
+-- Player_SetThrowPower, Dev_Action, AdminAbuse_*, Plot_SellAll, Gift_*, Egg_Place.
+-- Chay: tat recon truoc, luu file vao workspace Delta, mo file roi EXECUTE
+-- (khong paste truc tiep). Log boot phai in dung version hien tai.
+-- CANH BAO: auto-farm co the vi pham dieu khoan game/Roblox, nguy co kick/ban.
+-- Dung chay 24/7, chi chay acc phu.
 
--- Self-stop ban cu: chay lai file se tat ban cu truoc.
 if getgenv and getgenv().__TFFA_MAIN and getgenv().__TFFA_MAIN.Stop then
 	pcall(getgenv().__TFFA_MAIN.Stop)
 end
 
--- Top-level locals: CO TINH, giu duoi 30 cai. Moi thu khac nam trong bang TFFA.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -102,56 +23,49 @@ local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local TFFA = {}
 
-TFFA.VERSION = "v2.0.3"
-TFFA.BUILD = "2026-11-07 v2.0.3-meter-fix"
+TFFA.VERSION = "v2.0.4"
+TFFA.BUILD = "2026-11-07 v2.0.4-plot-fix"
 TFFA.PLACE_ID = 120219252362013
 
--- ============================================================================
---  CONFIG
--- ============================================================================
 TFFA.DEFAULT_CONFIG = {
 	Enabled = true,
 	AutoTrain = true,
 	AutoThrow = true,
 	AutoEquipBest = true,
 	AutoSell = true,
-	AutoUpgradeFood = true,   -- chi mua qua nut trong Shop UI, khong goi remote
-	AutoUpgradeBar = false,   -- TAT: nang xa qua be vang chua duoc kiem chung live
-	AutoClaimOffline = false, -- TAT: chi bat sau khi recon xac nhan Offline_Claim no-arg
+	AutoUpgradeFood = true,
+	AutoUpgradeBar = false,
+	AutoClaimOffline = false,
 	AutoTapBonus = true,
 	ProbeMode = true,
-	-- Remote: mac dinh TAT HOAN TOAN. Chi bat sau khi chay tffa_v1_single.lua
-	-- va thay server tra ve hop le cho tung remote no-arg.
 	RemoteCallsEnabled = false,
 	RemoteAllow = { Animations_Get = false, Offline_Claim = false,
 		Training_Start = false, Training_Stop = false, Plot_EquipBest = false,
 		Shop_ClaimFree = false },
-	-- Plot_SellAll KHONG co trong allowlist (ban la hanh dong pha huy;
-	-- chi mo lai khi hook bat duoc game tu goi no-arg).
 
-	ThrowAt = 19,              -- muc tieu mac dinh; moi lan nem boc ngau nhien (xem pickMeterTarget)
-	ThrowsPerDecision = 3,    -- toi da 3 phat nem moi lan DECIDE goi THROW (thay 10)
-	TrainMaxMinutes = 10,     -- tran 1 session tap
+	ThrowAt = 19,
+	ThrowsPerDecision = 3,
+	TrainMaxMinutes = 10,
 	TrainSlowSeconds = 180,
 	PowerCheckEvery = 5,
-	MaxConsecMisses = 3,      -- 3 lan nem truot lien tiep -> nghi power yeu -> TRAIN
-	PlotCapacity = 14,        -- slot plot mac dinh, hieu chinh khi thay day
-	BackpackSellAt = 20,      -- tui >= 20 thu thi di ban
-	TrainMinGainPerMin = 20,  -- tang < 20 power/phut -> xa yeu, dung tap
-	IdleRestEveryCycles = 5,  -- nghi giong nguoi sau moi 5 vong DECIDE
-	RecoverMaxConsec = 3,     -- 3 lan RECOVER lien tiep -> IDLE 60s
-	SessionMinutes = 60,      -- gioi han phien farm roi nghi
+	MaxConsecMisses = 3,
+	PlotCapacity = 14,
+	BackpackSellAt = 20,
+	TrainMinGainPerMin = 20,
+	IdleRestEveryCycles = 5,
+	RecoverMaxConsec = 3,
+	SessionMinutes = 60,
 	BreakMinutes = 15,
-	MaxTeleportsPerHour = 4,  -- gioi han teleport/phien
-	PlotNumber = nil,         -- override thu cong: 1-5 neu tu dong tim plot that bai
-	ThrowTimeout = 10,        -- cho meter (thay 30: meter chu ky ~1-2s)
+	MaxTeleportsPerHour = 4,
+	PlotNumber = nil,
+	ThrowTimeout = 10,
 	CollectTimeoutBase = 15,
 	MinRemoteGap = 0.5,
 	ActionDelayMin = 0.3,
 	ActionDelayMax = 1.2,
 	MaxRemoteFails = 3,
 	AntiAfkEvery = 540,
-	Food = "",                 -- de trong = tu chon mon tot nhat dang co trong Backpack
+	Food = "",
 }
 
 local UserConfig = nil
@@ -162,8 +76,6 @@ if type(UserConfig) == "table" then
 	for k, v in pairs(UserConfig) do TFFA.Config[k] = v end
 end
 
--- Thang thuc an DAY DU 42 mon, 17 tier (GameRant 06/11/2026 + NerdsChalk
--- 02/11/2026, doi chieu 4 nguon). Mon nao chi 1 nguon thi ghi chu.
 TFFA.FOOD_LADDER = {
 	{ Name = "Carrot", Price = 0, Tier = 1 },
 	{ Name = "Apple", Price = 30, Tier = 1 },
@@ -208,8 +120,6 @@ TFFA.FOOD_LADDER = {
 	{ Name = "Atomic Pizza", Price = 400000000000000000000000000000000000000000000, Tier = 17 },
 	{ Name = "Uranium Cake", Price = 9000000000000000000000000000000000000000000000, Tier = 17 },
 }
--- Xa tap DA XAC MINH (allthings.how). 11 xa trung gian giua Violet va
--- Emerald + xa sau Sapphire CHUA CO NGUON NAO DANG => khong bia, doc live.
 TFFA.BAR_LADDER = {
 	{ Name = "Wooden Bar", Price = 0, XpPerRep = 1 },
 	{ Name = "Steel Bar", Price = 50, XpPerRep = 2 },
@@ -219,11 +129,8 @@ TFFA.BAR_LADDER = {
 	{ Name = "Emerald Bar", Price = 1200000000000000, XpPerRep = 65536 },
 	{ Name = "Sapphire Bar", Price = 7000000000000000, XpPerRep = 131072 },
 }
--- He so DA XAC MINH: mutation dung bang PGG; size do tu billboard file
--- v1221 + allthings.how (cap so nhan ~2.07). Stack NHAN, khong cong.
 TFFA.MUT_MULT = { Gold = 1.5, Diamond = 3, Emerald = 5, Ruby = 10, Rainbow = 20 }
 TFFA.SIZE_MULT = { Big = 2.08, Large = 4.31, Huge = 8.94 }
--- 42 mon an / 154 loai thu trong file .rbxl v1221.
 TFFA.ALL_FOODS = { "Pear", "WaterMelon", "Toast", "Croissant", "Apple", "Cheese",
 	"Carrot", "Bread Loaf", "Banana", "Golden Apple", "Mushroom", "Orange",
 	"Chocolate", "Elder Strawberry", "Bacon", "Burger", "Shank", "Fillet",
@@ -269,11 +176,9 @@ do
 		"Zebra", "ZombieCrow" }
 	for _, n in ipairs(names) do TFFA.ANIMAL_SET[n] = true end
 end
--- Thu SS (Robux/egg) KHONG BAO GIO duoc ban (khong mua lai duoc bang tien game).
 TFFA.NEVER_SELL = { ["Pumpkin Monster"] = true, Reaper = true, ReaperSteed = true,
 	["Giant Squid"] = true, Demon = true, ["Skeleton Horse"] = true,
 	WoollyMammoth = true, Skeleton = true }
--- Biome theo truc -Z (do tu file; Luck chi co so lieu toi PrehistoricForest).
 TFFA.BIOMES = {
 	{ Name = "Forest", WallZ = -45 }, { Name = "Savana", WallZ = -213 },
 	{ Name = "Desert", WallZ = -381 }, { Name = "Jungle", WallZ = -549 },
@@ -285,8 +190,6 @@ TFFA.BIOMES = {
 	{ Name = "HarvestFields", WallZ = -4000 }, { Name = "PhantomHarbor", WallZ = -5000 },
 	{ Name = "NuclearWasteland", WallZ = -6200 },
 }
--- Toa do dich: Y VE MAT DAT (vong ActivationCircle), khong dung Y ZonePad
--- lo lung (~8.5). Spawn Y=2.5, ThrowLine Y=3 (dung truoc vach z=-40).
 TFFA.ANCHORS = {
 	Spawn = Vector3.new(0, 2.5, 0),
 	ThrowLine = Vector3.new(0, 3, -38),
@@ -295,7 +198,6 @@ TFFA.ANCHORS = {
 	FoodShopOffset = Vector3.new(10.5, 0.5, -30.8),
 	BarUpgradeOffset = Vector3.new(-16, 0.5, -39),
 }
--- Remote CAM TUYET DOI (phong thu 2 lop: BLOCKED + khong co trong allowlist).
 TFFA.BLOCKED_REMOTES = { Player_SetThrowPower = true, Dev_Action = true,
 	AdminAbuse_Vote = true, AdminAbuse_VoteState = true, AdminAbuse_Gift = true,
 	Shop_Buy = true, Shop_Equip = true, Shop_Prompt = true, Stand_Upgrade = true,
@@ -306,7 +208,6 @@ TFFA.BLOCKED_REMOTES = { Player_SetThrowPower = true, Dev_Action = true,
 	Throw_UseSuper = true, Egg_Place = true, RingRush_Begin = true,
 	RingRush_Report = true, RingRush_End = true, Sell_Protected = true,
 	Player_SetSetting = true }
--- Remote no-arg CHI DUOC GOI khi RemoteCallsEnabled=true + RemoteAllow[name]=true.
 TFFA.REMOTE_ALLOWLIST = { Animations_Get = true, Offline_Claim = true,
 	Training_Start = true, Training_Stop = true, Plot_EquipBest = true,
 	Shop_ClaimFree = true }
@@ -336,7 +237,6 @@ function TFFA.log(...)
 	if #TFFA.ReconLog > 400 then table.remove(TFFA.ReconLog, 1) end
 end
 
--- Log ket thong nhat: [TFFA-KET] hanh_dong | dau_hieu | pos -> dich dist | HP/Sit/State | streak | cap -> ket qua
 function TFFA.logStuck(action, sign, target, level, result)
 	local root = TFFA.getRootPart()
 	local pos = root and root.Position or Vector3.new(0, 0, 0)
@@ -368,7 +268,6 @@ function TFFA.randRange(a, b)
 	return a + math.random() * (b - a)
 end
 
--- Delay phan phoi tam giac (tap trung quanh giua, khong deu nhu uniform).
 function TFFA.triDelay(a, b)
 	local mid = (a + b) / 2
 	local r = (math.random() + math.random()) / 2
@@ -379,8 +278,6 @@ function TFFA.randDelay()
 	task.wait(TFFA.triDelay(TFFA.Config.ActionDelayMin, TFFA.Config.ActionDelayMax))
 end
 
--- Muc tieu meter moi lan nem: 65% 19-20 (PERFECT), 25% 17-18 (GREAT),
--- 10% 15-16 hoac de troi (nem hong) — giong nguoi, khong PERFECT 100%.
 function TFFA.pickMeterTarget()
 	local roll = math.random()
 	if roll < 0.65 then return TFFA.randRange(19, 20) end
@@ -388,16 +285,10 @@ function TFFA.pickMeterTarget()
 	return TFFA.randRange(15, 16.5)
 end
 
-
--- ============================================================================
---  Util
--- ============================================================================
 TFFA.SUFFIXES = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Qa = 1e15, Qi = 1e18,
 	Sx = 1e21, Sp = 1e24, Oc = 1e27, No = 1e30, Dc = 1e33, Ud = 1e36,
 	Dd = 1e39, Td = 1e42, Qad = 1e45 }
 
--- Trich so tien tu BAT CU cho nao trong chuoi (vd "Cash: $1.2K" hay
--- "Swordfish\n$500T/s"). Tra ve nil neu khong thay so.
 function TFFA.parseMoney(text)
 	if type(text) ~= "string" then return nil end
 	local chunk = text:match("%$%s*([%d%.,]+%s*[A-Za-z]*)")
@@ -441,9 +332,6 @@ function TFFA.distXZ(a, b)
 	return Vector2.new(a.X - b.X, a.Z - b.Z).Magnitude
 end
 
--- ============================================================================
---  GUI helpers
--- ============================================================================
 function TFFA.getPlayerGui()
 	local gui = LocalPlayer:FindFirstChild("PlayerGui")
 	if gui then return gui end
@@ -480,8 +368,6 @@ function TFFA.findGuiTexts(needle, classFilter)
 	return found
 end
 
--- Tim nut theo text CHINH XAC (sau trim/lowercase), chi nut dang hien.
--- Tra ve nil thay vi nut sai — an toan hon bam nham.
 function TFFA.findButtonByText(needle, ancestor)
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil end
@@ -498,7 +384,6 @@ function TFFA.findButtonByText(needle, ancestor)
 			end
 		end
 	end
-	-- Fallback: chuoi con, nhung van chi nut dang hien.
 	for _, inst in ipairs(root:GetDescendants()) do
 		if inst:IsA("TextButton") or inst:IsA("ImageButton") then
 			if TFFA.isVisible(inst) and inst.Active and inst.AbsoluteSize.X > 0 then
@@ -514,7 +399,6 @@ function TFFA.findButtonByText(needle, ancestor)
 	return nil
 end
 
--- Tim nut anh (khong co Text) theo ten/icon: vd nut Animals (chan thu).
 function TFFA.findImageButton(namePart)
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil end
@@ -528,7 +412,6 @@ function TFFA.findImageButton(namePart)
 	return nil
 end
 
--- Tim the (card) trong Shop/panel theo ten mon: tra ve card (tien to chung).
 function TFFA.findCardByName(name, ancestor)
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil end
@@ -539,7 +422,6 @@ function TFFA.findCardByName(name, ancestor)
 			local ok, text = pcall(function() return inst.Text end)
 			if ok and type(text) == "string" then
 				if string.lower(text:gsub("^%s+", ""):gsub("%s+$", "")) == lowerName then
-					-- Leo len 3 cap de lay card chua ca ten + gia + nut.
 					local card = inst.Parent
 					if card and card.Parent then card = card.Parent end
 					if card and card.Parent then card = card.Parent end
@@ -551,16 +433,11 @@ function TFFA.findCardByName(name, ancestor)
 	return nil
 end
 
-TFFA.MeterSource = nil -- {kind="fill"|"label", inst=GuiObject} — nguon meter da tim duoc
+TFFA.MeterSource = nil
 
--- Doc gia tri meter (0-20). Uu tien fill Frame (Size.X.Scale 0->1), fallback
--- label so. Chi tin nguon nao THAY DOI theo thoi gian (label/frame tinh
--- loai). Nguon tim duoc 1 lan se duoc nho lai (TFFA.MeterSource) de doc
--- nhanh moi frame sau do thay vi tim lai lien tuc.
 function TFFA.findMeterValue()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil, nil end
-	-- Doc nhanh tu nguon da tim duoc truoc do.
 	if TFFA.MeterSource and TFFA.MeterSource.inst
 		and TFFA.MeterSource.inst.Parent ~= nil then
 		local src = TFFA.MeterSource
@@ -580,7 +457,6 @@ function TFFA.findMeterValue()
 		end
 		TFFA.MeterSource = nil
 	end
-	-- Tim moi: gom cac frame co the la fill trong khung meter/throw/power.
 	local cands = {}
 	for _, inst in ipairs(gui:GetDescendants()) do
 		if inst:IsA("Frame") and TFFA.isVisible(inst) then
@@ -597,7 +473,6 @@ function TFFA.findMeterValue()
 		end
 	end
 	if #cands > 0 then
-		-- Lay mau 2 lan cach 0.1s: frame nao thay doi moi la meter dang chay.
 		task.wait(0.1)
 		for _, c in ipairs(cands) do
 			local ok, scale2 = pcall(function() return c.inst.Size.X.Scale end)
@@ -607,13 +482,11 @@ function TFFA.findMeterValue()
 				return scale2 * 20, "fill:" .. c.inst.Name
 			end
 		end
-		-- Khong cai nao thay doi: dung tam ung vien duy nhat neu no o giua.
 		if #cands == 1 and cands[1].scale1 > 0.05 and cands[1].scale1 < 0.95 then
 			TFFA.MeterSource = { kind = "fill", inst = cands[1].inst }
 			return cands[1].scale1 * 20, "fill?:" .. cands[1].inst.Name
 		end
 	end
-	-- Fallback: label so, chi tin neu thay doi trong 0.15s.
 	local samples = {}
 	for _, inst in ipairs(gui:GetDescendants()) do
 		if inst:IsA("TextLabel") and TFFA.isVisible(inst) then
@@ -649,13 +522,9 @@ function TFFA.findMeterValue()
 	return nil, nil
 end
 
--- Bam nut: thu tu tren mobile Delta — firesignal truoc, touch sau, chuot
--- cuoi. Ham verify (neu co) phai tra true thi moi tinh la bam thanh cong.
--- Tra ve true/false that, khong phai "pcall khong loi".
 function TFFA.clickButton(btn, verifyFn)
 	if not btn then return false end
 	local tried = {}
-	-- 1. firesignal (dang tin nhat tren mobile, khong phu thuoc toa do).
 	if firesignal then
 		local ok = pcall(function() firesignal(btn.MouseButton1Click) end)
 		if ok then table.insert(tried, "firesignal") end
@@ -667,7 +536,6 @@ function TFFA.clickButton(btn, verifyFn)
 	elseif #tried > 0 then
 		return true
 	end
-	-- 2. Touch tap tai toa do nut (dung loai input cua mobile).
 	local pos = btn.AbsolutePosition
 	local size = btn.AbsoluteSize
 	local jx = TFFA.randRange(-0.35, 0.35) * size.X
@@ -692,7 +560,6 @@ function TFFA.clickButton(btn, verifyFn)
 	elseif okTouch then
 		return true
 	end
-	-- 3. Chuot (phuong an cuoi).
 	local okMouse = pcall(function()
 		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
 		task.wait(holdTime)
@@ -709,9 +576,6 @@ function TFFA.clickButton(btn, verifyFn)
 	return false
 end
 
--- ============================================================================
---  Remote — CHI GOI KHI DUOC PHEP (xem dau file). Mac dinh TAT HOAN TOAN.
--- ============================================================================
 function TFFA.getRemotesFolder()
 	return ReplicatedStorage:FindFirstChild("Remotes")
 end
@@ -774,9 +638,6 @@ function TFFA.safeInvokeNoArg(name)
 	return false, res
 end
 
--- ============================================================================
---  Data — doc tu GUI/Workspace luc chay, khong hardcode
--- ============================================================================
 function TFFA.getCharacter()
 	local char = LocalPlayer.Character
 	if not char then return nil, nil end
@@ -789,12 +650,6 @@ function TFFA.getRootPart()
 	return char:FindFirstChild("HumanoidRootPart")
 end
 
--- Tim plot cua minh. Thu tu uu tien (da kiem chung tu file):
---  1. OwnerTag.BillboardGui.Name.Text == username (khop CHINH XAC)
---  2. ... == DisplayName
---  3. Server:FindFirstChild("TrainingRig_" .. username) (chi co khi dang tap)
---  4. Chuoi con (do tin cay thap, log canh bao)
---  5. Config.PlotNumber (override thu cong 1-5)
 function TFFA.findMyPlot()
 	local plotsFolder = Workspace:FindFirstChild("Plots")
 	if not plotsFolder then
@@ -817,12 +672,12 @@ function TFFA.findMyPlot()
 	local function ownerText(plot)
 		local tag = plot:FindFirstChild("OwnerTag")
 		if not tag then return nil end
-		local board = tag:FindFirstChildOfClass("BillboardGui")
-		if not board then return nil end
-		local nameLabel = board:FindFirstChild("Name")
-		if not nameLabel then return nil end
-		local ok, text = pcall(function() return nameLabel.Text end)
-		if ok and type(text) == "string" then return text end
+		for _, desc in ipairs(tag:GetDescendants()) do
+			if desc:IsA("TextLabel") then
+				local ok, text = pcall(function() return desc.Text end)
+				if ok and type(text) == "string" and text ~= "" then return text end
+			end
+		end
 		return nil
 	end
 	for _, plot in ipairs(plotsFolder:GetChildren()) do
@@ -862,13 +717,25 @@ function TFFA.findMyPlot()
 			end
 		end
 	end
+	local root = TFFA.getRootPart()
+	if root then
+		local nearest, nearestDist = nil, 30
+		for _, plot in ipairs(plotsFolder:GetChildren()) do
+			if plot:IsA("BasePart") then
+				local d = TFFA.distXZ(root.Position, plot.Position)
+				if d < nearestDist then nearest, nearestDist = plot, d end
+			end
+		end
+		if nearest then
+			TFFA.log("Plot cua ban:", nearest.Name, "(nhan vat dang dung tren)")
+			return nearest, nearest.Position
+		end
+	end
 	TFFA.log("UNKNOWN: khong xac dinh duoc plot cua minh (OwnerTag/TrainingRig).")
 	TFFA.log("  Hay dung yen o plot cua ban roi chay lai, hoac set Config.PlotNumber = so plot (1-5).")
 	return nil, nil
 end
 
--- Doc tien: trich so $ tu giua chuoi; doc 2 lan cach nhau 0.5s, chi tin
--- khi on dinh (tranh doc trung luc label dang tween). Luu nguon label.
 function TFFA.readMoney()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil end
@@ -907,10 +774,6 @@ function TFFA.readMoney()
 	return v2 or v1
 end
 
--- Doc Throw Power / Level: tim label/frame co ten chua "power"/"level" roi
--- doc so trong chinh no HOAC trong TextLabel con/chau cung parent (chu co
--- the nam o label anh em ben canh). Power co the chi hien trong panel Power
--- hoac luc dang tap/nem — UNKNOWN luc dung o Lobby la binh thuong.
 function TFFA.readPowerLevel()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil, nil end
@@ -961,8 +824,6 @@ function TFFA.readPowerLevel()
 	return power, level
 end
 
--- Doc tong $/s cua plot: cong $/s tren cac InfoBillboard cua thu trong plot.
--- Text billboard co the la "Swordfish\n$500T/s" nen trich so tu giua chuoi.
 function TFFA.readPlotIncome()
 	local plot = TFFA.State.MyPlot
 	if not plot then return nil end
@@ -983,8 +844,6 @@ function TFFA.readPlotIncome()
 	return total
 end
 
--- Doc tung con tren plot: {species, income, mutation, size, instance}.
--- Dung cho quyet dinh giu/ban theo $/s do live (khong theo ten/tier).
 function TFFA.readPlotAnimals()
 	local plot = TFFA.State.MyPlot
 	if not plot then return {} end
@@ -1046,7 +905,6 @@ function TFFA.countBackpackFoods()
 	return n
 end
 
--- Mon an tot nhat dang co trong Backpack (theo FOOD_LADDER, cao nhat thang).
 function TFFA.bestOwnedFood()
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	if not backpack then return nil end
@@ -1070,7 +928,6 @@ function TFFA.bestOwnedFood()
 			if owned[name] then best = name; break end
 		end
 	end
-	-- Mon an co the khong phai Tool: nho trang thai EQUIPPED tu Shop.
 	if not best and TFFA.State.EquippedFood then
 		return TFFA.State.EquippedFood
 	end
@@ -1095,7 +952,6 @@ function TFFA.equipFood(foodName)
 	return false
 end
 
--- Mon an dang cam tren tay (Tool trong Character).
 function TFFA.heldFood()
 	local char = LocalPlayer.Character
 	if not char then return nil end
@@ -1105,8 +961,6 @@ function TFFA.heldFood()
 	return nil
 end
 
--- Co mon an de nem khong? (Tool trong tui/tay, hoac da nho tu Shop EQUIPPED,
--- hoac da xac nhan bang 1 cu nem thanh cong.)
 function TFFA.hasFood()
 	return TFFA.bestOwnedFood() ~= nil
 		or TFFA.countBackpackFoods() > 0
@@ -1114,15 +968,6 @@ function TFFA.hasFood()
 		or TFFA.State.FoodConfirmed
 end
 
-
--- ============================================================================
---  Move — PathfindingService + MoveTo tung waypoint
---  Quy tac: check toi noi chi theo XZ (root khi dung cao hon dat ~3 studs,
---  check 3D < 3 khong bao gio dung); do ket theo "khoang cach toi dich
---  khong giam" (nhay len/xuong khong tinh la tien); goi lai MoveTo moi
---  3-5s de reset timeout 8s noi bo cua engine; chia leg dai thanh chang
---  <= 70 studs (pathfinding tu chia waypoint).
--- ============================================================================
 function TFFA.canTeleport()
 	local now = os.clock()
 	if now - TFFA.State.TeleportHourStart > 3600 then
@@ -1150,22 +995,17 @@ function TFFA.teleportTo(pos, reason)
 	return true
 end
 
--- Di chuyen toi CFrame dich. Tra ve true khi toi noi (XZ < 3), false khi het
--- timeout/het luot cuu ho. Moi leg: pathfinding -> waypoint; ket -> nhay ->
--- tinh lai path -> teleport (toi da 2 lan/leg) -> bo cuoc.
 function TFFA.moveTo(cf, timeout)
 	local root = TFFA.getRootPart()
 	local _, humanoid = TFFA.getCharacter()
 	if not root or not humanoid or humanoid.Health <= 0 then return false end
 	timeout = timeout or 20
 	local target = cf.Position
-	-- Kiem tra nhan vat con hop le moi tick; chet/respawn thi dung ngay.
 	local function stillValid()
 		local r = TFFA.getRootPart()
 		local _, h = TFFA.getCharacter()
 		return r ~= nil and h ~= nil and h.Health > 0 and r.Parent ~= nil
 	end
-	-- Dung day khoi ghe truoc khi di (dang ngoi tren xa tap thi MoveTo vo hieu).
 	if humanoid.Sit then
 		pcall(function()
 			humanoid.Sit = false
@@ -1224,13 +1064,10 @@ function TFFA.moveTo(cf, timeout)
 			TFFA.noteProgress()
 			return true
 		end
-		-- Tien do = khoang cach toi dich giam (khong phai vi tri co doi).
 		if dist < lastDist - 0.5 then
 			lastDist = dist
 			lastImprove = os.clock()
 		end
-		-- Muc tieu hien tai: waypoint ke tiep (bo qua waypoint da toi gan),
-		-- hoac dich cuoi neu het waypoint / khong co path.
 		local desired = target
 		if usePath and waypoints then
 			local wp = waypoints[wpIndex]
@@ -1239,7 +1076,6 @@ function TFFA.moveTo(cf, timeout)
 				wp = waypoints[wpIndex]
 			end
 			if wp then
-				-- Chi nhay khi da toi gan waypoint nhay (khong nhay lien tuc).
 				if wp.Action == Enum.PathWaypointAction.Jump
 					and TFFA.distXZ(root.Position, wp.Position) < 5 then
 					pcall(function() humanoid.Jump = true end)
@@ -1247,15 +1083,10 @@ function TFFA.moveTo(cf, timeout)
 				desired = wp.Position
 			end
 		end
-		-- QUAN TRONG: goi MoveTo NGAY khi doi muc tieu (waypoint moi), va
-		-- goi lai moi 4s de reset timeout 8s cua engine. Ban v2.0 chi goi
-		-- lai sau 3s nen nhan vat di 4 studs roi dung doi -> "let let":
-		-- di - dung - di - dung suot quang duong.
 		if not issuedTarget or TFFA.distXZ(desired, issuedTarget) > 1
 			or os.clock() - lastIssue > 4 then
 			issueMove(desired)
 		end
-		-- Ket: khoang cach toi dich khong giam trong 3s.
 		if os.clock() - lastImprove > 3 then
 			TFFA.logStuck("moveTo", "khong tien ve dich 3s", target, "L1", "nhay + tinh lai path")
 			pcall(function() humanoid.Jump = true end)
@@ -1291,8 +1122,6 @@ function TFFA.moveTo(cf, timeout)
 end
 
 function TFFA.goThrowLine()
-	-- KHONG xoay 180 do nua: CFrame.new mac dinh nhin ve -Z (huong biome).
-	-- Ban cu xoay 180 lam nhan vat quay lung ve biome (nhin ve lobby).
 	return TFFA.moveTo(CFrame.new(TFFA.ANCHORS.ThrowLine), 20)
 end
 
@@ -1322,12 +1151,6 @@ function TFFA.goBarUpgradePad()
 	return TFFA.moveTo(CFrame.new(target), 25)
 end
 
--- ============================================================================
---  Throw — KHONG cham "bat dau nem" (cu cham do CHINH LA cu nem).
---  Cho "TAP TO THROW" hien -> poll meter (fill Frame, hoac label so thay
---  doi) -> bam theo rising edge o muc tieu ngau nhien -> xac minh
---  PERFECT!/GREAT!/+N POWER.
--- ============================================================================
 function TFFA.waitForThrowUI(timeout)
 	local t0 = os.clock()
 	while os.clock() - t0 < (timeout or 10) do
@@ -1354,10 +1177,6 @@ function TFFA.waitForResultText(timeout)
 	return nil
 end
 
--- Canh thanh meter (thanh food) va tu nem: poll lien tuc, bam khi meter
--- len toi muc tieu tren canh len (rising edge), tru hao do tre input.
--- Log gia tri meter moi 0.5s de thay ro dang doc duoc meter hay khong.
--- Tra ve true khi da bam, false khi het gio khong thay meter.
 function TFFA.watchMeterAndThrow(target)
 	target = target or TFFA.pickMeterTarget()
 	TFFA.log("Canh meter, muc tieu:", string.format("%.1f", target))
@@ -1367,13 +1186,11 @@ function TFFA.watchMeterAndThrow(target)
 	while os.clock() - t0 < TFFA.Config.ThrowTimeout do
 		local meter = TFFA.findMeterValue()
 		if meter then
-			if os.clock() - lastLog > 0.5 then
+			if os.clock() - lastLog > 1 then
 				lastLog = os.clock()
 				TFFA.log("Meter:", string.format("%.1f", meter),
 					"-> muc tieu", string.format("%.1f", target))
 			end
-			-- Rising edge: gia tri dang TANG qua muc tieu thi bam ngay,
-			-- tru hao do tre input ~0.1s (bam o ~target-0.5 de roi vao target).
 			if prev and meter >= prev and meter >= target - 0.5 then
 				task.wait(TFFA.randRange(0.08, 0.35))
 				local btn = TFFA.findButtonByText("TAP TO THROW")
@@ -1381,8 +1198,6 @@ function TFFA.watchMeterAndThrow(target)
 				if btn then
 					TFFA.clickButton(btn)
 				else
-					-- Nut bat dau nem co the la vung cham toan man hinh:
-					-- tap giua man hinh 1 lan (day moi la cu nem that).
 					pcall(function()
 						local cam = Workspace.CurrentCamera
 						if cam then
@@ -1411,8 +1226,6 @@ function TFFA.doOneThrow()
 	if food == "" or food == nil then food = TFFA.bestOwnedFood() end
 	if not food then food = TFFA.State.EquippedFood end
 	if food then
-		-- Equip thu bang Tool; neu game khong dung Tool cho mon an thi van
-		-- thu nem dua tren trang thai EQUIPPED cua Shop.
 		local equipped = TFFA.equipFood(food)
 		if not equipped and TFFA.State.EquippedFood ~= food then
 			TFFA.log("Khong equip duoc mon an:", tostring(food))
@@ -1420,8 +1233,6 @@ function TFFA.doOneThrow()
 		end
 		task.wait(0.5)
 	else
-		-- Khong biet ten mon an: van thu ra vach nem — neu that ra da co
-		-- mon an equip san thi UI nem se hien (day la cach kiem tra).
 		TFFA.log("Khong biet ten mon an - thu ra vach nem de kiem tra.")
 	end
 	if not TFFA.goThrowLine() then
@@ -1429,14 +1240,12 @@ function TFFA.doOneThrow()
 		return false
 	end
 	TFFA.State.Throwing = true
-	-- Cho UI nem san sang, KHONG cham man hinh truoc (cham la nem luon).
 	if not TFFA.waitForThrowUI(10) then
 		TFFA.log("Khong thay UI nem (TAP TO THROW) sau 10s - bo qua luot nay.")
 		TFFA.log("  Hay nem tay 1 lan va gui anh GUI nem cho Muse de chinh do tim meter.")
 		TFFA.State.Throwing = false
 		return false
 	end
-	-- UI nem da hien = chac chan co mon an equip san.
 	TFFA.State.FoodConfirmed = true
 	TFFA.State.FoodBlocked = false
 	TFFA.State.FoodFailStreak = 0
@@ -1450,7 +1259,6 @@ function TFFA.doOneThrow()
 	end
 	TFFA.State.Throws = TFFA.State.Throws + 1
 	TFFA.noteProgress()
-	-- Xac minh nem thanh cong bang chu ket qua, khong cho cung 1.5s + 1.5s.
 	local result = TFFA.waitForResultText(5)
 	if result then
 		TFFA.log("Ket qua nem:", tostring(result))
@@ -1458,28 +1266,20 @@ function TFFA.doOneThrow()
 	else
 		TFFA.log("Khong thay chu PERFECT/GREAT sau khi nem - co the nem hong hoac UI khac.")
 	end
-	-- Cho cua so reveal: neu co nut SKIP thi bam de rut ngan.
 	local skipBtn = TFFA.findButtonByText("SKIP")
 	if skipBtn then TFFA.clickButton(skipBtn) end
 	return true
 end
 
--- Nhat thu: doi the reveal (NEW! / ten loai / $/s) -> tim dung con do trong
--- Workspace (khong duoi Plots, khong co InfoBillboard) -> di toi DIEM ROI
--- TINH va doi thu toi (thu tu di toi cho do an) -> xac minh model bien mat.
 function TFFA.collectCaughtAnimal()
 	local t0 = os.clock()
 	local species = nil
-	-- 1. Doi the reveal toi da 20s — khong thay the = khong co catch.
 	while os.clock() - t0 < 20 do
 		local found = TFFA.findGuiTexts("NEW!")
 		if #found > 0 then break end
-		-- The reveal co the chi hien ten loai + $/s ma khong co chu NEW!.
 		task.wait(0.5)
 		if os.clock() - t0 > 20 then break end
 	end
-	-- 2. Doc ten loai tu the reveal: TextLabel lon nhat vua xuat hien ma
-	-- ten thuoc ANIMAL_SET.
 	local gui = TFFA.getPlayerGui()
 	if gui then
 		for _, inst in ipairs(gui:GetDescendants()) do
@@ -1498,8 +1298,6 @@ function TFFA.collectCaughtAnimal()
 		return false
 	end
 	TFFA.log("The reveal: vua bat duoc", species)
-	-- 3. Poll Workspace moi 1-2s tim dung con do (khong duoi Plots, khong
-	-- InfoBillboard = khong phai thu tren plot). Thu dang di toi cho do an.
 	local target = nil
 	local targetModel = nil
 	local pollEnd = os.clock() + 60
@@ -1541,7 +1339,6 @@ function TFFA.collectCaughtAnimal()
 	TFFA.State.LastBiome = TFFA.biomeFromZ(landZ)
 	TFFA.log("Thu roi tai Z=" .. string.format("%.0f", landZ)
 		.. " biome=" .. TFFA.State.LastBiome .. " loai=" .. species)
-	-- Ghi bang hoc duoc: power nho nhat tung toi duoc moi biome.
 	local power = TFFA.State.ThrowPower
 	if power then
 		local known = TFFA.State.LearnedPower[TFFA.State.LastBiome]
@@ -1551,8 +1348,6 @@ function TFFA.collectCaughtAnimal()
 	end
 	table.insert(TFFA.State.ThrowHistory, { biome = TFFA.State.LastBiome, z = landZ })
 	if #TFFA.State.ThrowHistory > 50 then table.remove(TFFA.State.ThrowHistory, 1) end
-	-- 4. Di toi DIEM ROI (tinh), timeout ti le theo khoang cach:
-	-- |landZ|/16*1.5 + 15s. Neu diem roi qua xa (>800) thi teleport ho tro.
 	local dist = math.abs(landZ) + 40
 	local timeout = dist / 16 * 1.5 + TFFA.Config.CollectTimeoutBase
 	local root = TFFA.getRootPart()
@@ -1562,15 +1357,12 @@ function TFFA.collectCaughtAnimal()
 	end
 	local ok = TFFA.moveTo(CFrame.new(target), timeout)
 	if not ok then
-		-- Thu co the da di toi gan hon trong luc minh di: thu lai 1 lan
-		-- voi vi tri moi nhat cua no.
 		local primary = targetModel.PrimaryPart
 		if primary then
 			ok = TFFA.moveTo(CFrame.new(primary.Position), 20)
 		end
 	end
 	task.wait(1.5)
-	-- 5. Xac minh: model bien mat khoi Workspace moi tinh la da nhat.
 	local gone = not targetModel:IsDescendantOf(Workspace)
 	if ok and gone then
 		TFFA.State.Catches = TFFA.State.Catches + 1
@@ -1582,23 +1374,17 @@ function TFFA.collectCaughtAnimal()
 	return false
 end
 
--- ============================================================================
---  Train — tap tu dong khi dung tren pad; thoat bang nut STOP do.
---  Xac minh da vao tap trong 30s dau (nut STOP hien hoac Power/Level tang).
--- ============================================================================
 function TFFA.trainCycle()
 	if not TFFA.goTrainingSpot() then
 		TFFA.log("Khong toi duoc TrainingSpot - bo qua vong tap")
 		return false
 	end
-	-- Reset moc thoi gian: tranh break "tap cham" oan do di duong lau.
 	TFFA.State.LastLevelUpAt = os.clock()
 	local power0, level0 = TFFA.readPowerLevel()
 	local powerStart = power0
 	local lastPowerCheck = os.clock()
 	local lastPower = power0
 	local lastGainCheck = os.clock()
-	-- 1. Xac minh da vao tap trong 30s: nut STOP xuat hien hoac Power tang.
 	local started = false
 	local tStart = os.clock()
 	while os.clock() - tStart < 30 do
@@ -1619,7 +1405,6 @@ function TFFA.trainCycle()
 	local lastBonusTap = 0
 	while os.clock() - t0 < duration do
 		if not TFFA.Config.Enabled or TFFA.State.StopFlag then break end
-		-- Kiem tra con trong zone 10x10 khong; ra ngoai thi ket thuc vong tap.
 		local root = TFFA.getRootPart()
 		local center = TFFA.State.MyPlotCenter
 		if root and center then
@@ -1629,8 +1414,6 @@ function TFFA.trainCycle()
 				break
 			end
 		end
-		-- Tap bonus: tim dung nut popup (khong dung chuoi con "TAP" vi trung
-		-- "TAP TO THROW"), poll 0.2-0.3s, moi popup chi bam 1 lan.
 		if TFFA.Config.AutoTapBonus and os.clock() - lastBonusTap > 2 then
 			local bonusBtn = TFFA.findButtonByText("TAP!")
 				or TFFA.findButtonByText("BONUS")
@@ -1655,13 +1438,11 @@ function TFFA.trainCycle()
 				end
 				lastPower = power
 			end
-			-- Thoat som: du Power toi biome tiep theo (muc tieu hoc duoc).
 			local targetPower = TFFA.targetPower()
 			if targetPower and power and power >= targetPower then
 				TFFA.log("Du Power toi biome tiep theo (", tostring(power), " >= ", tostring(targetPower), ") - dung tap.")
 				break
 			end
-			-- Thoat som: toc do tang Power qua cham 2 lan check lien tiep.
 			if os.clock() - lastGainCheck > 60 then
 				lastGainCheck = os.clock()
 				if powerStart and power then
@@ -1683,7 +1464,6 @@ function TFFA.trainCycle()
 		end
 		task.wait(TFFA.triDelay(0.8, 1.6))
 	end
-	-- Thoat xa: bam nut STOP do trong UI (cach game day), khong dung remote.
 	local stopBtn = TFFA.findButtonByText("STOP")
 	if stopBtn then
 		TFFA.clickButton(stopBtn, function()
@@ -1691,7 +1471,6 @@ function TFFA.trainCycle()
 		end)
 		task.wait(1)
 	end
-	-- Dam bao dung day khoi ghe truoc khi di tiep.
 	local _, humanoid = TFFA.getCharacter()
 	if humanoid and humanoid.Sit then
 		pcall(function()
@@ -1703,8 +1482,6 @@ function TFFA.trainCycle()
 	return true
 end
 
--- Power can de toi biome tiep theo sau biome tot nhat tung dat (bang hoc
--- duoc). Chua co du lieu thi tra nil (DECIDE se nem calibration 1 phat).
 function TFFA.targetPower()
 	local best = nil
 	local bestIdx = 0
@@ -1718,20 +1495,11 @@ function TFFA.targetPower()
 	if not nextBiome then return nil end
 	local known = TFFA.State.LearnedPower[nextBiome.Name]
 	if known then return known end
-	-- Chua biet biome tiep theo can bao nhieu: muc tieu tam = power hien
-	-- tai + 100 (tap them 1 chut roi nem thu).
 	local power = TFFA.State.ThrowPower
 	if power then return power + 100 end
 	return nil
 end
 
-
--- ============================================================================
---  Quan ly plot / ban / mua — di qua GUI CUA GAME.
--- ============================================================================
--- Mo panel My Animals: nut Animals tren HUD la ImageButton icon chan thu
--- KHONG CO TEXT (tim bang Text khong bao gio thay). Poll toi da 8s cho
--- nut EQUIP BEST xuat hien trong dung panel.
 function TFFA.equipBest()
 	local incomeBefore = TFFA.readPlotIncome()
 	local btn = TFFA.findImageButton("Animal") or TFFA.findImageButton("Paw")
@@ -1745,7 +1513,6 @@ function TFFA.equipBest()
 		return TFFA.findButtonByText("EQUIP BEST") ~= nil
 	end)
 	if not opened then
-		-- Panel co the mo nhung nut EQUIP BEST o trang thai khac: poll them.
 		local t0 = os.clock()
 		while os.clock() - t0 < 8 do
 			if TFFA.findButtonByText("EQUIP BEST") then opened = true; break end
@@ -1758,7 +1525,6 @@ function TFFA.equipBest()
 	end
 	local equipBtn = TFFA.findButtonByText("EQUIP BEST")
 	local clicked = TFFA.clickButton(equipBtn, function()
-		-- Xac minh: thu nhap plot khong giam sau khi equip.
 		task.wait(1)
 		local incomeAfter = TFFA.readPlotIncome()
 		if incomeBefore and incomeAfter then return incomeAfter >= incomeBefore end
@@ -1778,16 +1544,12 @@ function TFFA.equipBest()
 	return clicked
 end
 
--- Ban: di toi vong do ActivationCircle (Y=2.61) -> menu Sell Animals tu mo
--- -> bam SELL ALL -> bam nut XAC NHAN ("Sell N animals for $X?") ->
--- xac minh tien tang hoac menu bao "NO ANIMALS IN BACKPACK".
 function TFFA.sellAll()
 	local backpackBefore = TFFA.countBackpackAnimals()
 	if backpackBefore == 0 then
 		TFFA.log("Backpack trong - khong co gi de ban.")
 		return true
 	end
-	-- BAT BUOC: EQUIP BEST truoc roi moi ban (khong thi ban mat thu ngon).
 	if TFFA.Config.AutoEquipBest then
 		if not TFFA.equipBest() then
 			TFFA.log("EQUIP BEST that bai - KHONG BAN de khoi mat thu ngon.")
@@ -1799,7 +1561,6 @@ function TFFA.sellAll()
 		TFFA.log("Khong toi duoc quai SELL - bo qua ban.")
 		return false
 	end
-	-- Poll toi da 8s cho menu Sell + nut SELL ALL (khong cho cung 2s).
 	local sellBtn = nil
 	local t0 = os.clock()
 	while os.clock() - t0 < 8 do
@@ -1816,7 +1577,6 @@ function TFFA.sellAll()
 		TFFA.log("Khong bam duoc SELL ALL.")
 		return false
 	end
-	-- Hop xac nhan xuat hien: bam YES/CONFIRM/SELL (poll 5s).
 	local confirmBtn = nil
 	local t1 = os.clock()
 	while os.clock() - t1 < 5 do
@@ -1849,12 +1609,6 @@ function TFFA.sellAll()
 	return false
 end
 
--- Quet gia LIVE tu Shop UI (anh chup that 07/11/2026): moi the co ten mon
--- (TextLabel) + nut hanh dong o day the. Nut co 3 dang: "EQUIP" (xanh, da
--- mua chua equip), "EQUIPPED" (xam, dang dung), "$150" (cam, gia tien —
--- KHONG CO nut "BUY"). Quet theo huong nut -> card -> ten mon (nut la
--- neo chac nhat vi moi the chi co 1 nut). Tra ve map ten -> {price, button,
--- status}. FOOD_LADDER chi la fallback khi scan that bai.
 function TFFA.scanShopPrices()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return {} end
@@ -1866,8 +1620,6 @@ function TFFA.scanShopPrices()
 				local up = string.upper(text)
 				local isAction = string.find(up, "EQUIP") or text:match("^%$")
 				if isAction then
-					-- Leo len tim card: tien to nho nhat chua ca nut nay
-					-- + label ten mon an.
 					local card = btn.Parent
 					local name = nil
 					local depth = 0
@@ -1897,9 +1649,6 @@ function TFFA.scanShopPrices()
 	return out
 end
 
--- Dong popup "NEW FOOD UNLOCKED!" / "YOU CAN NOW BUY ..." (xuat hien sau
--- khi mua food). Popup co nut SHOP (mo Shop) hoac nut dong X/CLOSE.
--- KHONG bao gio bam nut UPGRADE cua popup "NEW EQUIPMENT!" (no mua xa).
 function TFFA.closePopups()
 	local closed = false
 	for _, text in ipairs({ "YOU CAN NOW BUY", "NEW FOOD UNLOCKED" }) do
@@ -1928,12 +1677,6 @@ function TFFA.closePopups()
 	return closed
 end
 
--- Mua/equip mon an re nhat DANG HIEN trong Shop (Shop chi hien 3 mon):
---  1. Mon nao dang EQUIP (da mua, chua equip) -> equip no.
---  2. Mon nao dang EQUIPPED -> da co mon an roi, khong can mua.
---  3. Mon re nhat chua mua ma du tien (1.5x) -> mua no.
--- Khong co dinh Carrot: the Carrot co the khong con trong cua so 3 mon
--- sau khi da mua Apple (anh chup: Shop hien Carrot/Apple/Banana).
 function TFFA.buyCheapestVisibleFood()
 	if not TFFA.goFoodShop() then
 		TFFA.log("Khong toi duoc Food Shop - bo qua mua.")
@@ -1976,7 +1719,6 @@ function TFFA.buyCheapestVisibleFood()
 	return false
 end
 
--- Cho Shop mo: thay ten mon an trong PlayerGui (poll toi da timeout giay).
 function TFFA.waitForShopOpen(timeout)
 	local t0 = os.clock()
 	while os.clock() - t0 < (timeout or 10) do
@@ -1988,11 +1730,6 @@ function TFFA.waitForShopOpen(timeout)
 	return false
 end
 
--- Mua/equip mon an theo THE (anh chup that 07/11: nut la gia "$150", khong
--- co nut "BUY"; trang thai EQUIP/EQUIPPED/$gia). Xac minh bang SHOP (quet
--- lai the): EQUIP thanh cong khi the chuyen sang EQUIPPED; mua thanh cong
--- khi the chuyen sang EQUIP/EQUIPPED VA tien tru dung bang gia live. KHONG
--- xac minh bang Backpack Tool nua (mon an co the khong phai Tool).
 function TFFA.tryBuyFood(name)
 	if not name or name == "" then return false end
 	local entry = nil
@@ -2016,14 +1753,12 @@ function TFFA.tryBuyFood(name)
 		return false
 	end
 	local status = string.upper(cardInfo.status or "")
-	-- Mon dang dung roi: khong can bam gi them.
 	if string.find(status, "EQUIPPED") then
 		TFFA.State.EquippedFood = name
 		TFFA.log("Mon", name, "da EQUIPPED san.")
 		TFFA.noteProgress()
 		return true
 	end
-	-- Nhanh EQUIP: mon da so huu hoac gia 0 (Carrot free, da equip san).
 	if string.find(status, "EQUIP") or (ladderPrice == 0) then
 		local btn = cardInfo.button
 		if not btn then
@@ -2031,7 +1766,6 @@ function TFFA.tryBuyFood(name)
 			return false
 		end
 		local ok = TFFA.clickButton(btn, function()
-			-- Xac minh bang Shop: the phai chuyen sang EQUIPPED.
 			local scan2 = TFFA.scanShopPrices()
 			local info2 = scan2[name]
 			return info2 and string.find(string.upper(info2.status or ""), "EQUIPPED") ~= nil
@@ -2045,7 +1779,6 @@ function TFFA.tryBuyFood(name)
 		TFFA.log("Khong EQUIP duoc", name, "(the khong chuyen sang EQUIPPED).")
 		return false
 	end
-	-- Nhanh MUA (nut la gia tien, vd "$150"): chi mua khi tien >= 1.5x gia live.
 	local price = cardInfo.price or ladderPrice
 	if not price then
 		TFFA.log("Khong doc duoc gia live cua", name, "- khong doan gia, bo qua.")
@@ -2073,11 +1806,7 @@ function TFFA.tryBuyFood(name)
 		TFFA.log("Khong bam duoc nut gia cua", name)
 		return false
 	end
-	-- KHONG bam them lan 2 (khong co hop YES nao; lan 2 co the mua luon
-	-- mon tiep theo sau khi Shop render lai).
 	task.wait(1.5)
-	-- Xac minh kep bang SHOP + tien: the chuyen sang EQUIP/EQUIPPED
-	-- VA tien tru dung bang gia live.
 	local scan2 = TFFA.scanShopPrices()
 	local info2 = scan2[name]
 	local moneyAfter = TFFA.readMoney()
@@ -2088,7 +1817,6 @@ function TFFA.tryBuyFood(name)
 	if cardOk and moneyOk then
 		TFFA.log("Da mua", name, "gia", TFFA.formatMoney(price))
 		TFFA.noteProgress()
-		-- Mua xong phai bam EQUIP trong the moi dung duoc mon.
 		if info2 and info2.button and not string.find(string.upper(info2.status or ""), "EQUIPPED") then
 			TFFA.clickButton(info2.button, function()
 				local scan3 = TFFA.scanShopPrices()
@@ -2104,13 +1832,10 @@ function TFFA.tryBuyFood(name)
 	return false
 end
 
--- Nang xa: dung len be vang canh xa (khong phai trong Shop). Chi chay khi
--- AutoUpgradeBar=true (mac dinh TAT — chua kiem chung live banner).
 function TFFA.upgradeBar()
 	if not TFFA.Config.AutoUpgradeBar then return false end
 	if not TFFA.goBarUpgradePad() then return false end
 	task.wait(2)
-	-- Banner "Upgraded to ... Bar!" hoac "NEW EQUIPMENT!" la tin hieu thanh cong.
 	if #TFFA.findGuiTexts("Upgraded to") > 0 or #TFFA.findGuiTexts("NEW EQUIPMENT") > 0 then
 		TFFA.log("Da nang xa (thay banner).")
 		TFFA.noteProgress()
@@ -2120,9 +1845,6 @@ function TFFA.upgradeBar()
 	return false
 end
 
--- Hoan doi plot: ban con yeu nhat tren plot chi khi con moi >= 1.5x no
--- (tru hao phi ban). Ban le qua nut SELL trong panel Animals (chua kiem
--- chung live) nen chi log de xuat, khong tu ban.
 function TFFA.maybeSwapPlot()
 	local plotAnimals = TFFA.readPlotAnimals()
 	if #plotAnimals < TFFA.Config.PlotCapacity then return false end
@@ -2139,7 +1861,6 @@ function TFFA.maybeSwapPlot()
 	return false
 end
 
--- Claim offline earnings + qua free khi vao game (chi khi remote duoc bat).
 function TFFA.claimOffline()
 	if not TFFA.Config.AutoClaimOffline then
 		TFFA.log("AutoClaimOffline TAT (bat sau khi recon xac nhan Offline_Claim).")
@@ -2153,8 +1874,6 @@ function TFFA.claimOffline()
 	return false
 end
 
--- Mon tiep theo nen mua: mon re nhat chua co ma co the mua (tien >= 1.5x).
--- Uu tien nhay tier (mon dau tier moi) hon mua moi mon trong tier.
 function TFFA.nextFoodToBuy()
 	local owned = {}
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
@@ -2174,22 +1893,6 @@ function TFFA.nextFoodToBuy()
 	return best
 end
 
-
--- ============================================================================
---  FSM — DECIDE la "nao", moi state chi lam 1 viec roi quay ve DECIDE.
---  Thu tu uu tien (theo thu tu game day, khong phai thu tu code cu):
---   1. Chua co mon an nao -> BUY_FIRST_FOOD (equip Carrot free)
---   2. Co thu trong Backpack chua len plot + con slot -> PLACE (EQUIP BEST)
---   3. Backpack >= BackpackSellAt hoac plot day -> EQUIP roi SELL
---   4. TRAIN vs THROW theo bang LearnedPower (du lieu do duoc, khong theo
---      cam tinh): chua co du lieu -> 1 phat nem hieu chuan; du power -> nem
---      toi da ThrowsPerDecision phat; thieu power -> tap; 3 lan truot lien
---      tiep -> tap ngan roi IDLE hoi nguoi dung.
---   5. UPGRADE uu tien thap nhat, 1 mon moi lan DECIDE.
---   6. Ca 2 toggle TAT -> IDLE, log ro rang.
---  RECOVER khong teleport ve Spawn mac dinh (chi khi that su ket hoac mat
---  plot) — teleport ve Spawn roi di bo lai la 1 phan cua cam giac "di tum lum".
--- ============================================================================
 TFFA.States = {}
 
 function TFFA.States.BOOT()
@@ -2226,11 +1929,8 @@ function TFFA.States.BOOT()
 		"| Remotes:", tostring(remoteCount),
 		"| Remote calls:", TFFA.Config.RemoteCallsEnabled and "BAT" or "TAT")
 	if TFFA.Config.RemoteCallsEnabled then
-		-- Probe read-only dau tien de kiem tra pipeline remote.
 		TFFA.safeInvokeNoArg("Animations_Get")
 	end
-	-- Probe them: ten Tool trong Backpack/Character + nut anh tren HUD.
-	-- Cho biet mon an co phai Tool khong, va ten that nut Animals.
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	local bpNames = {}
 	if backpack then
@@ -2263,7 +1963,6 @@ end
 
 function TFFA.States.DECIDE()
 	TFFA.State.DecideCycles = TFFA.State.DecideCycles + 1
-	-- Gioi han phien: chay SessionMinutes phut roi nghi BreakMinutes phut.
 	if os.clock() - TFFA.State.SessionStartedAt > TFFA.Config.SessionMinutes * 60 then
 		TFFA.log("Het phien farm ", tostring(TFFA.Config.SessionMinutes),
 			" phut - nghi ", tostring(TFFA.Config.BreakMinutes), " phut roi chay tiep.")
@@ -2275,7 +1974,6 @@ function TFFA.States.DECIDE()
 		TFFA.log("Ca 2 toggle (luyen + nem) deu TAT - dung yen cho lenh.")
 		return "IDLE"
 	end
-	-- Snapshot moi (doc lai GUI moi lan, khong dung gia tri cu).
 	local money = TFFA.readMoney()
 	local power, level = TFFA.readPowerLevel()
 	if money then TFFA.State.Money = money end
@@ -2286,23 +1984,30 @@ function TFFA.States.DECIDE()
 	local backpackAnimals = TFFA.countBackpackAnimals()
 	local backpackFoods = TFFA.countBackpackFoods()
 	local bestFood = TFFA.bestOwnedFood()
+	if not TFFA.State.MyPlot then
+		local plot, center = TFFA.findMyPlot()
+		if plot then
+			TFFA.State.MyPlot = plot
+			TFFA.State.MyPlotCenter = center
+			TFFA.State.MyPlotNumber = tonumber(plot.Name:match("Plot%s*(%d+)"))
+		end
+	end
+	if not TFFA.State.MyPlot or TFFA.State.FoodBlocked
+		or TFFA.State.DecideCycles % 5 == 0 then
+		TFFA.log("DECIDE: plot=", TFFA.State.MyPlot and TFFA.State.MyPlot.Name or "?",
+			"thu tui=", tostring(backpackAnimals), "thu plot=", tostring(#plotAnimals),
+			"food=", bestFood or TFFA.State.EquippedFood or "?")
+	end
 	local hasFood = TFFA.hasFood()
-	-- 1. Dat pet len plot KHONG can mon an: uu tien truoc khi lo chuyen food
-	-- (ban cu de BUY_FIRST_FOOD len truoc nen pet trong tui khong bao gio duoc dat).
 	if backpackAnimals > 0 and #plotAnimals < TFFA.Config.PlotCapacity then
 		return "PLACE"
 	end
-	-- 2. Backpack day hoac plot day -> EQUIP roi SELL.
 	if backpackAnimals >= TFFA.Config.BackpackSellAt or #plotAnimals >= TFFA.Config.PlotCapacity then
 		return "SELL"
 	end
-	-- 3. Chua co mon an nao moi can mua/equip (toi da 3 lan, roi tam dung).
 	if not hasFood and not TFFA.State.FoodBlocked then
 		return "BUY_FIRST_FOOD"
 	end
-	-- 4. Chua xac nhan co mon an (FOOD BLOCKED): tap xa la chinh, nhung cu
-	-- 3 vong thu nem 1 phat — neu that ra da equip san thi nem se thanh
-	-- cong va mo khoa luong farm. KHONG IDLE mai o day.
 	if not hasFood then
 		if TFFA.Config.AutoThrow and TFFA.State.DecideCycles % 3 == 0 then
 			return "THROW"
@@ -2314,13 +2019,10 @@ function TFFA.States.DECIDE()
 		TFFA.log("Chua co mon an - dung yen cho (hay EQUIP mon an bang tay).")
 		return "IDLE"
 	end
-	-- 5. TRAIN vs THROW (da co mon an).
 	if TFFA.Config.AutoThrow and TFFA.Config.AutoTrain then
 		local targetPower = TFFA.targetPower()
 		if targetPower == nil then
-			-- Chua co du lieu biome nao: 1 phat nem hieu chuan.
 			if TFFA.State.Throws == 0 then return "THROW" end
-			-- Sau phat hieu chuan van chua co du lieu -> tap 1 vong ngan.
 			return "TRAIN"
 		end
 		if TFFA.State.ThrowPower and TFFA.State.ThrowPower >= targetPower then
@@ -2341,15 +2043,11 @@ end
 
 function TFFA.States.BUY_FIRST_FOOD()
 	TFFA.closePopups()
-	-- Shop noi ro mon nao dang EQUIPPED (anh chup: Apple EQUIPPED) — do la
-	-- nguon su that, khong phai Backpack Tool. Mua/equip mon re nhat dang
-	-- hien trong Shop (khong co dinh Carrot).
 	if TFFA.buyCheapestVisibleFood() then
 		TFFA.State.FoodFailStreak = 0
 		TFFA.noteProgress()
 		return "DECIDE"
 	end
-	-- Thu Carrot rieng (free) neu the cua no con hien.
 	if TFFA.tryBuyFood("Carrot") then
 		TFFA.State.FoodFailStreak = 0
 		TFFA.noteProgress()
@@ -2388,8 +2086,6 @@ function TFFA.States.TRAIN()
 end
 
 function TFFA.States.THROW()
-	-- Nem probe (chua xac nhan co mon an) chi nem 1 phat; da co mon an
-	-- thi nem toi da ThrowsPerDecision phat.
 	local maxThrows = TFFA.hasFood() and TFFA.Config.ThrowsPerDecision or 1
 	local throws = 0
 	local done = false
@@ -2415,7 +2111,6 @@ function TFFA.States.THROW()
 end
 
 function TFFA.States.UPGRADE()
-	-- Uu tien thap nhat, 1 mon moi lan DECIDE.
 	local nextFood = TFFA.nextFoodToBuy()
 	if nextFood then
 		TFFA.log("Mua nang cap:", nextFood.Name, TFFA.formatMoney(nextFood.Price))
@@ -2428,7 +2123,6 @@ function TFFA.States.UPGRADE()
 end
 
 function TFFA.States.IDLE()
-	-- Nghi giong nguoi giua cac vong (3-9s), lau hon sau moi 5 vong.
 	local rest = TFFA.triDelay(3, 9)
 	if TFFA.State.DecideCycles % TFFA.Config.IdleRestEveryCycles == 0 then
 		rest = TFFA.triDelay(10, 20)
@@ -2446,11 +2140,6 @@ function TFFA.States.RECOVER()
 			" lan lien tiep - DUNG AN TOAN, gui log cho Muse.")
 		return "STOPPED"
 	end
-	-- Ladder phuc hoi: L0 thu lai -> L1 dung + nhay -> L2 teleport toi dich
-	-- gan nhat (khong phai Spawn) -> L3 teleport Spawn + probe mini ->
-	-- L4 respawn -> L5 dung an toan. O day lam L2/L3 toi thieu:
-	--  - Neu mat plot: tim lai plot.
-	--  - Neu nhan vat ket: teleport toi Spawn roi quay ve DECIDE.
 	local plot, center = TFFA.findMyPlot()
 	if plot then
 		TFFA.State.MyPlot = plot
@@ -2477,8 +2166,6 @@ function TFFA.States.STOPPED()
 	return "STOPPED"
 end
 
--- Dispatcher: moi state chay trong pcall rieng — 1 loi chi lam hong 1
--- state, khong giet ca vong farm (v1.x: 1 loi trong trainCycle giet ca vong).
 function TFFA.step()
 	local current = TFFA.CurrentState or "BOOT"
 	local fn = TFFA.States[current]
@@ -2510,7 +2197,6 @@ function TFFA.mainLoop()
 	while TFFA.Config.Enabled and not TFFA.State.StopFlag do
 		local ok = TFFA.step()
 		if not ok then break end
-		-- Watchdog: khong co tien bo that su trong 600s -> dung an toan.
 		if os.clock() - TFFA.State.LastProgressAt > 600 then
 			TFFA.log("WATCHDOG: khong co tien bo that su trong 600s - DUNG AN TOAN.")
 			break
@@ -2521,9 +2207,6 @@ function TFFA.mainLoop()
 	TFFA.log("Farm da dung. Neu can chay lai, mo file va EXECUTE lai.")
 end
 
--- ============================================================================
---  UI — 2 nut rieng (luyen / nem) + hien thi state + session timer.
--- ============================================================================
 function TFFA.buildUI()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return end
@@ -2577,8 +2260,6 @@ function TFFA.buildUI()
 	throwBtn.Parent = frame
 	local statsLabel = makeLabel("Stats", "Nem: 0 | Nhat: 0", 130)
 	local sessionLabel = makeLabel("Session", "Phien: 0 phut", 150)
-	local note = makeLabel("Note", "Tat recon truoc khi chay Main!", 175)
-	note.TextColor3 = Color3.fromRGB(255, 200, 100)
 	local stopBtn = Instance.new("TextButton")
 	stopBtn.Name = "StopBtn"
 	stopBtn.Size = UDim2.new(1, -10, 0, 30)
@@ -2618,10 +2299,6 @@ function TFFA.buildUI()
 	end)
 end
 
--- ============================================================================
---  Anti-AFK — nhich nho 2-4 studs (khong click (0,0) de tranh bam nham UI),
---  bo qua khi dang ngoi tap, hoan lai khi dang nem. Jitter 420-660s.
--- ============================================================================
 function TFFA.startAntiAfk()
 	task.spawn(function()
 		while not TFFA.State.StopFlag do
@@ -2634,7 +2311,6 @@ function TFFA.startAntiAfk()
 					VirtualUser:ClickButton2(Vector2.new(0, 0))
 				end)
 				if not ok then
-					-- Fallback: nhich nho 2-4 studs thay vi click.
 					local root = TFFA.getRootPart()
 					if root then
 						pcall(function()
@@ -2655,9 +2331,6 @@ function TFFA.Stop()
 	TFFA.log("TFFA Main da nhan lenh dung.")
 end
 
--- ============================================================================
---  BOOT
--- ============================================================================
 if getgenv then
 	getgenv().__TFFA_MAIN = TFFA
 end
@@ -2665,28 +2338,6 @@ TFFA.buildUI()
 TFFA.startAntiAfk()
 TFFA.mainLoop()
 
--- ============================================================================
---  KẾ HOẠCH TEST TUNG PHA (dat getgenv().TFFA_MAIN_CONFIG truoc khi chay file;
---  DUNG va doc log sau moi pha; <= 5 phut/pha; pha nao that bai 2 lan lien
---  tiep thi dung va gui log + anh man hinh cho Muse):
---   Pha 0 Probe: mac dinh, dung tren plot cua minh.
---     PASS: log in "v2.0", plot dung, tien dung so voi HUD, Level dung,
---     meter hien khi nem tay 1 lan.
---   Pha 1 Buy Carrot: chi AutoUpgradeFood=true (tat cac toggle khac).
---     PASS: Carrot trong Backpack, tien khong doi.
---   Pha 2 Train 1 phut: chi AutoTrain=true, TrainMaxMinutes=1.
---     PASS: toi TrainingSpot, len xa, level/power tang, khong "Loi vong farm".
---   Pha 3 Throw 1 lan: chi AutoThrow=true, ThrowsPerDecision=1.
---     PASS: toi vach nem, thay meter, click >= 17, log "Thu roi tai Z=...
---     biome=...", di toi nhat.
---   Pha 4 Collect + place: AutoThrow + AutoEquipBest.
---     PASS: so thu tren plot +1, thu nhap plot thanh so $/s.
---   Pha 5 Sell: chi AutoSell=true, can >= 1 thu thua trong Backpack.
---     PASS: tien tang, thu tren plot khong bi ban.
---   Pha 6 Long farm: mac dinh, 15 phut, log "Nghi..." deu dan.
---     Chi chay dai hon khi Pha 6 pass. KHONG BAO GIO chay 24/7.
---  KHI BAO LOI, gui kem 3 thu:
---   1. Toan bo log console tu dong boot (gom khoi PROBE + MoneySource).
---   2. Anh man hinh game (trang thai 2 nut Tap/Nem, vi tri nhan vat, GUI nao dang mo).
---   3. 1 dong: dung o pha nao + thoi gian trong log.
--- ============================================================================
+-- Test tung pha (<=5 phut/pha, dung va doc log sau moi pha): 0 Probe,
+-- 1 mua Carrot, 2 tap 1 phut, 3 nem 1 lan, 4 nhat + dat plot, 5 ban, 6 farm 15 phut.
+-- Bao loi gui kem: log console tu boot + anh man hinh + dung o pha nao.
