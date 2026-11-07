@@ -102,7 +102,7 @@ local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local TFFA = {}
 
-TFFA.BUILD = "2026-11-07 v2.0-tutorial-first"
+TFFA.BUILD = "2026-11-07 v2.0.1-move-fix"
 TFFA.PLACE_ID = 120219252362013
 
 -- ============================================================================
@@ -1114,15 +1114,21 @@ function TFFA.moveTo(cf, timeout)
 	local teleports = 0
 	local lastDist = TFFA.distXZ(root.Position, target)
 	local lastImprove = os.clock()
-	local lastReissue = 0
 	local path = nil
 	local waypoints = nil
 	local wpIndex = 1
+	local issuedTarget = nil
+	local lastIssue = 0
+	local function issueMove(pos)
+		humanoid:MoveTo(pos)
+		issuedTarget = pos
+		lastIssue = os.clock()
+	end
 	local function computePath()
 		local ok, p = pcall(function()
 			return PathfindingService:CreatePath({
 				AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
-				AgentCanClimb = false, WaypointSpacing = 4,
+				AgentCanClimb = false, WaypointSpacing = 8,
 				Costs = { Water = math.huge },
 			})
 		end)
@@ -1143,8 +1149,7 @@ function TFFA.moveTo(cf, timeout)
 	end
 	local usePath = computePath()
 	if not usePath then
-		humanoid:MoveTo(target)
-		lastReissue = os.clock()
+		issueMove(target)
 	end
 	while os.clock() - t0 < timeout do
 		if not stillValid() then
@@ -1161,36 +1166,31 @@ function TFFA.moveTo(cf, timeout)
 			lastDist = dist
 			lastImprove = os.clock()
 		end
+		-- Muc tieu hien tai: waypoint ke tiep (bo qua waypoint da toi gan),
+		-- hoac dich cuoi neu het waypoint / khong co path.
+		local desired = target
 		if usePath and waypoints then
 			local wp = waypoints[wpIndex]
+			while wp and TFFA.distXZ(root.Position, wp.Position) < 3 do
+				wpIndex = wpIndex + 1
+				wp = waypoints[wpIndex]
+			end
 			if wp then
-				local wpDist = TFFA.distXZ(root.Position, wp.Position)
-				if wpDist < 4 then
-					wpIndex = wpIndex + 1
-					wp = waypoints[wpIndex]
+				-- Chi nhay khi da toi gan waypoint nhay (khong nhay lien tuc).
+				if wp.Action == Enum.PathWaypointAction.Jump
+					and TFFA.distXZ(root.Position, wp.Position) < 5 then
+					pcall(function() humanoid.Jump = true end)
 				end
-				if wp then
-					if wp.Action == Enum.PathWaypointAction.Jump then
-						pcall(function() humanoid.Jump = true end)
-					end
-					if os.clock() - lastReissue > 3 then
-						humanoid:MoveTo(wp.Position)
-						lastReissue = os.clock()
-					end
-				else
-					humanoid:MoveTo(target)
-					lastReissue = os.clock()
-				end
-			else
-				humanoid:MoveTo(target)
-				lastReissue = os.clock()
+				desired = wp.Position
 			end
-		else
-			-- Khong co path: goi lai MoveTo moi 3-5s de reset timeout 8s cua engine.
-			if os.clock() - lastReissue > 3 then
-				humanoid:MoveTo(target)
-				lastReissue = os.clock()
-			end
+		end
+		-- QUAN TRONG: goi MoveTo NGAY khi doi muc tieu (waypoint moi), va
+		-- goi lai moi 4s de reset timeout 8s cua engine. Ban v2.0 chi goi
+		-- lai sau 3s nen nhan vat di 4 studs roi dung doi -> "let let":
+		-- di - dung - di - dung suot quang duong.
+		if not issuedTarget or TFFA.distXZ(desired, issuedTarget) > 1
+			or os.clock() - lastIssue > 4 then
+			issueMove(desired)
 		end
 		-- Ket: khoang cach toi dich khong giam trong 3s.
 		if os.clock() - lastImprove > 3 then
@@ -1215,9 +1215,9 @@ function TFFA.moveTo(cf, timeout)
 				lastDist = TFFA.distXZ(root.Position, target)
 				lastImprove = os.clock()
 				usePath = computePath()
+				issuedTarget = nil
 				if not usePath then
-					humanoid:MoveTo(target)
-					lastReissue = os.clock()
+					issueMove(target)
 				end
 			end
 		end
@@ -2417,7 +2417,7 @@ TFFA.startAntiAfk()
 TFFA.mainLoop()
 
 -- ============================================================================
---  K? HO?CH TEST TUNG PHA (dat getgenv().TFFA_MAIN_CONFIG truoc khi chay file;
+--  KẾ HOẠCH TEST TUNG PHA (dat getgenv().TFFA_MAIN_CONFIG truoc khi chay file;
 --  DUNG va doc log sau moi pha; <= 5 phut/pha; pha nao that bai 2 lan lien
 --  tiep thi dung va gui log + anh man hinh cho Muse):
 --   Pha 0 Probe: mac dinh, dung tren plot cua minh.
