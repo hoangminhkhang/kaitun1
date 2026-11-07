@@ -8181,8 +8181,21 @@ local function applyLowGraphics(enabled)
     local function keepDisabled(object)
         if Runtime.LowGraphicsWatched[object] then return end
         Runtime.LowGraphicsWatched[object] = true
-        connect(object:GetPropertyChangedSignal("Enabled"), function()
+        -- SURRENDER GUARD: gameplay effects (SPRINKLER mist, bee pollen...) la
+        -- game chu dong bat lai emitter lien tuc - cuoc chien Enabled
+        -- game-bat/minh-tat o tan so signal = FPS DROP dung luc sprinkler
+        -- chay. Sau vai lan thua thi NGUNG canh tranh (disconnect hook):
+        -- vai emitter chay than thien hon hang nghin property war/frame.
+        local reEnables = 0
+        local conn
+        conn = connect(object:GetPropertyChangedSignal("Enabled"), function()
             if Runtime.Running and Config.LowGraphics and object.Parent and object.Enabled then
+                reEnables += 1
+                if reEnables > 8 then
+                    Runtime.LowGraphicsWatched[object] = nil
+                    pcall(function() conn:Disconnect() end)
+                    return
+                end
                 object.Enabled = false
             end
         end)
@@ -8569,6 +8582,37 @@ local function applyLowGraphics(enabled)
     end)
     task.defer(function()
         remoteCall("PlayerSettingsEvent", "PollenPopUps", false)
+    end)
+    -- FPS WATCHDOG: do RenderStepped thuc te; fps<=30 keo dai 5s -> in DUNG
+    -- MOT DONG kem state + so token trong field (de bao loi co data, khong
+    -- doan - vi du: "fps 18 | FarmToken | tokens=287 | Pine Tree Forest").
+    task.spawn(function()
+        if not RunService or not RunService.RenderStepped then return end
+        local accum, frames = 0, 0
+        local windowStart = os.clock()
+        RunService.RenderStepped:Connect(function(delta)
+            accum += delta
+            frames += 1
+        end)
+        while Runtime.Running do
+            task.wait(5)
+            local elapsed = os.clock() - windowStart
+            windowStart = os.clock()
+            if elapsed > 0.5 and frames > 0 then
+                local fps = frames / elapsed
+                if fps <= 30 then
+                    local tokens = 0
+                    pcall(function()
+                        local folder = workspace:FindFirstChild("Collectibles")
+                        tokens = folder and #folder:GetChildren() or 0
+                    end)
+                    warn(string.format("[BSS Kaitun] fps %d | %s | %s | tokens=%d | %s",
+                        math.floor(fps + 0.5), tostring(Runtime.State),
+                        tostring(Runtime.Detail), tokens, tostring(Runtime.CurrentField)))
+                end
+            end
+            accum, frames = 0, 0
+        end
     end)
     -- Hide every other player: their characters + accessories + tools are one of
     -- the biggest lag sources on busy servers. Local-only hiding (render), no effect
