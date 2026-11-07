@@ -102,7 +102,8 @@ local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local TFFA = {}
 
-TFFA.BUILD = "2026-11-07 v2.0.1-move-fix"
+TFFA.VERSION = "v2.0.3"
+TFFA.BUILD = "2026-11-07 v2.0.3-meter-fix"
 TFFA.PLACE_ID = 120219252362013
 
 -- ============================================================================
@@ -319,6 +320,7 @@ TFFA.State = {
 	ThrowHistory = {}, LearnedPower = {}, LastLevelUpAt = os.clock(),
 	Status = "Dang khoi dong...", StopFlag = false, Throwing = false,
 	StuckStreak = 0, LastProgressAt = os.clock(), NoProgressCycles = 0,
+	FoodFailStreak = 0, FoodBlocked = false, FoodConfirmed = false,
 	RecoveryCount = 0, TeleportsThisHour = 0, TeleportHourStart = os.clock(),
 	SessionStartedAt = os.clock(), DecideCycles = 0,
 }
@@ -549,27 +551,70 @@ function TFFA.findCardByName(name, ancestor)
 	return nil
 end
 
--- Doc gia tri meter: uu tien fill Frame (ti le 0-1), fallback label so
--- CHI TIN khi gia tri THAY DOI theo thoi gian (label tinh loai).
--- Tra ve (value 0-20, source) hoac (nil, nil).
+TFFA.MeterSource = nil -- {kind="fill"|"label", inst=GuiObject} — nguon meter da tim duoc
+
+-- Doc gia tri meter (0-20). Uu tien fill Frame (Size.X.Scale 0->1), fallback
+-- label so. Chi tin nguon nao THAY DOI theo thoi gian (label/frame tinh
+-- loai). Nguon tim duoc 1 lan se duoc nho lai (TFFA.MeterSource) de doc
+-- nhanh moi frame sau do thay vi tim lai lien tuc.
 function TFFA.findMeterValue()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return nil, nil end
-	-- Cach 1: fill Frame trong khung meter — Size.X.Scale chay 0->1.
+	-- Doc nhanh tu nguon da tim duoc truoc do.
+	if TFFA.MeterSource and TFFA.MeterSource.inst
+		and TFFA.MeterSource.inst.Parent ~= nil then
+		local src = TFFA.MeterSource
+		if src.kind == "fill" then
+			local ok, scale = pcall(function() return src.inst.Size.X.Scale end)
+			if ok and scale and scale >= 0 and scale <= 1 then
+				return scale * 20, "fill:" .. src.inst.Name
+			end
+		else
+			local ok, text = pcall(function() return src.inst.Text end)
+			if ok and type(text) == "string" then
+				local num = tonumber(text)
+				if num and num >= 0 and num <= 20 then
+					return num, "label:" .. src.inst.Name
+				end
+			end
+		end
+		TFFA.MeterSource = nil
+	end
+	-- Tim moi: gom cac frame co the la fill trong khung meter/throw/power.
+	local cands = {}
 	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("Frame") and inst.Name ~= "" then
-			local hay = string.lower(inst.Name .. " " .. (inst.Parent and inst.Parent.Name or ""))
-			if (string.find(hay, "meter") or string.find(hay, "throw"))
-				and (string.find(hay, "fill") or string.find(hay, "bar") or string.find(hay, "arrow")) then
+		if inst:IsA("Frame") and TFFA.isVisible(inst) then
+			local parentName = inst.Parent and inst.Parent.Name or ""
+			local grandName = (inst.Parent and inst.Parent.Parent and inst.Parent.Parent.Name) or ""
+			local hay = string.lower(inst.Name .. " " .. parentName .. " " .. grandName)
+			if string.find(hay, "meter") or string.find(hay, "throw")
+				or string.find(hay, "power") or string.find(hay, "slider") then
 				local ok, scale = pcall(function() return inst.Size.X.Scale end)
 				if ok and scale and scale > 0 and scale <= 1 then
-					return scale * 20, "fill:" .. inst.Name
+					table.insert(cands, { inst = inst, scale1 = scale })
 				end
 			end
 		end
 	end
-	-- Cach 2: label so, chi tin neu thay doi trong 0.3s.
-	local candidates = {}
+	if #cands > 0 then
+		-- Lay mau 2 lan cach 0.1s: frame nao thay doi moi la meter dang chay.
+		task.wait(0.1)
+		for _, c in ipairs(cands) do
+			local ok, scale2 = pcall(function() return c.inst.Size.X.Scale end)
+			if ok and scale2 and math.abs(scale2 - c.scale1) > 0.01 then
+				TFFA.MeterSource = { kind = "fill", inst = c.inst }
+				TFFA.log("Tim thay thanh meter: fill frame", c.inst.Name)
+				return scale2 * 20, "fill:" .. c.inst.Name
+			end
+		end
+		-- Khong cai nao thay doi: dung tam ung vien duy nhat neu no o giua.
+		if #cands == 1 and cands[1].scale1 > 0.05 and cands[1].scale1 < 0.95 then
+			TFFA.MeterSource = { kind = "fill", inst = cands[1].inst }
+			return cands[1].scale1 * 20, "fill?:" .. cands[1].inst.Name
+		end
+	end
+	-- Fallback: label so, chi tin neu thay doi trong 0.15s.
+	local samples = {}
 	for _, inst in ipairs(gui:GetDescendants()) do
 		if inst:IsA("TextLabel") and TFFA.isVisible(inst) then
 			local ok, text = pcall(function() return inst.Text end)
@@ -581,19 +626,24 @@ function TFFA.findMeterValue()
 					local hay = string.lower(inst.Name .. " " .. parentName .. " " .. grandName)
 					if string.find(hay, "throw") or string.find(hay, "meter")
 						or string.find(hay, "power") or string.find(hay, "slider") then
-						table.insert(candidates, inst)
+						table.insert(samples, { inst = inst, t1 = text })
 					end
 				end
 			end
 		end
 	end
-	for _, inst in ipairs(candidates) do
-		local ok1, t1 = pcall(function() return inst.Text end)
+	if #samples > 0 then
 		task.wait(0.15)
-		local ok2, t2 = pcall(function() return inst.Text end)
-		if ok1 and ok2 and t1 ~= t2 then
-			local num = tonumber(t2)
-			if num then return num, "label:" .. inst.Name end
+		for _, s in ipairs(samples) do
+			local ok, t2 = pcall(function() return s.inst.Text end)
+			if ok and t2 ~= s.t1 then
+				local num = tonumber(t2)
+				if num then
+					TFFA.MeterSource = { kind = "label", inst = s.inst }
+					TFFA.log("Tim thay thanh meter: label so", s.inst.Name)
+					return num, "label:" .. s.inst.Name
+				end
+			end
 		end
 	end
 	return nil, nil
@@ -1020,6 +1070,10 @@ function TFFA.bestOwnedFood()
 			if owned[name] then best = name; break end
 		end
 	end
+	-- Mon an co the khong phai Tool: nho trang thai EQUIPPED tu Shop.
+	if not best and TFFA.State.EquippedFood then
+		return TFFA.State.EquippedFood
+	end
 	return best
 end
 
@@ -1049,6 +1103,15 @@ function TFFA.heldFood()
 		if tool:IsA("Tool") and TFFA.FOOD_SET[tool.Name] then return tool.Name end
 	end
 	return nil
+end
+
+-- Co mon an de nem khong? (Tool trong tui/tay, hoac da nho tu Shop EQUIPPED,
+-- hoac da xac nhan bang 1 cu nem thanh cong.)
+function TFFA.hasFood()
+	return TFFA.bestOwnedFood() ~= nil
+		or TFFA.countBackpackFoods() > 0
+		or TFFA.State.EquippedFood ~= nil
+		or TFFA.State.FoodConfirmed
 end
 
 
@@ -1291,45 +1354,25 @@ function TFFA.waitForResultText(timeout)
 	return nil
 end
 
-function TFFA.doOneThrow()
-	-- Moi lan nem: equip lai mon an + kiem tra con tren tay (food co the
-	-- bi tieu thu sau moi lan nem). Het food thi dung, khong poll vo ich.
-	local food = TFFA.Config.Food
-	if food == "" or food == nil then food = TFFA.bestOwnedFood() end
-	if not food then
-		TFFA.log("Khong co mon an nao trong Backpack - can mua/equip Carrot truoc.")
-		return false
-	end
-	if not TFFA.equipFood(food) then
-		TFFA.log("Khong equip duoc mon an:", tostring(food))
-		return false
-	end
-	task.wait(0.5)
-	if TFFA.heldFood() ~= food then
-		TFFA.log("Mon an khong nam tren tay sau khi equip:", tostring(food))
-		return false
-	end
-	if not TFFA.goThrowLine() then
-		TFFA.log("Khong toi duoc vach nem - bo qua luot nay")
-		return false
-	end
-	TFFA.State.Throwing = true
-	-- Cho UI nem san sang, KHONG cham man hinh truoc (cham la nem luon).
-	if not TFFA.waitForThrowUI(10) then
-		TFFA.log("Khong thay UI nem (TAP TO THROW) sau 10s - bo qua luot nay.")
-		TFFA.log("  Hay nem tay 1 lan va gui anh GUI nem cho Muse de chinh do tim meter.")
-		TFFA.State.Throwing = false
-		return false
-	end
-	local target = TFFA.pickMeterTarget()
-	TFFA.log("Nem voi mon:", food, "| muc tieu meter:", string.format("%.1f", target))
+-- Canh thanh meter (thanh food) va tu nem: poll lien tuc, bam khi meter
+-- len toi muc tieu tren canh len (rising edge), tru hao do tre input.
+-- Log gia tri meter moi 0.5s de thay ro dang doc duoc meter hay khong.
+-- Tra ve true khi da bam, false khi het gio khong thay meter.
+function TFFA.watchMeterAndThrow(target)
+	target = target or TFFA.pickMeterTarget()
+	TFFA.log("Canh meter, muc tieu:", string.format("%.1f", target))
 	local t0 = os.clock()
-	local clicked = false
 	local prev = nil
+	local lastLog = 0
 	while os.clock() - t0 < TFFA.Config.ThrowTimeout do
 		local meter = TFFA.findMeterValue()
 		if meter then
-			-- Rising edge: thay gia tri dang TANG qua muc tieu thi bam ngay,
+			if os.clock() - lastLog > 0.5 then
+				lastLog = os.clock()
+				TFFA.log("Meter:", string.format("%.1f", meter),
+					"-> muc tieu", string.format("%.1f", target))
+			end
+			-- Rising edge: gia tri dang TANG qua muc tieu thi bam ngay,
 			-- tru hao do tre input ~0.1s (bam o ~target-0.5 de roi vao target).
 			if prev and meter >= prev and meter >= target - 0.5 then
 				task.wait(TFFA.randRange(0.08, 0.35))
@@ -1350,17 +1393,58 @@ function TFFA.doOneThrow()
 						end
 					end)
 				end
-				clicked = true
-				break
+				TFFA.log("Da bam nem o meter", string.format("%.1f", meter))
+				return true
 			end
 			prev = meter
 		end
 		task.wait(TFFA.randRange(0.02, 0.03))
 	end
+	TFFA.log("Khong thay meter len toi muc tieu trong "
+		.. tostring(TFFA.Config.ThrowTimeout) .. "s - co the khong doc duoc thanh meter.")
+	TFFA.log("  Hay nem tay 1 lan, chup anh GUI luc meter dang chay roi gui cho Muse.")
+	return false
+end
+
+function TFFA.doOneThrow()
+	local food = TFFA.Config.Food
+	if food == "" or food == nil then food = TFFA.bestOwnedFood() end
+	if not food then food = TFFA.State.EquippedFood end
+	if food then
+		-- Equip thu bang Tool; neu game khong dung Tool cho mon an thi van
+		-- thu nem dua tren trang thai EQUIPPED cua Shop.
+		local equipped = TFFA.equipFood(food)
+		if not equipped and TFFA.State.EquippedFood ~= food then
+			TFFA.log("Khong equip duoc mon an:", tostring(food))
+			return false
+		end
+		task.wait(0.5)
+	else
+		-- Khong biet ten mon an: van thu ra vach nem — neu that ra da co
+		-- mon an equip san thi UI nem se hien (day la cach kiem tra).
+		TFFA.log("Khong biet ten mon an - thu ra vach nem de kiem tra.")
+	end
+	if not TFFA.goThrowLine() then
+		TFFA.log("Khong toi duoc vach nem - bo qua luot nay")
+		return false
+	end
+	TFFA.State.Throwing = true
+	-- Cho UI nem san sang, KHONG cham man hinh truoc (cham la nem luon).
+	if not TFFA.waitForThrowUI(10) then
+		TFFA.log("Khong thay UI nem (TAP TO THROW) sau 10s - bo qua luot nay.")
+		TFFA.log("  Hay nem tay 1 lan va gui anh GUI nem cho Muse de chinh do tim meter.")
+		TFFA.State.Throwing = false
+		return false
+	end
+	-- UI nem da hien = chac chan co mon an equip san.
+	TFFA.State.FoodConfirmed = true
+	TFFA.State.FoodBlocked = false
+	TFFA.State.FoodFailStreak = 0
+	local target = TFFA.pickMeterTarget()
+	TFFA.log("Nem voi mon:", tostring(food), "| muc tieu meter:", string.format("%.1f", target))
+	local clicked = TFFA.watchMeterAndThrow(target)
 	TFFA.State.Throwing = false
 	if not clicked then
-		TFFA.log("Khong thay meter len toi muc tieu trong "
-			.. tostring(TFFA.Config.ThrowTimeout) .. "s - bo qua luot nay.")
 		TFFA.State.Misses = TFFA.State.Misses + 1
 		return false
 	end
@@ -1370,6 +1454,7 @@ function TFFA.doOneThrow()
 	local result = TFFA.waitForResultText(5)
 	if result then
 		TFFA.log("Ket qua nem:", tostring(result))
+		TFFA.State.FoodConfirmed = true
 	else
 		TFFA.log("Khong thay chu PERFECT/GREAT sau khi nem - co the nem hong hoac UI khac.")
 	end
@@ -1650,9 +1735,10 @@ end
 function TFFA.equipBest()
 	local incomeBefore = TFFA.readPlotIncome()
 	local btn = TFFA.findImageButton("Animal") or TFFA.findImageButton("Paw")
-		or TFFA.findButtonByText("Animals")
+		or TFFA.findImageButton("Pet") or TFFA.findButtonByText("Animals")
 	if not btn then
 		TFFA.log("Khong tim thay nut Animals tren HUD (icon chan thu) - khong mo duoc panel.")
+		TFFA.log("  Xem dong PROBE ImageButton o log boot de biet ten that cua nut.")
 		return false
 	end
 	local opened = TFFA.clickButton(btn, function()
@@ -1763,42 +1849,47 @@ function TFFA.sellAll()
 	return false
 end
 
--- Quet gia LIVE tu Shop UI: moi the co ten mon + gia $ + nut (BUY/EQUIP/
--- EQUIPPED). Tra ve map ten -> {price, button, status}. FOOD_LADDER chi la
--- fallback khi scan that bai.
+-- Quet gia LIVE tu Shop UI (anh chup that 07/11/2026): moi the co ten mon
+-- (TextLabel) + nut hanh dong o day the. Nut co 3 dang: "EQUIP" (xanh, da
+-- mua chua equip), "EQUIPPED" (xam, dang dung), "$150" (cam, gia tien —
+-- KHONG CO nut "BUY"). Quet theo huong nut -> card -> ten mon (nut la
+-- neo chac nhat vi moi the chi co 1 nut). Tra ve map ten -> {price, button,
+-- status}. FOOD_LADDER chi la fallback khi scan that bai.
 function TFFA.scanShopPrices()
 	local gui = TFFA.getPlayerGui()
 	if not gui then return {} end
 	local out = {}
-	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("TextLabel") then
-			local ok, text = pcall(function() return inst.Text end)
-			if ok and type(text) == "string" and TFFA.FOOD_SET[text] then
-				local card = TFFA.findCardByName(text)
-				if card then
-					local price = nil
-					local button = nil
-					local status = "?"
-					for _, desc in ipairs(card:GetDescendants()) do
-						if desc:IsA("TextLabel") then
-							local ok2, t2 = pcall(function() return desc.Text end)
-							if ok2 and type(t2) == "string" and string.find(t2, "%$") then
-								local v = TFFA.parseMoney(t2)
-								if v and v >= 0 then price = v end
-							end
-						end
-						if desc:IsA("TextButton") or desc:IsA("ImageButton") then
-							local ok3, t3 = pcall(function() return desc.Text end)
-							if ok3 and type(t3) == "string" and t3 ~= "" then
-								local up = string.upper(t3)
-								if string.find(up, "BUY") or string.find(up, "EQUIP") then
-									button = desc
-									status = t3
+	for _, btn in ipairs(gui:GetDescendants()) do
+		if (btn:IsA("TextButton") or btn:IsA("ImageButton")) and TFFA.isVisible(btn) then
+			local ok, text = pcall(function() return btn.Text end)
+			if ok and type(text) == "string" and text ~= "" then
+				local up = string.upper(text)
+				local isAction = string.find(up, "EQUIP") or text:match("^%$")
+				if isAction then
+					-- Leo len tim card: tien to nho nhat chua ca nut nay
+					-- + label ten mon an.
+					local card = btn.Parent
+					local name = nil
+					local depth = 0
+					while card and depth < 5 do
+						for _, desc in ipairs(card:GetDescendants()) do
+							if desc:IsA("TextLabel") then
+								local ok2, t2 = pcall(function() return desc.Text end)
+								if ok2 and type(t2) == "string" and TFFA.FOOD_SET[t2] then
+									name = t2
+									break
 								end
 							end
 						end
+						if name then break end
+						card = card.Parent
+						depth = depth + 1
 					end
-					out[text] = { price = price, button = button, status = status }
+					if name and not out[name] then
+						local price = nil
+						if text:match("^%$") then price = TFFA.parseMoney(text) end
+						out[name] = { price = price, button = btn, status = text }
+					end
 				end
 			end
 		end
@@ -1806,10 +1897,102 @@ function TFFA.scanShopPrices()
 	return out
 end
 
--- Mua/equip mon an theo THE (khong bam nut BUY dau tien tim duoc).
---  - Mon gia 0 hoac da so huu -> nhanh EQUIP (khong phai BUY).
---  - Mon chua mua -> chi bam nut trong dung the cua mon do; xac minh kep:
---    tien tru DUNG bang gia live VA mon xuat hien trong Backpack.
+-- Dong popup "NEW FOOD UNLOCKED!" / "YOU CAN NOW BUY ..." (xuat hien sau
+-- khi mua food). Popup co nut SHOP (mo Shop) hoac nut dong X/CLOSE.
+-- KHONG bao gio bam nut UPGRADE cua popup "NEW EQUIPMENT!" (no mua xa).
+function TFFA.closePopups()
+	local closed = false
+	for _, text in ipairs({ "YOU CAN NOW BUY", "NEW FOOD UNLOCKED" }) do
+		if #TFFA.findGuiTexts(text) > 0 then
+			local closeBtn = TFFA.findButtonByText("X") or TFFA.findButtonByText("CLOSE")
+			if closeBtn then
+				TFFA.clickButton(closeBtn)
+				closed = true
+			else
+				local shopBtn = TFFA.findButtonByText("SHOP")
+				if shopBtn then
+					TFFA.clickButton(shopBtn)
+					closed = true
+				end
+			end
+			task.wait(0.5)
+		end
+	end
+	if #TFFA.findGuiTexts("NEW EQUIPMENT") > 0 then
+		local closeBtn = TFFA.findButtonByText("X") or TFFA.findButtonByText("CLOSE")
+		if closeBtn then
+			TFFA.clickButton(closeBtn)
+			closed = true
+		end
+	end
+	return closed
+end
+
+-- Mua/equip mon an re nhat DANG HIEN trong Shop (Shop chi hien 3 mon):
+--  1. Mon nao dang EQUIP (da mua, chua equip) -> equip no.
+--  2. Mon nao dang EQUIPPED -> da co mon an roi, khong can mua.
+--  3. Mon re nhat chua mua ma du tien (1.5x) -> mua no.
+-- Khong co dinh Carrot: the Carrot co the khong con trong cua so 3 mon
+-- sau khi da mua Apple (anh chup: Shop hien Carrot/Apple/Banana).
+function TFFA.buyCheapestVisibleFood()
+	if not TFFA.goFoodShop() then
+		TFFA.log("Khong toi duoc Food Shop - bo qua mua.")
+		return false
+	end
+	if not TFFA.waitForShopOpen(10) then
+		TFFA.log("Shop khong mo sau 10s - bo qua mua.")
+		return false
+	end
+	local scan = TFFA.scanShopPrices()
+	for name, info in pairs(scan) do
+		local status = string.upper(info.status or "")
+		if string.find(status, "EQUIP") and not string.find(status, "EQUIPPED") then
+			TFFA.log("Mon da mua, can EQUIP:", name)
+			return TFFA.tryBuyFood(name)
+		end
+	end
+	for name, info in pairs(scan) do
+		if string.find(string.upper(info.status or ""), "EQUIPPED") then
+			TFFA.State.EquippedFood = name
+			TFFA.log("Mon dang EQUIPPED trong Shop:", name)
+			return true
+		end
+	end
+	local money = TFFA.readMoney() or 0
+	local cheapest, cheapestPrice = nil, nil
+	for name, info in pairs(scan) do
+		local price = info.price
+		if price and price > 0 and money >= price * 1.5 then
+			if not cheapestPrice or price < cheapestPrice then
+				cheapest, cheapestPrice = name, price
+			end
+		end
+	end
+	if cheapest then
+		return TFFA.tryBuyFood(cheapest)
+	end
+	TFFA.log("Khong co mon an nao trong Shop hien tai mua/equip duoc (tien:",
+		TFFA.formatMoney(money), ")")
+	return false
+end
+
+-- Cho Shop mo: thay ten mon an trong PlayerGui (poll toi da timeout giay).
+function TFFA.waitForShopOpen(timeout)
+	local t0 = os.clock()
+	while os.clock() - t0 < (timeout or 10) do
+		for _, food in ipairs(TFFA.ALL_FOODS) do
+			if #TFFA.findGuiTexts(food) > 0 then return true end
+		end
+		task.wait(0.3)
+	end
+	return false
+end
+
+-- Mua/equip mon an theo THE (anh chup that 07/11: nut la gia "$150", khong
+-- co nut "BUY"; trang thai EQUIP/EQUIPPED/$gia). Xac minh bang SHOP (quet
+-- lai the): EQUIP thanh cong khi the chuyen sang EQUIPPED; mua thanh cong
+-- khi the chuyen sang EQUIP/EQUIPPED VA tien tru dung bang gia live. KHONG
+-- xac minh bang Backpack Tool nua (mon an co the khong phai Tool).
 function TFFA.tryBuyFood(name)
 	if not name or name == "" then return false end
 	local entry = nil
@@ -1821,18 +2004,7 @@ function TFFA.tryBuyFood(name)
 		TFFA.log("Khong toi duoc Food Shop - bo qua mua", name)
 		return false
 	end
-	-- Poll toi khi Shop mo (thay label ten mon trong PlayerGui), toi da 10s.
-	local shopOpen = false
-	local t0 = os.clock()
-	while os.clock() - t0 < 10 do
-		if #TFFA.findGuiTexts(name) > 0 then shopOpen = true; break end
-		for _, food in ipairs(TFFA.ALL_FOODS) do
-			if #TFFA.findGuiTexts(food) > 0 then shopOpen = true; break end
-		end
-		if shopOpen then break end
-		task.wait(0.3)
-	end
-	if not shopOpen then
+	if not TFFA.waitForShopOpen(10) then
 		TFFA.log("Shop khong mo sau 10s (khong thay ten mon an nao) - bo qua mua.")
 		return false
 	end
@@ -1844,6 +2016,13 @@ function TFFA.tryBuyFood(name)
 		return false
 	end
 	local status = string.upper(cardInfo.status or "")
+	-- Mon dang dung roi: khong can bam gi them.
+	if string.find(status, "EQUIPPED") then
+		TFFA.State.EquippedFood = name
+		TFFA.log("Mon", name, "da EQUIPPED san.")
+		TFFA.noteProgress()
+		return true
+	end
 	-- Nhanh EQUIP: mon da so huu hoac gia 0 (Carrot free, da equip san).
 	if string.find(status, "EQUIP") or (ladderPrice == 0) then
 		local btn = cardInfo.button
@@ -1852,17 +2031,21 @@ function TFFA.tryBuyFood(name)
 			return false
 		end
 		local ok = TFFA.clickButton(btn, function()
-			return TFFA.heldFood() == name or TFFA.equipFood(name)
+			-- Xac minh bang Shop: the phai chuyen sang EQUIPPED.
+			local scan2 = TFFA.scanShopPrices()
+			local info2 = scan2[name]
+			return info2 and string.find(string.upper(info2.status or ""), "EQUIPPED") ~= nil
 		end)
 		if ok then
+			TFFA.State.EquippedFood = name
 			TFFA.log("Da EQUIP", name)
 			TFFA.noteProgress()
 			return true
 		end
-		TFFA.log("Khong bam duoc nut EQUIP cua", name)
+		TFFA.log("Khong EQUIP duoc", name, "(the khong chuyen sang EQUIPPED).")
 		return false
 	end
-	-- Nhanh BUY: chi mua khi tien >= 1.5x gia live (uu tien gia live).
+	-- Nhanh MUA (nut la gia tien, vd "$150"): chi mua khi tien >= 1.5x gia live.
 	local price = cardInfo.price or ladderPrice
 	if not price then
 		TFFA.log("Khong doc duoc gia live cua", name, "- khong doan gia, bo qua.")
@@ -1881,36 +2064,43 @@ function TFFA.tryBuyFood(name)
 	end
 	local btn = cardInfo.button
 	if not btn then
-		TFFA.log("The cua", name, "khong co nut BUY - bo qua.")
+		TFFA.log("The cua", name, "khong co nut gia - bo qua.")
 		return false
 	end
 	local moneyBefore = money
 	local clicked = TFFA.clickButton(btn)
 	if not clicked then
-		TFFA.log("Khong bam duoc nut BUY cua", name)
+		TFFA.log("Khong bam duoc nut gia cua", name)
 		return false
 	end
-	-- KHONG bam them lan 2 (khong co hop YES nao duoc xac nhan; lan 2 co
-	-- the mua luon mon tiep theo sau khi Shop render lai).
+	-- KHONG bam them lan 2 (khong co hop YES nao; lan 2 co the mua luon
+	-- mon tiep theo sau khi Shop render lai).
 	task.wait(1.5)
-	-- Xac minh kep: tien tru dung bang gia live VA mon vao Backpack.
+	-- Xac minh kep bang SHOP + tien: the chuyen sang EQUIP/EQUIPPED
+	-- VA tien tru dung bang gia live.
+	local scan2 = TFFA.scanShopPrices()
+	local info2 = scan2[name]
 	local moneyAfter = TFFA.readMoney()
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	local hasItem = backpack and backpack:FindFirstChild(name) ~= nil
-	if moneyAfter and moneyBefore and (moneyBefore - moneyAfter) >= price * 0.9
-		and (moneyBefore - moneyAfter) <= price * 1.1 and hasItem then
+	local cardOk = info2 and string.find(string.upper(info2.status or ""), "EQUIP") ~= nil
+	local moneyOk = moneyAfter and moneyBefore
+		and (moneyBefore - moneyAfter) >= price * 0.9
+		and (moneyBefore - moneyAfter) <= price * 1.1
+	if cardOk and moneyOk then
 		TFFA.log("Da mua", name, "gia", TFFA.formatMoney(price))
 		TFFA.noteProgress()
 		-- Mua xong phai bam EQUIP trong the moi dung duoc mon.
-		local scan2 = TFFA.scanShopPrices()
-		local info2 = scan2[name]
-		if info2 and info2.button and string.find(string.upper(info2.status or ""), "EQUIP") then
-			TFFA.clickButton(info2.button)
+		if info2 and info2.button and not string.find(string.upper(info2.status or ""), "EQUIPPED") then
+			TFFA.clickButton(info2.button, function()
+				local scan3 = TFFA.scanShopPrices()
+				local info3 = scan3[name]
+				return info3 and string.find(string.upper(info3.status or ""), "EQUIPPED") ~= nil
+			end)
+			TFFA.State.EquippedFood = name
 		end
 		return true
 	end
 	TFFA.log("Mua", name, "chua xac minh duoc (tien tru:", tostring(moneyBefore),
-		"->", tostring(moneyAfter), ", trong Backpack:", tostring(hasItem), ")")
+		"->", tostring(moneyAfter), ", the chuyen sang EQUIP:", tostring(cardOk), ")")
 	return false
 end
 
@@ -2039,6 +2229,34 @@ function TFFA.States.BOOT()
 		-- Probe read-only dau tien de kiem tra pipeline remote.
 		TFFA.safeInvokeNoArg("Animations_Get")
 	end
+	-- Probe them: ten Tool trong Backpack/Character + nut anh tren HUD.
+	-- Cho biet mon an co phai Tool khong, va ten that nut Animals.
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	local bpNames = {}
+	if backpack then
+		for _, tool in ipairs(backpack:GetChildren()) do
+			table.insert(bpNames, tool.Name .. "(" .. tool.ClassName .. ")")
+		end
+	end
+	TFFA.log("PROBE Backpack:", #bpNames > 0 and table.concat(bpNames, ", ") or "(trong)")
+	local charTools = {}
+	local char = LocalPlayer.Character
+	if char then
+		for _, tool in ipairs(char:GetChildren()) do
+			if tool:IsA("Tool") then table.insert(charTools, tool.Name) end
+		end
+	end
+	TFFA.log("PROBE dang cam:", #charTools > 0 and table.concat(charTools, ", ") or "(khong co Tool)")
+	local gui2 = TFFA.getPlayerGui()
+	if gui2 then
+		for _, inst in ipairs(gui2:GetDescendants()) do
+			if inst:IsA("ImageButton") and TFFA.isVisible(inst) then
+				TFFA.log("PROBE ImageButton:", inst.Name, "tai (",
+					tostring(math.floor(inst.AbsolutePosition.X)), ",",
+					tostring(math.floor(inst.AbsolutePosition.Y)), ")")
+			end
+		end
+	end
 	TFFA.State.Status = "Dang chay"
 	return "DECIDE"
 end
@@ -2068,19 +2286,35 @@ function TFFA.States.DECIDE()
 	local backpackAnimals = TFFA.countBackpackAnimals()
 	local backpackFoods = TFFA.countBackpackFoods()
 	local bestFood = TFFA.bestOwnedFood()
-	-- 1. Chua co mon an nao -> EQUIP Carrot free (truong hop cua Brian: $0, tui trong).
-	if not bestFood and backpackFoods == 0 then
-		return "BUY_FIRST_FOOD"
-	end
-	-- 2. Co thu trong Backpack + con slot tren plot -> dat len plot truoc.
+	local hasFood = TFFA.hasFood()
+	-- 1. Dat pet len plot KHONG can mon an: uu tien truoc khi lo chuyen food
+	-- (ban cu de BUY_FIRST_FOOD len truoc nen pet trong tui khong bao gio duoc dat).
 	if backpackAnimals > 0 and #plotAnimals < TFFA.Config.PlotCapacity then
 		return "PLACE"
 	end
-	-- 3. Backpack day hoac plot day -> EQUIP roi SELL.
+	-- 2. Backpack day hoac plot day -> EQUIP roi SELL.
 	if backpackAnimals >= TFFA.Config.BackpackSellAt or #plotAnimals >= TFFA.Config.PlotCapacity then
 		return "SELL"
 	end
-	-- 4. TRAIN vs THROW.
+	-- 3. Chua co mon an nao moi can mua/equip (toi da 3 lan, roi tam dung).
+	if not hasFood and not TFFA.State.FoodBlocked then
+		return "BUY_FIRST_FOOD"
+	end
+	-- 4. Chua xac nhan co mon an (FOOD BLOCKED): tap xa la chinh, nhung cu
+	-- 3 vong thu nem 1 phat — neu that ra da equip san thi nem se thanh
+	-- cong va mo khoa luong farm. KHONG IDLE mai o day.
+	if not hasFood then
+		if TFFA.Config.AutoThrow and TFFA.State.DecideCycles % 3 == 0 then
+			return "THROW"
+		end
+		if TFFA.Config.AutoTrain then
+			TFFA.log("Chua co mon an (FOOD BLOCKED) - tap xa trong luc cho.")
+			return "TRAIN"
+		end
+		TFFA.log("Chua co mon an - dung yen cho (hay EQUIP mon an bang tay).")
+		return "IDLE"
+	end
+	-- 5. TRAIN vs THROW (da co mon an).
 	if TFFA.Config.AutoThrow and TFFA.Config.AutoTrain then
 		local targetPower = TFFA.targetPower()
 		if targetPower == nil then
@@ -2106,19 +2340,31 @@ function TFFA.States.DECIDE()
 end
 
 function TFFA.States.BUY_FIRST_FOOD()
-	-- Carrot free, da equip san tu dau game: viec can lam la EQUIP, khong
-	-- phai mua. tryBuyFood se tu di nhanh EQUIP khi gia 0/da so huu.
+	TFFA.closePopups()
+	-- Shop noi ro mon nao dang EQUIPPED (anh chup: Apple EQUIPPED) — do la
+	-- nguon su that, khong phai Backpack Tool. Mua/equip mon re nhat dang
+	-- hien trong Shop (khong co dinh Carrot).
+	if TFFA.buyCheapestVisibleFood() then
+		TFFA.State.FoodFailStreak = 0
+		TFFA.noteProgress()
+		return "DECIDE"
+	end
+	-- Thu Carrot rieng (free) neu the cua no con hien.
 	if TFFA.tryBuyFood("Carrot") then
+		TFFA.State.FoodFailStreak = 0
 		TFFA.noteProgress()
 		return "DECIDE"
 	end
-	-- Thu truc tiep qua Backpack neu Shop that bai.
-	if TFFA.equipFood("Carrot") then
-		TFFA.log("Da equip Carrot truc tiep tu Backpack.")
-		TFFA.noteProgress()
+	TFFA.State.FoodFailStreak = TFFA.State.FoodFailStreak + 1
+	TFFA.log("BUY_FIRST_FOOD that bai lan", tostring(TFFA.State.FoodFailStreak),
+		"/3 — khong tim thay mon an nao de equip/mua.")
+	if TFFA.State.FoodFailStreak >= 3 then
+		TFFA.State.FoodBlocked = true
+		TFFA.log("FOOD BLOCKED: tam dung tim mon an sau 3 lan that bai.")
+		TFFA.log("  Hay EQUIP mon an bang tay (mo Shop, bam EQUIP tren the mon an),")
+		TFFA.log("  roi chay lai script. Trong luc do bot van dat pet/ban thu/tap xa.")
 		return "DECIDE"
 	end
-	TFFA.log("Khong equip duoc Carrot. Hay mo Shop bang tay, bam EQUIP tren the Carrot, roi chay lai.")
 	return "IDLE"
 end
 
@@ -2142,9 +2388,12 @@ function TFFA.States.TRAIN()
 end
 
 function TFFA.States.THROW()
+	-- Nem probe (chua xac nhan co mon an) chi nem 1 phat; da co mon an
+	-- thi nem toi da ThrowsPerDecision phat.
+	local maxThrows = TFFA.hasFood() and TFFA.Config.ThrowsPerDecision or 1
 	local throws = 0
 	local done = false
-	while throws < TFFA.Config.ThrowsPerDecision do
+	while throws < maxThrows do
 		if not TFFA.Config.Enabled or TFFA.State.StopFlag then break end
 		local ok = TFFA.doOneThrow()
 		if ok then
@@ -2306,7 +2555,7 @@ function TFFA.buildUI()
 		lbl.Parent = frame
 		return lbl
 	end
-	makeLabel("Title", "TFFA Main v2.0", 5)
+	makeLabel("Title", "TFFA Main " .. TFFA.VERSION, 5)
 	local statusLabel = makeLabel("Status", "Trang thai: " .. TFFA.State.Status, 25)
 	local trainBtn = Instance.new("TextButton")
 	trainBtn.Name = "TrainBtn"
