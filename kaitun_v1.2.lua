@@ -192,7 +192,9 @@ local DEFAULT_CONFIG = {
     MeteorRequiredMythicTypes = 3,
     -- Seconds (79200 = 22h).
     MeteorSummonerCooldown = 79200,
-    MythicBeeTypes = {"Buoyant", "Fuzzy", "Precise", "Spicy", "Tadpole", "Vector"},
+    -- REAL mythics chi co 4: Buoyant/Tadpole la EVENT bees (buon gia) —
+    -- nhung vao gate thi meteor summoner fire khi machine van khoa.
+    MythicBeeTypes = {"Fuzzy", "Precise", "Spicy", "Vector"},
     QuestNPCs = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
     QuestFarmPriority = {"Mother Bear", "Black Bear", "Science Bear", "Polar Bear"},
         QuestNPCBeeRequirements = {["Science Bear"] = 10, ["Polar Bear"] = 25},
@@ -832,6 +834,7 @@ local Runtime = {
     RJGiftedCount = 0,
     RJHoneySpent = 0,
     RJUnitCost = nil,
+    RJUnitCostFallback = 10000,
     RJStock = 0,
     PlanterHarvests = 0,
     RJRollsSinceSync = 0,
@@ -1147,6 +1150,18 @@ function MaterialSystem.Amount(material, stats)
     if best <= 0 then
         local eggsFolder = Player:FindFirstChild("Eggs")
         local value = eggsFolder and eggsFolder:FindFirstChild(material)
+        if not value and eggsFolder then
+            -- Ten co the camel-case / khong space ("PlasticPlanter") - so
+            -- khop strip-space truoc khi tuyet bo, neu khong planting chet
+            -- im lang ca session.
+            local stripped = material:gsub("%s", "")
+            for _, child in ipairs(eggsFolder:GetChildren()) do
+                if child.Name:gsub("%s", "") == stripped then
+                    value = child
+                    break
+                end
+            end
+        end
         if value and value:IsA("ValueBase") then
             best = tonumber(value.Value) or 0
         end
@@ -2473,6 +2488,9 @@ end
 -- a pre-set account) - otherwise the scheduler re-buys owned items.
 function Runtime.ScanStarterGear()
     if Runtime.SeedGearScanned then return 0 end
+    -- Character readiness: scan chay khi character chua spawn thi worn gear
+    -- mat mat cho ca session - cho toi 3s truoc khi quet.
+    getCharacter(3)
     Runtime.SeedGearScanned = true
     Runtime.SeedGear = {}
     local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
@@ -2500,8 +2518,11 @@ function Runtime.ScanStarterGear()
 end
 
 local function claimHive()
-    if findOwnedHive() then return true end
+    -- SCAN TRUOC early-return: hive da so huu (REJOIN — dung case scan
+    -- duoc sinh ra) thi truoc day SeedGear khong bao gio duoc populate ->
+    -- scheduler re-buy owned gear khi stats lag. Scan la one-shot + re.
     Runtime.ScanStarterGear()
+    if findOwnedHive() then return true end
     setStatus("Init", "Claiming hive")
     for attempt = 1, 12 do
         if not Runtime.Running then return false end
@@ -2637,6 +2658,8 @@ local function saveTeleRewardLedger(ledger)
 end
 
 function Runtime.TeleRewardsClaimed()
+    -- LEDGER LA NGUON TRUTH DUY NHAT: CollectWorldRewards tu check per-spot
+    -- (skip spot da lay) nen ham nay chi con dung cho truy van ben ngoai.
     local spots = Config.TeleRewardSpots or {}
     if #spots == 0 then return true end
     local ledger = loadTeleRewardLedger(spots)
@@ -2704,6 +2727,11 @@ function Runtime.CollectWorldRewards()
         task.wait(0.25)
         collectiblesFolder = workspace:FindFirstChild("Collectibles")
     end
+    -- Bang chung rewards replicate trong session: chi khi co chung thi
+    -- empty-spot moi duoc persist (an toan cho reward den muon).
+    if collectiblesFolder and #collectiblesFolder:GetChildren() > 0 then
+        Runtime.TeleSawCollectibles = true
+    end
 
     local visitedInstances = {}
     local skipped = 0
@@ -2732,10 +2760,14 @@ function Runtime.CollectWorldRewards()
             end
             if not best then
                 skipped += 1
-                -- Empty = handled for this account: save NOW so a crash
-                -- never re-visits (or worse, forgets) this spot.
-                ledger[key] = true
-                saveTeleRewardLedger(ledger)
+                -- Empty-mark CHI persist khi Collectibles da tung co noi dung
+                -- trong session (reward chua replicate -> cham do co the la
+                -- token thuong gan do, hoac reward dang tren duong): neu khong
+                -- thi cham do duoc retry o session sau thay vi mat vinh vien.
+                if Runtime.TeleSawCollectibles then
+                    ledger[key] = true
+                    saveTeleRewardLedger(ledger)
+                end
                 continue -- reward removed (e.g. Beesmas ended) - zero time spent
             end
             visitedInstances[best] = true
@@ -2967,9 +2999,8 @@ local function markBeeHatched(x, y)
     Runtime.ReservedHiveCells[hiveCellKey(x, y)] = os.clock() + 120
     consumeBasicEgg()
     Runtime.WaitingForEggFunds = false
-    -- The next main-loop iteration may skip its blocking stats refresh: the
-    -- authoritative hatch response already proves the new bee.
-    Runtime.SkipStatsBlockUntil = os.clock() + 2
+    -- Async stats refresh: bee da duoc chung minh boi hatch response nen
+    -- vong chinh chay tiep bang cache non-blocking.
     task.defer(function() getStats(true) end)
 end
 
@@ -2986,10 +3017,12 @@ local function hatchOneBasicEgg()
         local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall("ConstructHiveCellFromEgg", 3, 3, "Basic", 1)
         applyHatchResponse("Basic", remaining, success, honeycomb, discoveredBees, eggUses)
         local accepted = hatchResponseAccepted(ok, beforeEggs, remaining, success)
-        -- A successful RemoteFunction response carrying the updated Honeycomb is
-        -- authoritative. Do not wait for the same change to replicate a second time.
-        if (ok and success == true and type(honeycomb) == "table")
-            or waitForHatchConfirmation(beforeBees, 3, 3, accepted and 0.5 or 0.45) then
+        -- ACCEPTED = server da bao success: tind ngay, dung doi honeycomb
+        -- table hoac confirm nua (animation no~ 3-4s se lam confirm fail ->
+        -- loop ban remote hang loat vao cac o ke = dung yen hang chuc giay).
+        if accepted
+            or (ok and success == true and type(honeycomb) == "table")
+            or waitForHatchConfirmation(beforeBees, 3, 3, accepted and 1.5 or 0.45) then
             markBeeHatched(3, 3)
             return true
         end
@@ -3014,8 +3047,12 @@ local function hatchOneBasicEgg()
             )
             applyHatchResponse("Basic", remaining, success, honeycomb, discoveredBees, eggUses)
             local accepted = hatchResponseAccepted(ok, beforeEggs, remaining, success)
-            if (ok and success == true and type(honeycomb) == "table")
-                or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 0.5 or 0.45) then
+            -- ACCEPTED = tin ngay (xem giai thich o nhanh (3,3) ben tren):
+            -- khong thi loop chay 55 o x (remote + confirm 0.45s) = dung yen
+            -- hang chuc giay va dot trung.
+            if accepted
+                or (ok and success == true and type(honeycomb) == "table")
+                or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 1.5 or 0.45) then
                 markBeeHatched(cell[1], cell[2])
                 return true
             end
@@ -3182,13 +3219,19 @@ function Runtime.BuyNextEventBee()
     local refreshed = MaterialSystem.Stats(true)
     local ticketsAfter = Runtime.TicketCount(refreshed)
     local acquired = Runtime.EventBeeOwned(entry, refreshed)
-        or (ok and result == true) or ticketsAfter <= tickets - required
+        or (ok and result == true) or (required > 0 and ticketsAfter <= tickets - required)
     if acquired then
         Runtime.EventBeePurchased[entry.Type] = true
         Runtime.EventBeesPurchased += 1
         Runtime.EventBeePending = false
         Runtime.PurchaseRetryAt[purchaseKey] = nil
         setStatus("Bought Event Bee", entry.Item .. " | " .. tostring(ticketsAfter) .. " tickets left")
+    elseif ok then
+        -- Remote CHAP NHAN (ok) nhung khong detect duoc success (stats lag
+        -- qua 12s retry tren executor mobile): event bee egg la MUA HANG LOAT
+        -- - re-fire lam thu hai = mat ticket. Backoff dai de stats kip gap.
+        Runtime.PurchaseRetryAt[purchaseKey] = os.clock() + 120
+        setStatus("Waiting for Event Bee", entry.Item .. " | unconfirmed - 120s settle")
     else
         setStatus("Waiting for Event Bee", entry.Item .. " | server result=" .. tostring(result))
     end
@@ -3216,12 +3259,12 @@ function Runtime.HatchNextEventBee()
                     )
                     applyHatchResponse(eggType, remaining, success, honeycomb, discoveredBees, eggUses)
                     local accepted = hatchResponseAccepted(ok, amount, remaining, success)
-                    if (ok and success == true and type(honeycomb) == "table")
-                        or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 0.8 or 0.6) then
+                    if accepted
+                        or (ok and success == true and type(honeycomb) == "table")
+                        or waitForHatchConfirmation(beforeBees, cell[1], cell[2], accepted and 1.5 or 0.6) then
                         Runtime.ReservedHiveCells[key] = os.clock() + 120
                         Runtime.EventBeePurchased[entry.Type] = true
                         Runtime.EventBeesHatched += 1
-                        Runtime.SkipStatsBlockUntil = os.clock() + 2
                         task.defer(function() MaterialSystem.Stats(true) end)
                         return true
                     end
@@ -3238,6 +3281,13 @@ local HIVE_SLOT = {Shop = "Mountaintop", Item = "Hive Slot", Category = "HiveSlo
 local function buyHiveSlot()
     if not Config.AutoBuyHiveSlots then return false end
     if Runtime.MeteorPriorityActive then return false end
+    -- STATS GATE: purchases.HiveSlots chua replicate → capacity = 25 cứng →
+    -- account nhiều slot bị coi là full → mua slot tràn giá cao vô nghĩa.
+    -- Cần 1 lần stats load thành công trước khi probe.
+    if not okStat or Runtime.LastStats == nil then
+        getStats(true)
+        if not okStat or Runtime.LastStats == nil then return false end
+    end
     local before = hiveCapacity()
     local purchaseKey = "HiveSlot:Hive Slot"
     if (Runtime.PurchaseRetryAt[purchaseKey] or 0) > os.clock() then return false end
@@ -3350,6 +3400,16 @@ function Runtime.ClaimWealthClock()
     if Runtime.MeteorPriorityActive then
         Runtime.LastWealthClockAttempt = 0 -- retried as soon as the meteor ends
         return false
+    end
+    -- DISTANCE RE-CHECK: farm tween co the da supersede walk giua chung -
+    -- fire remote tu xa = server reject + vong "unconfirmed 30s" dai dai.
+    if clockPosition then
+        local _, _, rootNow = getCharacter(1)
+        if not rootNow
+            or (rootNow.Position - clockPosition).Magnitude > 15 then
+            Runtime.NextWealthClockCheck = os.clock() + 30
+            return false
+        end
     end
     local ok = remoteCall("ToyEvent", "Wealth Clock")
     if ok then
@@ -4161,22 +4221,40 @@ local function fieldHasActiveSprinkler(field)
     return found
 end
 
--- Watcher: bat model sprinkler xuat hien sau khi fire remote (bat ky parent
--- nao trong workspace). Tu ngay khi bat duoc + tu ngat het window - handlers
--- DescendantAdded ban khi game regrow hang nghin flower tile, arm lau = event storm.
-local function watchSprinklerSpawn()
+-- Watcher: bat model sprinkler xuat hien sau khi fire remote. CHAT CHE:
+-- (a) bo qua Tool/Accessory ("Sprinkler Builder" trong nguoi cung chua chu
+-- "sprinkler" -> false positive chan placement mai mai), (b) bo qua instance
+-- co Humanoid ancestor (character cua bat ky ai), (c) chi nhan instance nam
+-- TRONG field vua fire - sprinkler nguoi khac o field khac khong set instance
+-- (de no-show backoff tu xu ly, het loop yank center).
+local function watchSprinklerSpawn(field)
     local deadline = os.clock() + 3
+    local fieldCFrame, fieldSize = field and fieldBoundsOf(field) or nil, nil
+    if field then
+        fieldCFrame, fieldSize = fieldBoundsOf(field)
+    end
     local conn
     conn = workspace.DescendantAdded:Connect(function(object)
         local name = object.Name
-        if #name >= 9 and name:lower():find("sprinkler", 1, true) then
-            Runtime.SprinklerInstance = object
-            Runtime.SprinklerWatchUntil = 0
-            pcall(function() conn:Disconnect() end)
+        if #name < 9 or not name:lower():find("sprinkler", 1, true) then return end
+        if object:IsA("Tool") or object:IsA("Accessory") then return end
+        local model = object:FindFirstAncestorOfClass("Model")
+        if model and model:FindFirstChildOfClass("Humanoid") then return end
+        if fieldCFrame and fieldSize then
+            local position = objectPosition(object)
+            if position then
+                local localPoint = fieldCFrame:PointToObjectSpace(position)
+                if math.abs(localPoint.X) > fieldSize.X * 0.5 + 10
+                    or math.abs(localPoint.Z) > fieldSize.Z * 0.5 + 10 then
+                    return -- thuoc field khac: bo qua
+                end
+            end
         end
+        Runtime.SprinklerInstance = object
+        Runtime.SprinklerWatchUntil = 0
+        pcall(function() conn:Disconnect() end)
     end)
     task.delay(3.2, function()
-        Runtime.SprinklerWatchUntil = 0
         pcall(function() conn:Disconnect() end)
     end)
 end
@@ -4204,7 +4282,7 @@ local function placeSprinklerIfNeeded(field)
     setStatus("Sprinkler", fieldName .. " | center drop")
     tweenTo(CFrame.new(center), Config.TweenSpeed, "Sprinkler")
     task.wait(0.25)
-    watchSprinklerSpawn()
+    watchSprinklerSpawn(field)
     local ok = remoteCall("PlayerActivesCommand", {Name = "Sprinkler Builder"})
     if ok then
         Runtime.LastSprinklerPlace = os.clock()
@@ -4331,9 +4409,10 @@ function Runtime.ClaimFreeToys()
     if now < (Runtime.NextFreeToyCheck or 0) then return false end
     Runtime.NextFreeToyCheck = now + 5
     -- Periodic boost pickup: boosts from ANY source (dispensers, gifted-bee
-    -- tokens, our own booster tap) land in stats - rescan when none is active.
-    if os.clock() >= (Runtime.BoostedFieldUntil or 0)
-        and os.clock() >= (Runtime.NextBoostRescanAt or 0) then
+    -- tokens, our own booster tap) land in stats. RESCAN CA KHI BOOST DANG
+    -- ACTIVE: boost manh hon xuat hien giua window phai duoc bat + expiry
+    -- cap nhat tai cho (DetectFieldBoost tu set BoostedField/Until).
+    if os.clock() >= (Runtime.NextBoostRescanAt or 0) then
         Runtime.NextBoostRescanAt = os.clock()
             + math.max(30, tonumber(Config.BoostRescanInterval) or 60)
         Runtime.DetectFieldBoost(MaterialSystem.Stats(false))
@@ -4436,48 +4515,74 @@ end
 
 -- Find the buffed field in stats (field name -> multiplier/expire map).
 -- Only fields in BoostedFieldWhitelist (the 3 main blue fields) are accepted;
--- preferring the field matching the tapped booster color (Blue).
+-- preferring the field matching the tapped booster color (Blue), and among
+-- candidates the HIGHEST multiplier wins (verified mechanic: 1 Blue HQ boost
+-- kich hoat dong thoi x1 Pine + x1 Bamboo + x3 Blue Flower — cu nen farm
+-- x1 thi x3 het han trong).
 function Runtime.DetectFieldBoost(stats, colorHint)
     if type(stats) ~= "table" then return false end
     local whitelist = Config.BoostedFieldWhitelist
-    local function allowed(fieldName)
-        if type(whitelist) ~= "table" or #whitelist <= 0 then return true end
+    -- Lowercased lookup maps: game key "Pine Tree Forest Boost" deriver ra
+    -- base lowercase — exact-case FIELD_COLORS/whitelist khong bao gio match
+    -- (ca boost x3 khong bao gio duoc ride).
+    local whitelistLower = {}
+    if type(whitelist) == "table" then
         for _, name in ipairs(whitelist) do
-            if name == fieldName then return true end
+            whitelistLower[string.lower(name)] = true
         end
-        return false
+    end
+    local colorsLower = {}
+    for name, color in pairs(FIELD_COLORS) do
+        colorsLower[string.lower(name)] = color
+    end
+    local function allowed(fieldNameLower)
+        if next(whitelistLower) == nil then return true end
+        return whitelistLower[fieldNameLower] == true
     end
     local visited = {}
-    local best, bestIsHinted
+    local best, bestIsHinted, bestMultiplier
     local function scan(value)
         if type(value) ~= "table" or visited[value] then return end
         visited[value] = true
         for key, child in pairs(value) do
-            -- Two accepted shapes: the bare field name, or "<Field> Boost"
-            -- (the game's buff-tile key). Suffix keys derive their base so
-            -- the whitelist + color map keep gating both.
-            local baseKey, boostKey = key, false
-            if type(key) == "string" and FIELD_COLORS[key] == nil then
-                local base = string.match(string.lower(key), "^(.-)%s+boost$")
-                if base and FIELD_COLORS[base] ~= nil and allowed(base) then
-                    baseKey = base
+            -- TWO shapes, dung khac nhau:
+            --  * "<Field> Boost" suffix (game buff-tile key, lowercase-base):
+            --    TIN TUYET DOI la boost (bo qua pollen-total false positive
+            --    bang chinh shape) — day la path da chet vi case bug, gio moi
+            --    song lai.
+            --  * bare field-name: cung co the la boost (value nho 2..10) NHUNG
+            --    pollen TOTALS cung dung key nay (x9585) -> gate <=10 giu nhu
+            --    cu, ranking se uu suffix/bigger multiplier.
+            local boostKey = false
+            local trusted = false
+            local baseLower
+            if type(key) == "string" then
+                local lowerKey = string.lower(key)
+                local suffixBase = string.match(lowerKey, "^(.-)%s+boost$")
+                if suffixBase and colorsLower[suffixBase] ~= nil and allowed(suffixBase) then
+                    baseLower = suffixBase
+                    boostKey = true
+                    trusted = true
+                elseif colorsLower[lowerKey] ~= nil and allowed(lowerKey) then
+                    baseLower = lowerKey
                     boostKey = true
                 end
             end
-            if type(key) == "string" and FIELD_COLORS[baseKey] ~= nil and allowed(baseKey) then
+            if boostKey then
                 local multiplier = tonumber(child)
                 if type(child) == "table" then
                     multiplier = tonumber(child.Value or child.Mult or child.Boost or child.Amount or child.Multiplier)
                 end
-                -- Pollen TOTALS share these field-name keys (values in the
-                -- thousands - seen x9585 live). Only small multipliers, or an
-                -- explicit "<Field> Boost" key, are real field boosts.
                 if multiplier and multiplier > 1
-                    and (boostKey or multiplier <= 10) then
-                    local hinted = colorHint ~= nil and FIELD_COLORS[baseKey] == colorHint
-                    if not best or (hinted and not bestIsHinted) then
-                        best = baseKey
+                    and (trusted or multiplier <= 10) then
+                    local hinted = colorHint ~= nil and colorsLower[baseLower] == colorHint
+                    -- RANKING: multiplier cao thang (x3 > x1); hoa thi uu
+                    -- field trung mau booster.
+                    if not best or multiplier > (bestMultiplier or 0)
+                        or (multiplier == bestMultiplier and hinted and not bestIsHinted) then
+                        best = baseLower
                         bestIsHinted = hinted
+                        bestMultiplier = multiplier
                     end
                 end
             elseif type(child) == "table" then
@@ -4487,10 +4592,29 @@ function Runtime.DetectFieldBoost(stats, colorHint)
     end
     scan(stats)
     if best and fieldUnlocked(best) then
-        Runtime.BoostedField = best
-        Runtime.BoostedFieldUntil = os.clock() + 900
-        setStatus("Field boost", string.format("%s | farm this field for %d min", best, 15))
-        return true
+        -- Khong ha cap boost dang manh hon/equal van con window.
+        if Runtime.BoostedField and os.clock() < (Runtime.BoostedFieldUntil or 0)
+            and (Runtime.BoostedFieldMultiplier or 0) >= (bestMultiplier or 0) then
+            return true
+        end
+        -- Tra ve ten field GOC (fieldUnlocked/field lookup dung exact-case):
+        -- map baseLower ve ten FlowerZone that.
+        local zones = workspace:FindFirstChild("FlowerZones")
+        local resolved
+        if zones then
+            for _, zone in ipairs(zones:GetChildren()) do
+                if string.lower(zone.Name) == best then resolved = zone.Name break end
+            end
+        end
+        resolved = resolved or best
+        if fieldUnlocked(resolved) then
+            Runtime.BoostedField = resolved
+            Runtime.BoostedFieldMultiplier = bestMultiplier
+            Runtime.BoostedFieldUntil = os.clock() + 900
+            setStatus("Field boost", string.format("%s | x%s | farm this field for %d min",
+                resolved, tostring(bestMultiplier or "?"), 15))
+            return true
+        end
     end
     return false
 end
@@ -4580,13 +4704,25 @@ local function questTaskDescription(taskData, stats)    if type(taskData.Descrip
     return tostring(taskData.Type or "Quest task")
 end
 
+-- Progress shape-aware: {fraction} hoac {current, goal}/{goal, current} -
+-- count-shape {30,100} phai doc la chua xong (min < max), khong phai "xong"
+-- vi progress[1]=30 >= 1. Dung chung 3 noi kiem tra incompleteness.
+local function questProgressIncomplete(progress)
+    local first = tonumber(progress and progress[1]) or 0
+    local second = progress and tonumber(progress[2]) or nil
+    if second then
+        return math.min(first, second) < math.max(first, second)
+    end
+    return first < 1
+end
+
 local function incompleteQuestObjectives(refresh)
     local stats = getStats(refresh)
     local objectives = {}
     for _, quest in ipairs(activeBearQuests(false)) do
         for index, taskData in ipairs(quest.Info.Tasks or {}) do
             local progress = quest.Progress[index] or {}
-            if (tonumber(progress[1]) or 0) < 1 then
+            if questProgressIncomplete(progress) then
                 table.insert(objectives, {
                     Quest = quest.Name,
                     NPC = quest.NPC,
@@ -5046,7 +5182,7 @@ local function maintainBearQuests()
                 previousQuest = previousQuest or quest.Name
                 if next(quest.Progress) == nil and #(quest.Info.Tasks or {}) > 0 then allDone = false end
                 for _, progress in pairs(quest.Progress) do
-                    if (tonumber(progress[1]) or 0) < 1 then allDone = false break end
+                    if questProgressIncomplete(progress) then allDone = false break end
                 end
             end
         end
@@ -5239,7 +5375,15 @@ local function questTreatStock(key, stats)
         visited[value] = true
         for k, child in pairs(value) do
             if k == key and tonumber(child) then found = tonumber(child) return end
-            if type(child) == "table" then scan(child, depth + 1) end
+            -- Khong lan vao subtree tong ket (Totals/Used/Spent/History):
+            -- leaf trung ten o day la LUOT TIEU THU it thoi, khong phai stock
+            -- -> feed thay vi dat deficit, remote spam vinh vien.
+            local lowered = string.lower(tostring(k))
+            if type(child) == "table"
+                and not (lowered:find("total", 1, true) or lowered:find("used", 1, true)
+                    or lowered:find("spent", 1, true) or lowered:find("history", 1, true)) then
+                scan(child, depth + 1)
+            end
         end
     end
     scan(stats, 0)
@@ -5297,6 +5441,9 @@ function Runtime.FeedQuestTreats(objective)
             if target >= 1 then
                 ratio = math.clamp(current / target, 0, 0.99)
             end
+        elseif first > 0 and first <= 1 then
+            -- lone fraction {0.95}: first la TI LE khong phai so luong
+            ratio = math.clamp(first, 0, 0.99)
         else
             ratio = math.clamp(first / goal, 0, 0.99)
         end
@@ -5354,7 +5501,7 @@ end
 
 function Runtime.UseQuestRoyalJelly(objective)
     if not Config.AutoQuestJellyTasks or Runtime.MeteorPriorityActive then return false end
-    local used = 0
+    local used, usedConfirmed = 0, 0
     local maxUses = math.max(1, math.floor(tonumber(Config.QuestJellyBatchMax) or 5))
     while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
         local stats = MaterialSystem.Stats(false) -- cached; server caps real use
@@ -5374,6 +5521,7 @@ function Runtime.UseQuestRoyalJelly(objective)
             "ConstructHiveCellFromEgg", bee.X, bee.Y, "RoyalJelly", 1)
         applyHatchResponse("RoyalJelly", remaining, success, honeycomb, discoveredBees, eggUses)
         if ok then
+            usedConfirmed += 1
             -- Shared pool bookkeeping: keep the RJ farmer/upgrader counters in
             -- sync with quest consumption (bounded drift otherwise).
             Runtime.RJStock = math.max(0, Runtime.RJStock - 1)
@@ -5382,8 +5530,11 @@ function Runtime.UseQuestRoyalJelly(objective)
         task.wait(0.3)
         if not Runtime.QuestTaskStillIncomplete(objective) then break end
     end
-    if used > 0 then task.defer(function() MaterialSystem.Stats(true) end) end
-    return used > 0
+    -- Chi return true khi co it nhat 1 remote CONFIRMED: transport-dead x5
+    -- thi phai de worker dung lai thay vi rate-limit minh tren he thong lam
+    -- khong gi.
+    if usedConfirmed > 0 then task.defer(function() MaterialSystem.Stats(true) end) end
+    return usedConfirmed > 0
 end
 
 -- Auto treat (independent of quests): HOURLY CYCLE. Every 1h, take 10% of the
@@ -5475,37 +5626,52 @@ function Runtime.BuyTreatsForCycle()
     end
     setStatus("Treat bee", string.format("Buy %d treats | budget %s/%s honey",
         chunk, formatNumber(boughtHoney), formatNumber(budget)))
+    -- CONFIRM RACE FIX: cached stats co the la PRE-purchase snapshot (worker
+    -- khac refresh lien tuc + RetrievePlayerStats in-flight) -> gained=0 du
+    -- chunk da landed → mua don le them (mat that) + khong charge budget.
+    -- Zero con tro truoc khi doc baseline = ep refresh that.
+    Runtime.LastStatsRefresh = 0
     local treatsBefore = treatStock(MaterialSystem.Stats(false))
+    -- HONEY DELTA thay vi gained * unitCost guess: gia server that khac
+    -- TreatHoneyCost thi budget "10% earned" sai lech moi cycle.
+    local honeyBefore = liveCoreValue("Honey")
     local ok, result = remoteCall("ItemPackageEvent", "Purchase",
         {Category = "Eggs", Type = "Treat", Amount = chunk})
     task.wait(0.5)
-    -- Blocking refresh: the purchase must be confirmed by the REAL inventory
-    -- delta, otherwise a denied chunk still burns the hourly budget.
+    -- Blocking refresh (forced): purchase phai duoc confirm bang delta THAT.
+    Runtime.LastStatsRefresh = 0
     MaterialSystem.Stats(true)
     local treatsAfter = treatStock(MaterialSystem.Stats(false))
+    local honeyAfter = liveCoreValue("Honey")
     local gained = treatsAfter - treatsBefore
     if gained > 0 then
-        Runtime.TreatCycleBoughtHoney = boughtHoney + gained * unitCost
+        local spent = honeyBefore and honeyAfter
+            and math.max(0, honeyBefore - honeyAfter) or gained * unitCost
+        Runtime.TreatCycleBoughtHoney = boughtHoney + spent
         Runtime.PurchaseRetryAt[purchaseKey] = nil
         return gained
     end
-    -- Server rejected the chunk purchase: fall back to single buys (max 10/pass).
+    -- Server rejected the chunk purchase: fall back to single buys (max 10/pass),
+    -- BREAK ngay khi khong xac nhan duoc don dau tien (denied spam vinh vien).
     local bought = 0
     for _ = 1, math.min(chunk, 10) do
+        local singleBefore = honeyBefore and liveCoreValue("Honey") or nil
         local okOne = remoteCall("ItemPackageEvent", "Purchase",
             {Category = "Eggs", Type = "Treat", Amount = 1})
         if not okOne then break end
+        task.wait(0.3)
+        Runtime.LastStatsRefresh = 0
+        MaterialSystem.Stats(true)
+        local singleGained = treatStock(MaterialSystem.Stats(false)) - treatsAfter - bought
+        if singleGained <= 0 then break end -- denied: dung, khong spam tiep
         bought += 1
-        task.wait(0.15)
     end
     if bought > 0 then
-        MaterialSystem.Stats(true)
-        local verified = treatStock(MaterialSystem.Stats(false)) - treatsAfter
-        if verified > 0 then
-            Runtime.TreatCycleBoughtHoney = boughtHoney + verified * unitCost
-            Runtime.PurchaseRetryAt[purchaseKey] = nil
-            return verified
-        end
+        local spent = honeyBefore and liveCoreValue("Honey")
+            and math.max(0, honeyBefore - liveCoreValue("Honey")) or bought * unitCost
+        Runtime.TreatCycleBoughtHoney = boughtHoney + spent
+        Runtime.PurchaseRetryAt[purchaseKey] = nil
+        return bought
     end
     return 0
 end
@@ -5794,6 +5960,17 @@ function Runtime.HandleAmuletOffer(...)
         return
     end
 
+    -- 3-arg signature da verify (type, name, statsString): type nil + name nil
+    -- = server chac chan reject + offer treo vinh vien (GUI poller bi cam khi
+    -- remote ton tai) -> bo qua luot nay, dump payload cho recon.
+    if amuletType == nil and amuletName == nil then
+        if not Runtime.AmuletNilTypeDumped then
+            Runtime.AmuletNilTypeDumped = true
+            warn("[BSS Kaitun] Amulet offer khong parse duoc type/name - bo qua (xem payload dump)")
+        end
+        return
+    end
+
     local currentText = Runtime.EquippedAmuletStatsText(amuletType)
     local accept = true
     local detail = "no amulet of this type yet"
@@ -5934,7 +6111,9 @@ function Runtime.HandleAmuletGui()
     Runtime.AmuletGuiAt = now
     Runtime.AmuletGuiAttempts = (Runtime.AmuletGuiAttempts or 0) + 1
     if Runtime.AmuletGuiAttempts > 6 then return false end
-    local button = accept and (acceptButton or declineButton) or (declineButton or acceptButton)
+    -- Chi click nut DUNG CHIEU: keep-old/decline ma chi co nut accept thi
+    -- tuyet doi khong bam (bam nham = mat amulet dang doi theo policy).
+    local button = accept and acceptButton or declineButton
     if not button then return false end
     warn(string.format("[BSS Kaitun] Amulet GUI: %s | green=%d red=%d -> %s",
         tostring(titleText or "?"), green, red, accept and "REPLACE" or "KEEP"))
@@ -5980,7 +6159,9 @@ local function questWork(seconds)
     -- no movement needed): questWork no longer blocks on inventory checks, so
     -- the character keeps farm-moving while feeds happen off-thread.
     local plan = chooseQuestField(objectives)
-    local planRank = plan and plan.NPCRank or math.huge
+    -- NPC khong co trong priority list (999) phai KHONG cut-in-line: coi nhu
+    -- hang duoi cung (math.huge) thay vi 999 > moi rank thuc.
+    local planRank = plan and (plan.NPCRank == 999 and math.huge or plan.NPCRank) or math.huge
     -- Mob objectives also respect NPC order (the SAME dynamic order the field
     -- plan uses, or the two rank systems would disagree). E.g. when Science
     -- has a farmable objective, out-of-order jobs must not cut in line.
@@ -6239,11 +6420,19 @@ task.spawn(function()
             -- Non-stance mode keeps the active-danger rule instead (hold
             -- only inside the small active radius or right after a hit).
             if Config.AvoidMobStance then
-                -- Stance OVERTIME cap: mob cua nguoi khac park trong field
-                -- khong bao gio chet -> sau N giay ha xuong active-dodge
-                -- (van nhay khi mob ap sat) thay vi dung vien forever.
-                Runtime.StanceSince = (#mobs > 0)
-                    and (Runtime.StanceSince or os.clock()) or nil
+                -- Stance OVERTIME cap + HYSTERESIS: mob nhap nhay 1 tick rong
+                -- (mob A despawn truoc mob B spawn / detection miss) KHONG
+                -- duoc reset timer 90s - chi clear sau khi list rong LIEN TUC
+                -- 4s. Khong thi stance vien vien truoc mob bat tu.
+                if #mobs > 0 then
+                    Runtime.StanceSince = Runtime.StanceSince or os.clock()
+                    Runtime.StanceEmptySince = nil
+                else
+                    Runtime.StanceEmptySince = Runtime.StanceEmptySince or os.clock()
+                    if os.clock() - Runtime.StanceEmptySince >= 4 then
+                        Runtime.StanceSince = nil
+                    end
+                end
                 local stanceOvertime = Runtime.StanceSince ~= nil
                     and os.clock() - Runtime.StanceSince
                         >= math.max(30, tonumber(Config.AvoidMobStanceMaxSeconds) or 90)
@@ -6444,6 +6633,14 @@ local function convertPollen()
     if not tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Convert") then return false end
     task.wait(0.25)
     if Runtime.MeteorPriorityActive then return false end
+    -- CORESTATS MISSING GUARD: pollenRatio tra 0/0 khi CoreStats chua
+    -- replicate (join/respawn/teleport) → ratio <= 0.01 lam convert bao
+    -- "done" VOI DAY DAY → caller ping-pong tween hive ↔ farm. Bail out.
+    local capacity = liveCoreValue("Capacity")
+    if not capacity or capacity <= 0 then
+        setStatus("Convert honey", "Capacity not replicated - retry later")
+        return false
+    end
     if hivePhase(hive) == "Idle" or hivePhase(hive) == "" then
         remoteCall("PlayerHiveCommand", "ToggleHoneyMaking")
     end
@@ -6458,16 +6655,18 @@ local function convertPollen()
         if pollen < lastPollen then
             lastPollen = pollen
             lastProgress = os.clock()
-        elseif os.clock() - lastProgress > 8 and hivePhase(hive) == "Idle" then
-            -- Retry only when the server confirms the hive is Idle, avoiding mistaken toggles
-            -- that could stall a slow-but-running conversion.
+        elseif os.clock() - lastProgress > 8 and hivePhase(hive) ~= "Making" then
+            -- Retry khi server khong DANG convert (Idle hoac Phase mat hanh)
+            -- — gate cu chi dung "Idle" nen phase rơi mất = park 180s timeout
+            -- moi pass.
             remoteCall("PlayerHiveCommand", "ToggleHoneyMaking")
             lastProgress = os.clock()
         end
         task.wait(0.5)
     end
 
-    if hivePhase(hive) ~= "" and hivePhase(hive) ~= "Idle" then
+    if Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+        and hivePhase(hive) ~= "" and hivePhase(hive) ~= "Idle" then
         remoteCall("PlayerHiveCommand", "ToggleHoneyMaking")
     end
     return select(1, pollenRatio()) <= Config.ConvertFinishPercent
@@ -6606,6 +6805,18 @@ function MaterialSystem.BlenderStatus(force)
     if tonumber(stats.PlaytimeAtLoad) and tonumber(stats.LoadTime) and tonumber(blender.StartTime) then
         elapsed = tonumber(stats.PlaytimeAtLoad) + (MaterialSystem.Clock() - tonumber(stats.LoadTime))
             - tonumber(blender.StartTime)
+        if elapsed < 0 then
+            -- UNIT SKEW: StartTime epoch-based con PlaytimeAtLoad playtime-based
+            -- (hoac nguoc lai) -> elapsed am khong lo -> remaining dong bang o
+            -- "580 min" va ClaimBlender khong bao gio chay. Log 1 lan + doi
+            -- sang dong ho local.
+            if not Runtime.BlenderUnitSkewWarned then
+                Runtime.BlenderUnitSkewWarned = true
+                warn("[BSS Kaitun] Blender StartTime unit skew (elapsed="
+                    .. string.format("%.0f", elapsed) .. ") - fallback to local clock")
+            end
+            elapsed = os.clock() - Runtime.BlenderStartedAt
+        end
     else
         elapsed = os.clock() - Runtime.BlenderStartedAt
     end
@@ -6624,6 +6835,10 @@ end
 function MaterialSystem.StartBlender(action)
     if not Config.AutoBlender or not action or action.Kind ~= "craft" then return false end
     if Runtime.MeteorPriorityActive then return false end
+    -- BACKOFF: PlaceOrder tra nil/ket qua khong xac nhan duoc (BlenderState
+    -- khong populate tren build/executor do) thi khong re-fire moi pass -
+    -- moi lan chap nhan = dot nguyen lieu lan nua cho deficit van mo.
+    if os.clock() < (Runtime.BlenderStartBackoff or 0) then return false end
     local state = MaterialSystem.BlenderStatus(true)
     if state ~= "idle" then return false end
     MaterialSystem.MoveToBlender()
@@ -6634,19 +6849,23 @@ function MaterialSystem.StartBlender(action)
         Recipe = action.Recipe,
         Count = math.max(1, math.floor(action.Count)),
     })
-    if ok and result ~= false then
+    if ok and result == true then
         Runtime.BlenderStartedAt = os.clock()
         Runtime.BlenderRecipe = tostring(action.Recipe)
         Runtime.BlenderCount = action.Count
         Runtime.LastMaterialStats = -math.huge
         return true
     end
-    setStatus("Blender error", tostring(result or "PlaceOrder rejected"))
+    -- result nil (khong xac nhan duoc) HOAC false (rejected): backoff 120s.
+    Runtime.BlenderStartBackoff = os.clock() + 120
+    setStatus("Blender error", tostring(result or "PlaceOrder unconfirmed - 120s backoff"))
     return false
 end
 
 function MaterialSystem.ClaimBlender()
     if Runtime.MeteorPriorityActive then return false end
+    -- Retry cooldown sau mot lan StopOrder fail (chong spam tween/remote).
+    if os.clock() < (Runtime.BlenderClaimRetryAt or 0) then return false end
     local state, blender = MaterialSystem.BlenderStatus(true)
     if state ~= "done" then return false end
     MaterialSystem.MoveToBlender()
@@ -6662,6 +6881,9 @@ function MaterialSystem.ClaimBlender()
         MaterialSystem.Stats(true)
         return true
     end
+    -- StopOrder fail: retry cooldown (nếu server coi StopOrder = cancel thi
+    -- spam = mat nguyen lieu; fail im lang thi cung dung tween/remote loop).
+    Runtime.BlenderClaimRetryAt = os.clock() + 60
     return false
 end
 
@@ -7158,7 +7380,12 @@ function MaterialSystem.FarmVicious()
             -- atlas: walkTo(thorn.Position + (0,0,5)), 6-stud arrival band.
             local stand = Vector3.new(thornPosition.X, root.Position.Y, thornPosition.Z + 5)
             if (root.Position - stand).Magnitude > 6 then
-                tweenTo(CFrame.new(stand), Config.TweenSpeed, "Vicious", true)
+                -- forceWalk co the fail sau khi bi knockback ra khoi field:
+                -- retry 1 lan khong forceWalk thay vi dung nhan ToolCollect
+                -- het 18s deadline.
+                if not tweenTo(CFrame.new(stand), Config.TweenSpeed, "Vicious", true) then
+                    tweenTo(CFrame.new(stand), Config.TweenSpeed, "Vicious")
+                end
             else
                 humanoid:Move(Vector3.zero, false)
                 humanoid:MoveTo(root.Position)
@@ -7181,7 +7408,9 @@ function MaterialSystem.FarmVicious()
                 end
             end
             if point then
-                tweenTo(CFrame.new(point), Config.TweenSpeed, "Vicious", true)
+                if not tweenTo(CFrame.new(point), Config.TweenSpeed, "Vicious", true) then
+                    tweenTo(CFrame.new(point), Config.TweenSpeed, "Vicious")
+                end
             else
                 task.wait(0.15)
             end
@@ -7225,6 +7454,20 @@ function Runtime.FarmMondoChick()
     if not chick then
         Runtime.MondoChickPending = false
         return false
+    end
+    -- LEVEL GATE ( nhu vicious/bonus): chick qua level so voi average hive
+    -- la fight khong bao gio xong -> danh 2/3 runtime vo ich. Level cao qua
+    -- thi retry sau 30s thay vi cam dau vao ngay.
+    if not Runtime.MobLevel or Runtime.MobLevel(chick) then
+        local chickLevel = Runtime.MobLevel and Runtime.MobLevel(chick) or nil
+        local average = Runtime.HiveAverageLevel and Runtime.HiveAverageLevel() or nil
+        if chickLevel and average and chickLevel > average + 10 then
+            Runtime.MondoChickRetryAt = os.clock() + 30
+            Runtime.MondoChickPending = false
+            setStatus("Mondo Chick", string.format("Skipped: lv.%d vs hive avg %.1f - too strong",
+                chickLevel, average))
+            return false
+        end
     end
 
     Runtime.CurrentField = "Mountain Top Field"
@@ -7292,7 +7535,7 @@ function Runtime.ScanBonusMob()
                 if bonusMobLevelAllowed(live) then
                     Runtime.BonusMobPending = {
                         Name = canonical, Route = route, Live = live,
-                        Field = Runtime.NearestMobField(live),
+                        Field = Runtime.NearestMobField(position, route),
                     }
                     return
                 end
@@ -7503,6 +7746,13 @@ function MaterialSystem.ChoosePlanter(stats, active)
     for name in pairs(available) do
         if MaterialSystem.Amount(name, stats) > (used[name] or 0) then return name end
     end
+    -- DIAGNOSTIC: catalog co item nhung Amount == 0 het -> Amount lookup
+    -- sai nguon (Player.Eggs naming?) - canh bao mot lan de khong chet im.
+    if not Runtime.PlanterAmountWarned and Runtime.BootstrapComplete then
+        Runtime.PlanterAmountWarned = true
+        warn("[BSS Kaitun] Planter catalog co " .. #available
+            .. " loai nhung khong loai nao duoc dem duoc - kiem tra Player.Eggs naming")
+    end
     return nil
 end
 
@@ -7570,10 +7820,16 @@ function MaterialSystem.PlanterWork(material, field, stats)
         if planterField == field and progress and progress >= Config.MaterialPlanterHarvestPercent then
             Runtime.LastMaterialPlanterAction = os.clock()
             Runtime.PlanterBusy = true
-            setStatus("Farm material", "Harvest " .. MaterialSystem.PlanterName(data) .. " @ " .. field.Name)
-            tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "MaterialPlanter")
-            local ok = remoteCall("PlanterModelCollect", data.ActorID)
+            -- pcall-clear: 1 throw giua busy window khong duoc ket PlanterBusy
+            -- (keo ca 2 he planter chet den khi re-execute).
+            local okHarvest, harvestErr = pcall(function()
+                setStatus("Farm material", "Harvest " .. MaterialSystem.PlanterName(data) .. " @ " .. field.Name)
+                tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "MaterialPlanter")
+                return remoteCall("PlanterModelCollect", data.ActorID)
+            end)
             Runtime.PlanterBusy = false
+            if not okHarvest then reportError("PlanterWork", harvestErr) end
+            local ok = okHarvest and select(1, harvestErr) or false
             if ok then
                 task.wait(1)
                 sweepTokens(3, "PlanterDrop")
@@ -7588,16 +7844,20 @@ function MaterialSystem.PlanterWork(material, field, stats)
     if not planterName or not point then return false end
     Runtime.LastMaterialPlanterAction = os.clock()
     Runtime.PlanterBusy = true
-    setStatus("Farm material", "Plant " .. planterName .. " @ " .. field.Name)
-    -- Blink-plant first; the walk is only the fallback for a failed fire.
-    local okPlant = Runtime.PlantAt(point, planterName)
-    if not okPlant then
-        tweenTo(CFrame.new(point), Config.TweenSpeed, "MaterialPlanter")
-        task.wait(0.35)
-        okPlant = select(1, remoteCall("PlayerActivesCommand", {Name = planterName}))
-    end
+    local okPlant, plantErr = pcall(function()
+        setStatus("Farm material", "Plant " .. planterName .. " @ " .. field.Name)
+        -- Blink-plant first; the walk is only the fallback for a failed fire.
+        local planted = Runtime.PlantAt(point, planterName)
+        if not planted then
+            tweenTo(CFrame.new(point), Config.TweenSpeed, "MaterialPlanter")
+            task.wait(0.35)
+            planted = select(1, remoteCall("PlayerActivesCommand", {Name = planterName}))
+        end
+        return planted and true or false
+    end)
     Runtime.PlanterBusy = false
-    return okPlant
+    if not okPlant then reportError("PlanterWork", plantErr) end
+    return okPlant and plantErr or false
 end
 
 function MaterialSystem.GuiVisible(object)
@@ -7742,7 +8002,7 @@ function MaterialSystem.FarmSource(action, entry)
                     hasMaterialQuest = true
                     if next(quest.Progress) == nil and #(quest.Info.Tasks or {}) > 0 then materialQuestDone = false end
                     for _, progress in pairs(quest.Progress) do
-                        if (tonumber(progress[1]) or 0) < 1 then materialQuestDone = false break end
+                        if questProgressIncomplete(progress) then materialQuestDone = false break end
                     end
                 end
             end
@@ -7881,12 +8141,19 @@ if localFX and localFX:IsA("RemoteEvent") then
         if effectName == "MythicMeteor" and type(payload) == "table" then
             local started = os.clock()
             local total = math.max(0.1, (tonumber(payload.Delay) or 2.5) + (tonumber(payload.Dur) or 0.8))
-            enqueueMeteor({
+            local queued = enqueueMeteor({
                 Position = payload.Pos or payload.Position,
                 ReadyAt = started + total * math.clamp(Config.MeteorImpactLeadFraction, 0, 1),
                 ExpireAt = started + total,
                 Source = "LocalFX",
             })
+            -- DETECTOR DUY NHAT theo mac dinh: payload shape bat ngo (Pos
+            -- khong phai Vector3/CFrame/Instance) thi meteor bi im lang —
+            -- warn 1 lan de recon thay vi mat het shower khong ai hay.
+            if not queued and not Runtime.MeteorPayloadWarned then
+                Runtime.MeteorPayloadWarned = true
+                warn("[BSS Kaitun] MythicMeteor payload khong parse duoc Position - shower co the bi bo qua (recon needed)")
+            end
         end
     end)
 end
@@ -7941,8 +8208,11 @@ local function triggerMeteorIfReady()
     local stats = getStats(false)
     local toyTimes = type(stats) == "table" and stats.ToyTimes or nil
     local lastUse = type(toyTimes) == "table" and tonumber(toyTimes["Mythic Meteor Shower"]) or nil
+    -- CLOCK: ToyTimes la server-time — so khop voi OsTime module (khac
+    -- device-clock skew cua os.time() tren mobile executor).
+    local serverNow = MaterialSystem.Clock()
     if lastUse then
-        local remaining = cooldown - (os.time() - lastUse)
+        local remaining = cooldown - (serverNow - lastUse)
         if remaining > 0 then
             Runtime.NextMeteorTriggerCheck = now + math.max(30, math.min(remaining, checkInterval))
             return
@@ -7952,10 +8222,16 @@ local function triggerMeteorIfReady()
     end
 
     Runtime.LastMeteorTrigger = now
-    Runtime.NextMeteorTriggerCheck = now + cooldown
     -- Trying the summoner is not proof that a shower exists. Only the actual
     -- MythicMeteor LocalFX event is allowed to change status/claim movement.
-    remoteCall("ToyEvent", "Mythic Meteor Shower")
+    -- FIRE FAIL = KHONG dot cooldown 22h: remote chet/timeout/server tu choi
+    -- (machine van khoa) thi retry sau 60s thay vi park ca ngay.
+    local fireOk = remoteCall("ToyEvent", "Mythic Meteor Shower")
+    if fireOk then
+        Runtime.NextMeteorTriggerCheck = now + cooldown
+    else
+        Runtime.NextMeteorTriggerCheck = now + 60
+    end
 end
 
 local function handleMeteor()
@@ -8046,14 +8322,21 @@ local function handleMeteor()
 
     -- Match the source timing: be on the impact point from 60% of Delay+Dur
     -- until the meteor expires. Dig while waiting instead of standing idle.
+    -- ToolCollect RATE-LIMITED (Heartbeat-rate ~60Hz spam khac voi moi noi khac).
     while Runtime.Running and Config.Enabled and Config.AutoMeteor and os.clock() < meteor.ReadyAt do
-        remoteCall("ToolCollect")
+        if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
+            Runtime.LastVicToolCollect = os.clock()
+            remoteCall("ToolCollect")
+        end
         task.wait(0.08)
     end
     while Runtime.Running and Config.Enabled and Config.AutoMeteor and os.clock() <= meteor.ExpireAt do
         local _, humanoid, root = getCharacter(1)
         if humanoid and root and (root.Position - target).Magnitude > 4 then humanoid:MoveTo(target) end
-        remoteCall("ToolCollect")
+        if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
+            Runtime.LastVicToolCollect = os.clock()
+            remoteCall("ToolCollect")
+        end
         RunService.Heartbeat:Wait()
     end
     removeMeteor(meteor)
@@ -8087,7 +8370,12 @@ local function handleMeteor()
             tokenDeadline = math.min(tokenDeadline, otherFieldDeadline)
         end
         if standingField() ~= field then break end
-        local token = findBestTokenInStandingField()
+        -- ROUTE CACHE truoc (nhu sweepTokens): full scan + DFS 12.5Hz trong
+        -- token flood cua shower chinh la fps drop da gap.
+        local token = takeCachedRouteToken()
+        if not token then
+            token = findBestTokenInStandingField()
+        end
         if token then
             collectToken(token, "MeteorToken")
         else
@@ -8123,7 +8411,10 @@ task.spawn(function()
                     reportError("MeteorPriority", err)
                 end
             end
-        elseif not Config.AutoMeteor or #Runtime.MeteorQueue == 0 then
+        elseif not Config.Enabled or not Config.AutoMeteor or #Runtime.MeteorQueue == 0 then
+            -- Enabled=false + queue non-empty phai cung clear flag: bootstrap
+            -- (claimHive/redeemList/progressionWork) spin vinh vien khi paused
+            -- neu flag treo true.
             Runtime.MeteorPriorityActive = false
         end
         -- CPU saver: poll fast (0.03s) only with active meteors; with an empty queue
@@ -8588,10 +8879,9 @@ local function applyLowGraphics(enabled)
     -- doan - vi du: "fps 18 | FarmToken | tokens=287 | Pine Tree Forest").
     task.spawn(function()
         if not RunService or not RunService.RenderStepped then return end
-        local accum, frames = 0, 0
+        local frames = 0
         local windowStart = os.clock()
-        RunService.RenderStepped:Connect(function(delta)
-            accum += delta
+        local fpsConn = RunService.RenderStepped:Connect(function(delta)
             frames += 1
         end)
         while Runtime.Running do
@@ -8611,8 +8901,9 @@ local function applyLowGraphics(enabled)
                         tostring(Runtime.Detail), tokens, tostring(Runtime.CurrentField)))
                 end
             end
-            accum, frames = 0, 0
+            frames = 0
         end
+        pcall(function() fpsConn:Disconnect() end)
     end)
     -- Hide every other player: their characters + accessories + tools are one of
     -- the biggest lag sources on busy servers. Local-only hiding (render), no effect
@@ -8762,7 +9053,16 @@ local function rjIsEventBeeType(value)
     return RJ_EVENT_TYPES[Runtime.NormalizeEventBeeName(value)] == true
 end
 
+-- GATE CACHE: gate scan (toan bo stats depth-6 + GetDescendants Character/
+-- Backpack) chay MOI LAN ROLL (~10Hz) = hot path nhat cua worker. Verdict
+-- on dinh 5s; truong hop vua mua do moi thi co the tre toi 5s - chap nhan
+-- duoc doi voi tan so roll.
 function Runtime.RJGatePassed(quiet)
+    local now = os.clock()
+    if now < (Runtime.RJGateCacheUntil or 0) then
+        return Runtime.RJGateCached == true
+    end
+    Runtime.RJGateCacheUntil = now + 5
     local owned = {}
     local visited = {}
     local function scan(value, depth)
@@ -8799,6 +9099,7 @@ function Runtime.RJGatePassed(quiet)
             if owned[itemName] then satisfied = true break end
         end
         if not satisfied then
+            Runtime.RJGateCached = false
             if not quiet and Runtime.RJLastGateReport ~= table.concat(line, "/") then
                 Runtime.RJLastGateReport = table.concat(line, "/")
                 setStatus("RJ Gifted gate", "Missing one of: " .. table.concat(line, " / "))
@@ -8806,6 +9107,7 @@ function Runtime.RJGatePassed(quiet)
             return false
         end
     end
+    Runtime.RJGateCached = true
     return true
 end
 
@@ -8869,7 +9171,12 @@ local function rjBuy()
                 Runtime.RJUnitCost = measured / bought
             end
             totalBought += bought
-            totalSpent += math.max(measured, bought * (Runtime.RJUnitCost or 0))
+            -- Unit-cost fallback: neu cua so khong hien net drop (honey van
+            -- tang vi farming song song) thi van TRANG KHOAN theo gia uc
+            -- luong thay vi 0 - nguoc lai RJShopHoneyBudget khong bao gio
+            -- chay, mua vinh vien vuot ngan sach.
+            totalSpent += math.max(measured, bought * (Runtime.RJUnitCost
+                or tonumber(Config.RJUnitCostFallback) or 10000))
             -- Confirmed: stop climbing down the ladder.
             break
         end
@@ -8897,14 +9204,22 @@ local function rjSeedGiftedTypes()
 end
 
 local function rjPickSacrifice()
+    -- Pin cua Blue loop: sac cell nay ghi de con ong blue vua tim duoc.
+    local pinnedKey = nil
+    local pinned = Runtime.BlueJellyCell
+    if pinned and pinned.Parent then
+        local px, py = pinned.Name:match("^C(%d+),(%d+)$")
+        pinnedKey = px and (px .. "," .. py) or nil
+    end
     local cells = hiveBeeCells()
     local byKey = {}
     local commonFallback, anyFallback, duplicateGifted
     for _, cell in ipairs(cells) do
         byKey[cell.X .. "," .. cell.Y] = cell
+        local isPinned = pinnedKey ~= nil and (cell.X .. "," .. cell.Y) == pinnedKey
         -- Event bees are NEVER sacrificed: they are only replaceable with money
         -- (tickets) and are the Star Treat targets.
-        if rjIsEventBeeType(cell.Type) then continue end
+        if rjIsEventBeeType(cell.Type) or isPinned then continue end
         if cell.Locked then continue end
         if not cell.Gifted then
             anyFallback = anyFallback or cell
@@ -8915,7 +9230,8 @@ local function rjPickSacrifice()
             duplicateGifted = duplicateGifted or cell
         end
     end
-    if Runtime.RHSacrificeKey and byKey[Runtime.RHSacrificeKey] then
+    if Runtime.RHSacrificeKey and byKey[Runtime.RHSacrificeKey]
+        and Runtime.RHSacrificeKey ~= pinnedKey then
         local current = byKey[Runtime.RHSacrificeKey]
         if not rjIsEventBeeType(current.Type) and not current.Locked
             and (not current.Gifted or Runtime.RJGiftedTypes[current.Type]) then
@@ -9058,22 +9374,39 @@ end
 -- Buy one Star Treat from the Ticket Tent with tickets. The package is read
 -- from the replicated shop item (ItemType/ItemCategory StringValues, same as
 -- every other shop) so the real Category/Type is used instead of a guess.
--- Deep-find a numeric counter anywhere in the stats payload (Star Treat and
--- similar special items do not always live under stats.Eggs).
-local function deepFindNumber(value, key, depth, visited)
-    depth = depth or 0
-    visited = visited or {}
-    if type(value) ~= "table" or visited[value] or depth > 4 then return nil end
-    visited[value] = true
-    local direct = tonumber(value[key])
-    if direct then return direct end
-    for _, child in pairs(value) do
-        if type(child) == "table" then
-            local found = deepFindNumber(child, key, depth + 1, visited)
-            if found then return found end
+-- SCOPED stock lookup (thay deepFindNumber doc loi): deep-find bat ky leaf
+-- "StarTreat" deu bat ca LUOT TIEU THU trong subtree Totals/Used/Spent/History
+-- -> false unconfirmed vinh vien (gift stall) / re-purchase. Doc stats.Treats
+-- truoc, deep-scan co exclusion nhu questTreatStock.
+local function starTreatStock(stats)
+    if type(stats) ~= "table" then return 0 end
+    local treats = type(stats.Treats) == "table" and tonumber(stats.Treats.StarTreat) or nil
+    if treats then return math.floor(treats) end
+    local found
+    local visited = {}
+    local function scan(value, depth)
+        if found or type(value) ~= "table" or visited[value] or depth > 4 then return end
+        visited[value] = true
+        for k, child in pairs(value) do
+            if k == "StarTreat" and tonumber(child) then found = tonumber(child) return end
+            local lowered = string.lower(tostring(k))
+            if type(child) == "table"
+                and not (lowered:find("total", 1, true) or lowered:find("used", 1, true)
+                    or lowered:find("spent", 1, true) or lowered:find("history", 1, true)) then
+                scan(child, depth + 1)
+            end
         end
     end
-    return nil
+    scan(stats, 0)
+    return math.floor(found or 0)
+end
+
+-- Force-refresh bypass MinInterval: cac worker khac refresh lien tuc nen
+-- getStats(true) thuong bo qua -> doc nhan ban PRE-purchase/gift = false
+-- unconfirmed. Zero con tro truoc khi doc la cach ep refresh that.
+local function forceFreshStats()
+    Runtime.LastStatsRefresh = 0
+    return getStats(true)
 end
 
 local function buyStarTreat()
@@ -9094,15 +9427,14 @@ local function buyStarTreat()
         end
     end
     package = package or {Category = "Treats", Type = "StarTreat"}
-    local before = deepFindNumber(getStats(false), "StarTreat") or 0
+    local before = starTreatStock(forceFreshStats())
     local ok = remoteCall("ItemPackageEvent", "Purchase",
         {Category = package.Category, Type = package.Type, Amount = 1})
     if ok then
         task.wait(0.6)
-        getStats(true)
         -- Confirmed by the real stock delta: a fired-but-denied purchase must
         -- not report success (the caller would burn the next pass on nothing).
-        if (deepFindNumber(getStats(false), "StarTreat") or 0) > before then
+        if starTreatStock(forceFreshStats()) > before then
             setStatus("Star Treat", "Bought Star Treat from Ticket Tent")
             return true
         end
@@ -9122,7 +9454,7 @@ function Runtime.StarTreatStep()
     -- of active systems (farm/RJ/treat).
     if starTreatPendingCount(cells) <= 0 then return "done" end
     local stats = getStats(false)
-    local starTreats = math.floor(deepFindNumber(stats, "StarTreat") or 0)
+    local starTreats = starTreatStock(stats)
     if starTreats <= 0 then
         -- Empty stock: Mother Bear quests deliver them passively, but spare
         -- tickets can buy one right away once the bee-egg queue is finished
@@ -9146,20 +9478,23 @@ function Runtime.StarTreatStep()
         end
         return "wait"
     end
-    local cells = hiveBeeCells() -- one scan shared by pending check + gifting loop
     for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
         for _, cell in ipairs(cells) do
             if not cell.Locked and Runtime.NormalizeEventBeeName(cell.Type) == wanted and not cell.Gifted then
                 setStatus("Star Treat", string.format("Using on %s (%d,%d) | stock %d",
                     cell.Type, cell.X, cell.Y, starTreats))
+                -- Baseline FRESH ngay truoc khi fire (B2): cached stock gap
+                -- nua vong worker khac = false unconfirmed → 30s backoff moi pass.
+                starTreats = starTreatStock(forceFreshStats())
+                if starTreats <= 0 then return "wait" end
                 local ok = remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "StarTreat", 1)
                 if ok then
                     task.wait(1)
                     -- Confirm consumption by the REAL stock delta: a fired
                     -- RemoteEvent says nothing about server-side acceptance,
                     -- and an unconfirmed loop would spam every 3s pass.
-                    local fresh = deepFindNumber(getStats(true), "StarTreat") or 0
+                    local fresh = starTreatStock(forceFreshStats())
                     if fresh >= starTreats then
                         Runtime.StarTreatRetryAt = os.clock() + 30
                         setStatus("Star Treat", "StarTreat use not confirmed - retry in 30s")
@@ -9203,9 +9538,16 @@ function Runtime.RJUpgradeBasicStep()
     if Runtime.RJStock <= reserve or (Runtime.RJUpgradeSyncs or 0) >= 20 then
         Runtime.RJUpgradeSyncs = 0
         getStats(true)
-        -- min() keeps concurrent farmer/quest decrements during the blocking
-        -- refresh from being rolled back into phantom stock.
-        Runtime.RJStock = math.min(Runtime.RJStock, rawEggCount("RoyalJelly"))
+        local real = rawEggCount("RoyalJelly")
+        if Runtime.RJStock <= reserve then
+            -- RE-SEED khi counter da chet o duoi reserve: min()-only khong bao
+            -- gio hoi phuc counter bi seed sai truoc khi stats replicate ->
+            -- RJ upgrade dung vien ca session. Blocking refresh o tren da gioi
+            -- han cua so concurrent-decrement.
+            Runtime.RJStock = real
+        else
+            Runtime.RJStock = math.min(Runtime.RJStock, real)
+        end
     end
     if Runtime.RJStock <= reserve then
         -- Not enough above the quest reserve: stand down, remember, re-check.
@@ -9213,7 +9555,16 @@ function Runtime.RJUpgradeBasicStep()
         return
     end
     for _, cell in ipairs(hiveBeeCells()) do
-        if not cell.Locked and not cell.Gifted
+        -- SKIP cell Blue loop dang ghim (BlueJellyCell): roll vao day ghi de
+        -- con ong blue vua tim duoc = mat RJ + mat find.
+        local pinned = Runtime.BlueJellyCell
+        local cellKey = cell.X .. "," .. cell.Y
+        local pinnedKey = nil
+        if pinned and pinned.Parent then
+            local px, py = pinned.Name:match("^C(%d+),(%d+)$")
+            pinnedKey = px and (px .. "," .. py) or nil
+        end
+        if not cell.Locked and not cell.Gifted and cellKey ~= pinnedKey
             and Runtime.NormalizeEventBeeName(cell.Type) == "basic" then
             local ok = remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "RoyalJelly", 1)
             if ok then
@@ -9576,13 +9927,13 @@ local function entryEnabled(entry)
 end
 
 -- Dig: ToolCollect only does anything while a collector is HELD. After a
--- rejoin the collector sits in the backpack unequipped and the remote no-ops,
--- so keep the best owned collector equipped using the game's own
--- stats.EquippedCollector tracking.
+-- rejoin/death the collector sits in the backpack unequipped AND
+-- stats.EquippedCollector can stay stale ("Vacuum") while nothing is held -
+-- trusting stats meant the equip path never re-ran and ToolCollect no-oped
+-- FOREVER ("khong thay dig"). Now: verify the tool is PHYSICALLY in the
+-- Character; if not, equip directly from the Backpack (instant, client-side)
+-- with the remote as fallback.
 function Runtime.EnsureCollectorEquipped()
-    local stats = getStats(false)
-    local equipped = type(stats) == "table" and tostring(stats.EquippedCollector or "") or ""
-    if equipped ~= "" then return false end
     -- Later milestones hold better collectors: keep the LAST owned match.
     local best
     for _, milestone in ipairs(Config.ProgressionMilestones or {}) do
@@ -9593,6 +9944,26 @@ function Runtime.EnsureCollectorEquipped()
         end
     end
     if not best then return false end
+    local heldName = tostring(best.Item)
+    local type_ = tostring(best.Type)
+    local character = Player.Character
+    if character then
+        -- IsA("Tool") bat buoc: Accessory/Model trung ten se false-positive
+        -- "dang cam" -> khong bao gio equip collector that.
+        local held = character:FindFirstChild(heldName) or character:FindFirstChild(type_)
+        if held and held:IsA("Tool") then
+            return false -- dang cam that tren nguoi
+        end
+    end
+    -- Instant client-side equip from the Backpack when possible.
+    local backpack = Player:FindFirstChildOfClass("Backpack")
+    local tool = backpack
+        and (backpack:FindFirstChild(heldName) or backpack:FindFirstChild(type_))
+    if tool and tool:IsA("Tool") then
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then pcall(function() humanoid:EquipTool(tool) end) end
+    end
+    -- Remote fallback (server-side equip state) - du route client thanh cong.
     remoteCall("ItemPackageEvent", "Equip",
         {Mute = true, Category = "Collector", Type = best.Type})
     setStatus("Dig", "Equipped collector: " .. tostring(best.Item))
@@ -9603,7 +9974,7 @@ task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoFarm and (Runtime.Digging or Runtime.State == "Auto meteor") then
             if os.clock() >= (Runtime.NextCollectorEquipCheck or 0) then
-                Runtime.NextCollectorEquipCheck = os.clock() + 10
+                Runtime.NextCollectorEquipCheck = os.clock() + 5
                 pcall(Runtime.EnsureCollectorEquipped)
             end
             remoteCall("ToolCollect")
@@ -9660,7 +10031,16 @@ end
 function Runtime.MythicDiscoveryCount(refresh)
     local stats = getStats(refresh == true)
     local discovered = type(stats) == "table" and stats.DiscoveredBees or nil
-    if type(discovered) ~= "table" then return 0, {} end
+    if type(discovered) ~= "table" then
+        -- FAIL CLOSED + diagnostic: 0 vinh vien = meteor gate + blue gate
+        -- deadlock khong ai hay. Warn 1 lan de recon bong shape.
+        if not Runtime.DiscoveredShapeWarned then
+            Runtime.DiscoveredShapeWarned = true
+            warn("[BSS Kaitun] stats.DiscoveredBees khong phai table ("
+                .. typeof(discovered) .. ") - discovery gates fail closed")
+        end
+        return 0, {}
+    end
     local found, visited = {}, {}
     local function normalize(value)
         return string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
@@ -9748,6 +10128,14 @@ function Runtime.UnlockBlueHQ()
 
         local stats = MaterialSystem.Stats(true)
         local jelly = math.floor(MaterialSystem.Amount("RoyalJelly", stats))
+        -- RJ ACCOUNTING: blue loop tung la ngoai Shared RJStock/quest reserve
+        -- -> stash chay ve 0 trong khi counter van bao cao con, RJ farmer spam
+        -- remote fail + quest reserve bi an. Dong bo nhu RJRollStep.
+        Runtime.RJStock = math.max(0, math.min(Runtime.RJStock, jelly))
+        if Runtime.RJStock <= (tonumber(Config.RJQuestReserve) or 5) then
+            setStatus("Unlock Blue HQ", "RJ chi du cho quest reserve - stop blue rolls")
+            return false, "reserve_protected"
+        end
         if jelly <= 0 then
             setStatus("Unlock Blue HQ", "Out of Royal Jelly - wait for token/quest rewards")
             return false, "no_jelly"
@@ -9757,6 +10145,7 @@ function Runtime.UnlockBlueHQ()
         for roll = 1, maxRolls do
             if not Runtime.Running or not cell.Parent then return false, "stopped" end
             if Runtime.MeteorPriorityActive then return false, "meteor" end
+            if Runtime.RJStock <= (tonumber(Config.RJQuestReserve) or 5) then return false, "reserve_protected" end
             if cell:FindFirstChild("GiftedCell") then
                 Runtime.BlueJellyCell = nil
                 return false, "gifted_protected"
@@ -9766,11 +10155,11 @@ function Runtime.UnlockBlueHQ()
             setStatus("Unlock Blue HQ", string.format("Blue discovered %d/%d | RJ roll %d/%d",
                 beforeBlue, required, roll, maxRolls))
             local ok, remaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
-                "ConstructHiveCellFromEgg", x, y, "RoyalJelly", 1, false
+                "ConstructHiveCellFromEgg", x, y, "RoyalJelly", 1
             )
             if not ok then return false, "remote_failed" end
             applyHatchResponse("RoyalJelly", remaining, success, honeycomb, discoveredBees, eggUses)
-            Runtime.BlueJellyRolls += 1
+            Runtime.RJStock = math.max(0, Runtime.RJStock - 1)
             task.wait(math.max(0.08, tonumber(Config.BlueJellyRollDelay) or 0.2))
             cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
             local currentType = cellType and tostring(cellType.Value) or ""
@@ -9780,7 +10169,17 @@ function Runtime.UnlockBlueHQ()
                 task.defer(function() getStats(true) end)
                 return true, "blue_found"
             end
-            if success ~= true and currentType == oldType then return false, "server_rejected" end
+            -- CONSUMED ROLL: server bao success nhung CellType chua replicate
+            -- qua 0.2s lag = khong re-roll cung cell (wasted RJ + overwrite
+            -- con ong moi).
+            if success == true then
+                Runtime.BlueJellyCell = nil
+                return false, "roll_consumed_awaiting_replication"
+            end
+            if currentType == oldType and (tonumber(remaining) or 0) >= 0 and remaining ~= nil then
+                -- RJ da an nhung type chua doi: doi them thay vi re-roll ngay
+                task.wait(1)
+            end
         end
         task.defer(function() getStats(true) end)
         return false, "pass_complete"
@@ -10000,7 +10399,12 @@ local function progressionWork(reason, allowSideJobs)
             and os.clock() >= (Runtime.ViciousRetryAt or 0) then
             local ok, result = xpcall(Runtime.FarmViciousAlways, debug.traceback)
             if not ok then
+                -- Clear day du bo flag cua vic fight: thieu MaterialCombat/
+                -- Digging khiếp avoid worker coi moi mob la non-threat ->
+                -- di bo vao mob ca session.
                 Runtime.ViciousBusy = false
+                Runtime.MaterialCombat = false
+                Runtime.Digging = false
                 reportError("ViciousAlways", result)
             elseif result then
                 return
@@ -10122,14 +10526,10 @@ local function progression()
             continue
         end
 
-        -- Right after a CONFIRMED hatch (authoritative server response) the new
-        -- bee is already proven: don't block this iteration on a stats refresh.
-        -- The async refresh still lands in the background.
-        if os.clock() < (Runtime.SkipStatsBlockUntil or 0) then
-            getStats(false)
-        else
-            getStats(true)
-        end
+        -- Khong blocking refresh tai day: hatch response + deferred refresh
+        -- tu markBeeHatched dan du lieu moi vao cache nen; blocking Get tai
+        -- cho nay chinh la khoang dung yen sau moi lan hatch.
+        getStats(false)
         if eggFundingBlocked() then
             Runtime.ProgressStage = "Saving honey for Basic Egg"
             progressionWork("Farm honey for Basic Egg")
@@ -10155,8 +10555,16 @@ local function progression()
             end
             if growHiveOneBee() then
                 local after = beeCount()
-                Runtime.ProgressStage = string.format("Hive %d/%d bees", after, Config.ProgressionTargetBees)
-                if after <= before then task.wait(Config.RetryDelay) end
+                -- SETTLE WAIT: stats/workspace can 1-2s de replicate con ong
+                -- moi; stale count khiên loop hatch LIÊN TỤC nhiều ô khác
+                -- nhau (overshoot target + đốt trứng).
+                local settleDeadline = os.clock() + 2
+                while Runtime.Running and beeCount() <= before
+                    and os.clock() < settleDeadline do
+                    task.wait(0.1)
+                end
+                Runtime.ProgressStage = string.format("Hive %d/%d bees", beeCount(), Config.ProgressionTargetBees)
+                if beeCount() <= before then task.wait(Config.RetryDelay) end
             else
                 progressionWork("Saving honey for Basic Egg or Hive Slot")
             end
@@ -10218,6 +10626,8 @@ task.spawn(function()
                 local ok, result = xpcall(Runtime.FarmViciousAlways, debug.traceback)
                 if not ok then
                     Runtime.ViciousBusy = false
+                    Runtime.MaterialCombat = false
+                    Runtime.Digging = false
                     reportError("ViciousAlways", result)
                 elseif result then
                     return
