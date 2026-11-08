@@ -819,6 +819,7 @@ local Runtime = {
     GlideRunnerConnection = nil,
     ToyRetryAt = {},
     ToyConsecutiveBusy = {},
+    ToyMissingWarned = {},
     ToysClaimed = 0,
     RJGiftedTypes = {},
     RJGiftedCount = 0,
@@ -1043,12 +1044,44 @@ local function formatNumber(number)
     return tostring(math.floor(number + 0.5))
 end
 
+-- REMOTE TELEMETRY + GLOBAL SOFT LIMITER: "Remote event invocation discarded
+-- (exceeds limit)" = mot remote nao do bi fire qua tan. Track fires/remote
+-- rolling 1s; flood >40/s -> warn DUNG TEN remote (de fix dung cho); tong
+-- >80/s -> yield nhe de duoi nguong discard (max legit ~35/s, khong anh
+-- huong cadence nao).
+local remoteFireLog = {}
+local globalFireWindowStart, globalFireWindowCount = os.clock(), 0
+local function remoteTelemetry(name)
+    local now = os.clock()
+    if now - globalFireWindowStart >= 1 then
+        globalFireWindowStart = now
+        globalFireWindowCount = 0
+    end
+    globalFireWindowCount += 1
+    local log = remoteFireLog[name]
+    if not log or now - log.WindowStart >= 1 then
+        log = {Count = 0, WindowStart = now}
+        remoteFireLog[name] = log
+    end
+    log.Count += 1
+    if log.Count == 41 then
+        warn("[BSS Kaitun] REMOTE FLOOD: '" .. name
+            .. "' >40 fire/giay - day la thu gay 'invocation discarded'")
+    end
+    while Runtime.Running and globalFireWindowCount > 80 do
+        local nowX = os.clock()
+        if nowX - globalFireWindowStart >= 1 then break end
+        task.wait(0.02)
+    end
+end
+
 local function remoteCall(name, ...)
     local remote = Events:FindFirstChild(name)
     if not remote then
         return false, "missing remote " .. name
     end
     if remote:IsA("RemoteFunction") then
+        remoteTelemetry(name)
         local arguments = table.pack(...)
         local packed, completed
         task.spawn(function()
@@ -1064,6 +1097,7 @@ local function remoteCall(name, ...)
         return true, table.unpack(packed, 2, packed.n)
     end
     if remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+        remoteTelemetry(name)
         local ok, err = pcall(remote.FireServer, remote, ...)
         return ok, err
     end
@@ -4682,6 +4716,17 @@ function Runtime.ClaimFreeToys()
             local remaining = lastUse and math.max(0, cooldown - (serverNow - lastUse)) or 0
             if remaining > 0 then
                 Runtime.ToyRetryAt[toyName] = now + math.clamp(remaining, 5, 300)
+            elseif not toyInstance then
+                -- KHONG fire cho toy khong ton tai trong workspace.Toys: game
+                -- client handler goi nil voi ten khong biet (bug "attempt to
+                -- call a nil value" LocalScript line 1) + server cung reject.
+                -- Park dai + warn mot lan de sua config/nhan dien build khac.
+                Runtime.ToyRetryAt[toyName] = now + 600
+                if not Runtime.ToyMissingWarned[toyName] then
+                    Runtime.ToyMissingWarned[toyName] = true
+                    warn("[BSS Kaitun] Toy '" .. toyName
+                        .. "' khong ton tai trong workspace.Toys - KHONG fire (park 10 phut)")
+                end
             else
                 -- Shared pads (field boosters) can be globally busy: the server
                 -- silently drops the fire and our ToyTimes stays empty. So do NOT
