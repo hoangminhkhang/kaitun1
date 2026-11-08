@@ -906,6 +906,10 @@ local Runtime = {
     -- the generic workspace sweep skips them (41k flower nodes would
     -- otherwise pay optimizeObject TWICE).
     FastHidden = setmetatable({}, {__mode = "k"}),
+    -- Ring buffer cho nil-call correlator (remoteTelemetry ghi, correlator
+    -- doc khi game LocalScript obfuscated error) — BAT BUOC khoi tao: write
+    -- khong guard da tung la load-killer (chunk chet tai badge worker).
+    RemoteFireRing = {},
     HoneyRateSamples = {},
     HoneyRateTotal = 0,
     TreatCycleStart = nil,
@@ -1068,6 +1072,7 @@ local function remoteTelemetry(name)
     -- RING BUFFER cho correlator: khi game LocalScript obfuscated error
     -- "attempt to call a nil value", in ra 30 remote gan nhat + state —
     -- dung de bat thu pham gay loi trong game client.
+    Runtime.RemoteFireRing = Runtime.RemoteFireRing or {}
     local ring = Runtime.RemoteFireRing
     ring[#ring + 1] = {T = now, Name = name}
     if #ring > 40 then table.remove(ring, 1) end
@@ -4051,12 +4056,14 @@ do
         Runtime.LastScannerHitAt = os.clock()
     end
 
-    local function ensureWatch(folderName, onAdded, onRemoved)
+    local function ensureWatch(folderName, onAdded, onRemoved, folderInstance)
         local state = watched[folderName]
         if state and state.Folder.Parent then
             return state.Folder
         end
-        local folder = workspace:FindFirstChild(folderName)
+        -- folderInstance: container long sau (VD Particles.Folder2 khong nam
+        -- o workspace root — lookup by name cu khong bao gio thay no).
+        local folder = folderInstance or workspace:FindFirstChild(folderName)
         if not folder then
             watched[folderName] = nil
             return nil
@@ -4108,12 +4115,14 @@ do
                 end
                 wake()
             end, function() wake() end)
-            -- Sprouts + Particles.Folder2 (runtime containers).
+            -- Sprouts + Particles.Folder2 (runtime containers). Folder2 long
+            -- trong Particles — truyen folderInstance (ensureWatch lookup by
+            -- name chi thay workspace root).
             ensureWatch("Sprouts", function() wake() end, function() wake() end)
             local folder2 = workspace:FindFirstChild("Particles")
                 and workspace.Particles:FindFirstChild("Folder2")
             if folder2 then
-                ensureWatch("Folder2", function() wake() end, function() wake() end)
+                ensureWatch("Folder2", function() wake() end, function() wake() end, folder2)
             else
                 watched["Folder2"] = nil
             end
@@ -10995,6 +11004,11 @@ local function progression()
     return true
 end
 
+-- BOOT MARK: phai dat TRUOC vong blocking (while progression) — cu print
+-- nam SAU main loop nen cau truc khong bao gio in (nguoi dung tuong "khong
+-- chay" trong khi thuc te da load ok). Day la bang chung load that su.
+print("[BSS Kaitun] Loaded (v1.2 build 1108 | hideGameUI=REMOVED | sprout=duo-container | detector-hub)")
+
 while Runtime.Running do
     local okProgression, progressionError = xpcall(progression, debug.traceback)
     if okProgression then break end
@@ -11095,5 +11109,3 @@ task.spawn(function()
         end
     end
 end)
-
-print("[BSS Kaitun] Loaded (v1.2 build 1101 | hideGameUI=REMOVED | sprout=duo-container)")
