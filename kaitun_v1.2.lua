@@ -731,6 +731,7 @@ local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
 local Lighting = game:GetService("Lighting")
 local HttpService = game:GetService("HttpService")
+local LogService = game:GetService("LogService")
 
 local Player = Players.LocalPlayer
 repeat task.wait() until Player
@@ -1064,6 +1065,12 @@ local function remoteTelemetry(name)
         remoteFireLog[name] = log
     end
     log.Count += 1
+    -- RING BUFFER cho correlator: khi game LocalScript obfuscated error
+    -- "attempt to call a nil value", in ra 30 remote gan nhat + state —
+    -- dung de bat thu pham gay loi trong game client.
+    local ring = Runtime.RemoteFireRing
+    ring[#ring + 1] = {T = now, Name = name}
+    if #ring > 40 then table.remove(ring, 1) end
     if log.Count == 41 then
         warn("[BSS Kaitun] REMOTE FLOOD: '" .. name
             .. "' >40 fire/giay - day la thu gay 'invocation discarded'")
@@ -9378,6 +9385,35 @@ task.spawn(function()
             gearText ~= "" and gearText or "stage complete"))
         task.wait(30)
     end
+end)
+
+-- NIL-CALL CORRELATOR: game client co cac LocalScript obfuscated (ten random,
+-- "Line 1") bat dau call nil khi xu ly state ta tao ra (hatch FX, actives,
+-- toy handler...). Stack cua chung vo ich — nhung khi loi xuat hien, in ra
+-- 30 remote gan nhat + state de BAT DINH DANH hanh dong gay loi. Throttle
+-- 15s de loi spam khong spam correlator.
+task.spawn(function()
+    local lastCorrelate = 0
+    connect(LogService.OnClientMessage, function(messageType, message)
+        if messageType ~= Enum.MessageType.Error then return end
+        local text = tostring(message or "")
+        if not text:find("attempt to call a nil value", 1, true) then return end
+        if text:find("kaitun_v1.2", 1, true) then return end -- loi cua ta da co reportError rieng
+        if os.clock() - lastCorrelate < 15 then return end
+        lastCorrelate = os.clock()
+        local pieces = {}
+        local ring = Runtime.RemoteFireRing or {}
+        local from = math.max(1, #ring - 9)
+        for i = #ring, from, -1 do
+            local entry = ring[i]
+            table.insert(pieces, string.format("%s(%.1fs ago)", entry.Name, os.clock() - entry.T))
+        end
+        warn(string.format(
+            "[BSS Kaitun] nil-call correlate | state=%s | %s | field=%s | remotes moi nhat: %s",
+            tostring(Runtime.State), tostring(Runtime.Detail),
+            tostring(Runtime.CurrentField),
+            #pieces > 0 and table.concat(pieces, ", ") or "(khong co remote nao trong vong 40 fire)"))
+    end)
 end)
 if Config.LowGraphics then task.spawn(applyLowGraphics, true) end
 
