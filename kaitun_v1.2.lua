@@ -12,6 +12,15 @@
     watchdog sets Runtime.FpsLow (2 low 5s-windows to enter, 2 good to
     leave) - re-hide interval x2 and scanner cadence floored at 0.5s while
     low. Both default ON via FixLagQueueBatch / FixLagAdaptive.
+    DEAD-CODE SWEEP: static scan of all 328 function definitions found 8 with
+    zero references anywhere (incl. loader/ui.lua, no string/dynamic dispatch):
+    Runtime.TeleRewardsClaimed, Runtime.MarkTeleRewardsDone, hasAnyBee,
+    isCharacterDescendant, Runtime.FindBestToken, Runtime.GetQuestObjectives,
+    Runtime.ScanMob, Runtime.GetMaterialDeficits - all deleted, plus the
+    now-orphaned nearbyLiveMob (its only caller was ScanMob), plus 2 unused
+    service locals (UserInputService, HttpService). 95 functions are called
+    exactly once (live scheduler steps) and were kept; apparent duplicates
+    named scan/normalize/mark are scoped locals inside different functions.
     Place: Bee Swarm Simulator (1537690962)
 
     Main flow:
@@ -749,10 +758,8 @@ end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
 local Lighting = game:GetService("Lighting")
-local HttpService = game:GetService("HttpService")
 local LogService = game:GetService("LogService")
 
 local Player = Players.LocalPlayer
@@ -2814,28 +2821,6 @@ local function saveTeleRewardLedger(ledger)
     pcall(writefileFn, teleRewardFilePath(), table.concat(keys, "\n"))
 end
 
-function Runtime.TeleRewardsClaimed()
-    -- LEDGER LA NGUON TRUTH DUY NHAT: CollectWorldRewards tu check per-spot
-    -- (skip spot da lay) nen ham nay chi con dung cho truy van ben ngoai.
-    local spots = Config.TeleRewardSpots or {}
-    if #spots == 0 then return true end
-    local ledger = loadTeleRewardLedger(spots)
-    for index, spot in ipairs(spots) do
-        if not ledger[teleRewardSpotKey(spot, index)] then return false end
-    end
-    return true
-end
-
-function Runtime.MarkTeleRewardsDone()
-    -- Force-finish: mark every configured spot done.
-    local spots = Config.TeleRewardSpots or {}
-    local ledger = loadTeleRewardLedger(spots)
-    for index, spot in ipairs(spots) do
-        ledger[teleRewardSpotKey(spot, index)] = true
-    end
-    saveTeleRewardLedger(ledger)
-end
-
 -- Tele reward phase (from telebss rewards.txt): instantly teleport to each
 -- map reward point on game entry, BEFORE claiming hive/hatching. Each point: set
 -- CFrame directly onto the reward, stand still + nudge up/down via CFrame
@@ -2956,10 +2941,6 @@ function Runtime.CollectWorldRewards()
         Runtime.TeleRewardsCollected, #spots, skipped, alreadyDone, remaining))
     task.wait(0.2)
     return true
-end
-
-local function hasAnyBee()
-    return beeCount() > 0
 end
 
 local function rawEggCount(eggType)
@@ -4069,11 +4050,6 @@ Runtime.FlowerEffectIndex = setmetatable({}, {__mode = "k"}) -- [tile] = "Sparkl
 do
     local watched = {} -- [folderName] = {Folder = Instance, Conns = {...}}
     local populatedFlowerEffects = false
-    local function isCharacterDescendant(inst)
-        local model = inst and inst:FindFirstAncestorOfClass("Model")
-        return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
-    end
-
     local function wake()
         Runtime.LastScannerHitAt = os.clock()
     end
@@ -4348,11 +4324,6 @@ local function findBestTokenInStandingField()
         RootX = root.Position.X, RootZ = root.Position.Z,
     }
     return first and first.Token or nil, score, route
-end
-
-Runtime.FindBestToken = function()
-    local token, score = findBestTokenInStandingField()
-    return token, score, Runtime.LastTokenPlan
 end
 
 -- Pop token TIEP THEO tu route planner da tinh san (khong re-scan). Token
@@ -6705,29 +6676,8 @@ local function nearbyLiveMobs(field)
     return list
 end
 
-local function nearbyLiveMob(field)
-    local _, _, root = getCharacter(1)
-    if not root then return nil end
-    local nearest, nearestDistance
-    for _, mob in ipairs(nearbyLiveMobs(field)) do
-        local distance = (root.Position - mob.Position).Magnitude
-        if not nearestDistance or distance < nearestDistance then
-            nearest, nearestDistance = mob.Instance, distance
-        end
-    end
-    return nearest
-end
-
-Runtime.GetQuestObjectives = function(refresh)
-    return incompleteQuestObjectives(refresh == true)
-end
 Runtime.GoToNPC = interactQuestNPC
 Runtime.IsFieldUnlocked = fieldUnlocked
-Runtime.ScanMob = function()
-    local field = Runtime.CurrentField ~= "" and findField(Runtime.CurrentField) or standingField()
-    return nearbyLiveMob(field)
-end
-
 -- When hit, retreat toward the field center if it is safe from EVERY mob.
 -- Otherwise pick the candidate point with the largest minimum distance to all
 -- mobs; a point inside any mob's danger zone is rejected outright. Returns nil
@@ -8500,10 +8450,6 @@ function MaterialSystem.Work(entry)
     return false
 end
 
-Runtime.GetMaterialDeficits = function(itemType)
-    local entry = {Type = itemType, Materials = MaterialSystem.Gear[itemType] or {}}
-    return MaterialSystem.Deficits(entry, MaterialSystem.Stats(true))
-end
 Runtime.GetBlenderStatus = MaterialSystem.BlenderStatus
 
 local function meteorPosition(value)
