@@ -117,12 +117,11 @@ local USER_DEFAULTS = {
     AutoPlaceSprinkler = true,
     FarmField = "Sunflower Field",
     RedeemCodes = true,
-    AmuletKeepOld = true,
+-- (AmuletKeepOld da khai bao o tren - ban dup da xoa)
     StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
     RJShopHoneyBudget = 5000000000,
     RJTargetGiftedTypes = 15,
     TreatBudgetPercent = 10,
-    BlackScreenTransparency = 0.3,
 }
 
 -- ==========================================================================
@@ -179,8 +178,7 @@ local DEFAULT_CONFIG = {
     TokenDetourMaxStuds = 60,
     TokenDetourCacheSeconds = 1,
     FarmAvoidMobs = true,
-    FarmPointCandidates = 3,
-    -- Mobs trigger the dodge hop only when CLOSE (video feedback: hopping with
+        -- Mobs trigger the dodge hop only when CLOSE (video feedback: hopping with
     -- nothing near the player looked broken). Threat retreat keeps its band.
     MobJumpRadius = 30,
     -- Hazard scanner: only "goo" is name-evidenced (workspace instance per
@@ -319,8 +317,7 @@ local DEFAULT_CONFIG = {
     MaterialCombatSeconds = 18,
     -- Ride height EXTRA above the vic/bonus-mob head (trên nửa thân + số này).
     -- Nâng từ 3 lên 5: vẫn dính đòn khi mob nhấp nhô lúc lunge.
-    ViciousRideExtraStuds = 5,
-    MaterialStatsInterval = 2,
+        MaterialStatsInterval = 2,
     MaterialPlanterHarvestPercent = 0.98,
     MaterialPlanterActionCooldown = 5,
     PlanterHarvestPercent = 0.98,
@@ -424,9 +421,7 @@ local DEFAULT_CONFIG = {
     MinSprinklerBees = 25,
     DynamicField = true,
     MacroMode = true,
-    SafeMaterialMode = true,
-    BlackScreen = true,
-    LowGraphics = true,
+            LowGraphics = true,
     FixLagAtlasMode = true,
     FixLagHideBees = true,
     FixLagHideTokens = true,
@@ -468,10 +463,6 @@ local DEFAULT_CONFIG = {
         "FOURtunate",
     },
     UseBoostCodesEarly = false,
-    ProtectedMaterials = {
-        StarEgg = true, Diamond = true, StarJelly = true, Gumdrops = true,
-        Stinger = true, Glitter = true, MoonCharm = true,
-    },
     FieldByBees = {
         {Bees = 1, Field = "Sunflower Field"},
         {Bees = 5, Field = "Bamboo Field"},
@@ -561,7 +552,6 @@ local DEFAULT_CONFIG = {
     MeteorImpactLeadFraction = 0.6,
     MeteorFallbackLifetime = 5,
     MeteorTriggerInterval = 60,
-    SprinklerPlaceInterval = 8,
     MaxDeferredPurchasesPerPass = 1,
 }
 
@@ -822,7 +812,7 @@ local Runtime = {
     BadgeChecks = 0,
     LastBadgeName = "",
     LastWealthClockAttempt = -math.huge,
-    TweenRoot = nil,
+-- (TweenRoot da khai bao o tren - ban dup da xoa)
     TweenRootWasAnchored = false,
     TweenRootReleaseAt = nil,
     Glide = nil,
@@ -1169,18 +1159,27 @@ function MaterialSystem.Amount(material, stats)
     return best
 end
 
+-- CANONICAL PRECOMPUTE: ~90 entries × lower+gsub PER CALL x per-ingredient
+-- trong planner loop. Map normalized->canonical build lazy 1 lan (first-wins
+-- giu dung thu tu Aliases truoc Recipes nhu ban cu).
+local canonicalLookup
 function MaterialSystem.Canonical(name)
-    local normalized = string.lower(tostring(name or "")):gsub("[^%w]", "")
-    for canonical, aliases in pairs(MaterialSystem.Aliases) do
-        if string.lower(canonical):gsub("[^%w]", "") == normalized then return canonical end
-        for _, alias in ipairs(aliases) do
-            if string.lower(alias):gsub("[^%w]", "") == normalized then return canonical end
+    if not canonicalLookup then
+        canonicalLookup = {}
+        local function addKey(canonical)
+            local normalized = string.lower(tostring(canonical)):gsub("[^%w]", "")
+            if not canonicalLookup[normalized] then
+                canonicalLookup[normalized] = tostring(canonical)
+            end
         end
+        for canonical, aliases in pairs(MaterialSystem.Aliases or {}) do
+            addKey(canonical)
+            for _, alias in ipairs(aliases) do addKey(alias) end
+        end
+        for canonical in pairs(MaterialSystem.Recipes or {}) do addKey(canonical) end
     end
-    for canonical in pairs(MaterialSystem.Recipes) do
-        if string.lower(canonical):gsub("[^%w]", "") == normalized then return canonical end
-    end
-    return tostring(name)
+    local normalized = string.lower(tostring(name or "")):gsub("[^%w]", "")
+    return canonicalLookup[normalized] or tostring(name)
 end
 
 function MaterialSystem.Recipe(material)
@@ -1221,16 +1220,44 @@ local function objectPosition(object)
     return part and part.Position or nil
 end
 
+-- FIELD BOUNDS MEMO: zone/platform geometry la TINH (CFrame/Size khong doi)
+-- nhung fieldBoundsOf/fieldContainsPosition chay hang tram lan/giay (token
+-- scan, coverage, corner-avoid 0.05s tick...) — Model GetBoundingBox la
+-- descendant walk. Memo per-instance chi cho con cua FlowerZones.
+local fieldBoundsMemo = setmetatable({}, {__mode = "k"})
+
 local function fieldContainsPosition(field, position, padding)
     if not field or not position then return false end
     local boundsCFrame, boundsSize
-    if field:IsA("BasePart") then
-        boundsCFrame, boundsSize = field.CFrame, field.Size
-    elseif field:IsA("Model") then
-        boundsCFrame, boundsSize = field:GetBoundingBox()
+    if field.Parent and field.Parent.Name == "FlowerZones" then
+        local memo = fieldBoundsMemo[field]
+        if memo then
+            boundsCFrame, boundsSize = memo[1], memo[2]
+        else
+            if field:IsA("BasePart") then
+                boundsCFrame, boundsSize = field.CFrame, field.Size
+            elseif field:IsA("Model") then
+                local ok, cf, size = pcall(field.GetBoundingBox, field)
+                if ok then boundsCFrame, boundsSize = cf, size end
+            else
+                local part = field:FindFirstChildWhichIsA("BasePart", true)
+                if part then boundsCFrame, boundsSize = part.CFrame, part.Size end
+            end
+            if boundsCFrame and boundsSize then
+                fieldBoundsMemo[field] = {boundsCFrame, boundsSize}
+            end
+        end
     else
-        local part = field:FindFirstChildWhichIsA("BasePart", true)
-        if part then boundsCFrame, boundsSize = part.CFrame, part.Size end
+        -- Non-zone path (hive platform, poly...): giu nguyen khong memo.
+        if field:IsA("BasePart") then
+            boundsCFrame, boundsSize = field.CFrame, field.Size
+        elseif field:IsA("Model") then
+            local ok, cf, size = pcall(field.GetBoundingBox, field)
+            if ok then boundsCFrame, boundsSize = cf, size end
+        else
+            local part = field:FindFirstChildWhichIsA("BasePart", true)
+            if part then boundsCFrame, boundsSize = part.CFrame, part.Size end
+        end
     end
     if not boundsCFrame or not boundsSize then return false end
     local localPoint = boundsCFrame:PointToObjectSpace(position)
@@ -1239,17 +1266,51 @@ local function fieldContainsPosition(field, position, padding)
         and math.abs(localPoint.Z) <= boundsSize.Z * 0.5 + extra
 end
 
+-- ZONES CACHE: flowerFieldAtPosition duoc goi hang chuc lan/giay (token scan,
+-- coverage point, farm point, mob field...) — moi lan la 1 GetChildren() alloc
+-- + 23 lan PointToObjectSpace. Cache list 10s (zones tinh theo server) bo tron
+-- phan alloc; chi phi con lai la 23 phep so sanh bounds — bat tranh.
+local flowerZonesCache, flowerZonesCacheAt = nil, 0
+local function getFlowerZoneList()
+    local now = os.clock()
+    if not flowerZonesCache or now - flowerZonesCacheAt > 10 then
+        local zones = workspace:FindFirstChild("FlowerZones")
+        flowerZonesCache = zones and zones:GetChildren() or nil
+        flowerZonesCacheAt = now
+    end
+    return flowerZonesCache
+end
+
 local function flowerFieldAtPosition(position, padding)
-    local zones = workspace:FindFirstChild("FlowerZones")
-    if not zones or not position then return nil end
-    for _, field in ipairs(zones:GetChildren()) do
-        if fieldContainsPosition(field, position, padding) then return field end
+    if not position then return nil end
+    local zoneList = getFlowerZoneList()
+    if not zoneList then return nil end
+    for _, field in ipairs(zoneList) do
+        if field.Parent and fieldContainsPosition(field, position, padding) then return field end
     end
     return nil
 end
 
     local function fieldBoundsOf(field)
         if not field then return nil, nil end
+        -- Memo path cho FlowerZones children (fieldContainsPosition cung viet
+        -- cung memo nay — bounds tinh, doc la O(1)).
+        if field.Parent and field.Parent.Name == "FlowerZones" then
+            local memo = fieldBoundsMemo[field]
+            if memo then return memo[1], memo[2] end
+            local cf, size
+            if field:IsA("BasePart") then
+                cf, size = field.CFrame, field.Size
+            elseif field:IsA("Model") then
+                local ok, c, s = pcall(field.GetBoundingBox, field)
+                if ok then cf, size = c, s end
+            else
+                local part = field:FindFirstChildWhichIsA("BasePart", true)
+                if part then cf, size = part.CFrame, part.Size end
+            end
+            if cf and size then fieldBoundsMemo[field] = {cf, size} end
+            return cf, size
+        end
         if field:IsA("BasePart") then
             return field.CFrame, field.Size
         elseif field:IsA("Model") then
@@ -1691,6 +1752,20 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
     local _, humanoid, root = getCharacter()
     if not root then return false, "character unavailable" end
 
+    -- SAME-TARGET EARLY-OUT: combat loops (vic thorn stand, mondo offset, mob
+    -- ride) re-issue CFrame giong heet moi tick — full setup (gen bump,
+    -- release, field lookups) moi tick = churn thuan. Cung owner + cung diem
+    -- (<1.5 stud) + khong glide dang chay + character da o gan diem: thanh
+    -- cong ngay, giu nguyen ownership (khong bump generation vi khong supersede
+    -- ai — waiter cu da thoat tu lau).
+    if Runtime.MovementOwner == movementOwner and Runtime.LastMoveTarget
+        and (Runtime.LastMoveTarget - position).Magnitude < 1.5
+        and Runtime.Glide == nil and Runtime.TweenRoot == nil
+        and (root.Position - position).Magnitude
+            <= math.max(5, tonumber(Config.SmartArrivalDistance) or 6) + 2 then
+        return true
+    end
+
     -- Supersede any older move before choosing the new route.
     Runtime.TweenGeneration += 1
     local generation = Runtime.TweenGeneration
@@ -1698,6 +1773,7 @@ local function tweenTo(target, speed, owner, forceWalk, preferGlide)
     restoreFieldMoveSpeed()
     releaseTweenRoot()
     Runtime.MovementOwner = movementOwner
+    Runtime.LastMoveTarget = position
 
     local moveSpeed = math.max(tonumber(speed) or Config.TweenSpeed, 1)
     local distance = (root.Position - position).Magnitude
@@ -2032,6 +2108,7 @@ local function cancelMovement()
     Runtime.Glide = nil
     Runtime.TweenRootReleaseAt = nil
     Runtime.MovementOwner = nil
+    Runtime.LastMoveTarget = nil
     Runtime.Digging = false
     Runtime.QuestFarming = false
     Runtime.AvoidingMob = false
@@ -2095,7 +2172,16 @@ local function workspaceBeeCount()
     return count
 end
 
+-- beeCount TTL CACHE: 29 call sites, vai site poll 0.05s (wait hatch confirm)
+-- va gate per-pass — moi lan = stats.Honeycomb walk + full Cells iteration
+-- (~300 instance reads). TTL 0.35s du ngan de hatch confirm khong tre (poll
+-- doc duoc con ong moi trong vong ke), markBeeHatched invalidate ngay.
+local beeCountCache, beeCountCacheAt = nil, 0
 local function beeCount()
+    local now = os.clock()
+    if beeCountCache and now - beeCountCacheAt < 0.35 then
+        return beeCountCache
+    end
     local stats = getStats(false)
     local honeycomb = stats and stats.Honeycomb
     local count = 0
@@ -2111,7 +2197,10 @@ local function beeCount()
         end
     end
     -- Only count replicated evidence. Never invent a local floor after a remote call.
-    return math.max(count, workspaceBeeCount())
+    count = math.max(count, workspaceBeeCount())
+    beeCountCache = count
+    beeCountCacheAt = now
+    return count
 end
 
 local function hiveCapacity()
@@ -2999,6 +3088,8 @@ local function markBeeHatched(x, y)
     Runtime.ReservedHiveCells[hiveCellKey(x, y)] = os.clock() + 120
     consumeBasicEgg()
     Runtime.WaitingForEggFunds = false
+    -- Hatch lam doi bee count: invalidate cache de cac poll sau thay ngay.
+    beeCountCacheAt = 0
     -- Async stats refresh: bee da duoc chung minh boi hatch response nen
     -- vong chinh chay tiep bang cache non-blocking.
     task.defer(function() getStats(true) end)
@@ -3892,6 +3983,148 @@ do
     end)
 end
 
+-- =============================================================================
+-- DETECTOR HUB (event-driven detection layer, atlas tracked.* style): thay
+-- polling muu cho cac container runtime bang ChildAdded/ChildRemoved duy tri
+-- index truc tiep. Callbacks RẺ (khong yield, khong work) — chi bump version
+-- + wake adaptive scanner; scanner/consumer van la nguon truth quet lai.
+--  * Collectibles/Monsters/NPCBees/Sprouts/Particles.Folder2 → version counter
+--    + wake (detection latency 0.6-2.4s backoff → 1 tick khi object spawn).
+--  * Monsters ChildAdded ten chua vicious/mondochick → set pending ngay.
+--  * Flowers DescendantAdded/Removing "Sparkles"/"LeafBurst" → tile index
+--    (thay cho walk 1-2k tiles moi giay cua nearestFlowerEffect).
+-- Container runtime-only: loop 2s re-attach khi folder xuat hien/rebuild.
+-- =============================================================================
+Runtime.DetectionVersions = {Tokens = 0, Monsters = 0, NPCBees = 0, Sprouts = 0, Folder2 = 0}
+Runtime.FlowerEffectIndex = setmetatable({}, {__mode = "k"}) -- [tile] = "Sparkles"/"Leaves"
+
+do
+    local watched = {} -- [folderName] = {Folder = Instance, Conns = {...}}
+    local populatedFlowerEffects = false
+    local function isCharacterDescendant(inst)
+        local model = inst and inst:FindFirstAncestorOfClass("Model")
+        return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
+    end
+
+    local function wake()
+        Runtime.LastScannerHitAt = os.clock()
+    end
+
+    local function ensureWatch(folderName, onAdded, onRemoved)
+        local state = watched[folderName]
+        if state and state.Folder.Parent then
+            return state.Folder
+        end
+        local folder = workspace:FindFirstChild(folderName)
+        if not folder then
+            watched[folderName] = nil
+            return nil
+        end
+        local entry = {Folder = folder, Conns = {}}
+        watched[folderName] = entry
+        local function teardown()
+            for _, conn in ipairs(entry.Conns) do pcall(conn.Disconnect, conn) end
+            if watched[folderName] == entry then watched[folderName] = nil end
+        end
+        table.insert(entry.Conns, connect(folder.ChildAdded, function(child)
+            Runtime.DetectionVersions[folderName] = (Runtime.DetectionVersions[folderName] or 0) + 1
+            onAdded(child)
+            wake()
+        end))
+        table.insert(entry.Conns, connect(folder.ChildRemoved, function(child)
+            Runtime.DetectionVersions[folderName] = (Runtime.DetectionVersions[folderName] or 0) + 1
+            onRemoved(child)
+            wake()
+        end))
+        table.insert(entry.Conns, connect(folder.Destroying, teardown))
+        table.insert(entry.Conns, connect(folder.AncestryChanged, function()
+            if not folder:IsDescendantOf(workspace) then teardown() end
+        end))
+        return folder
+    end
+
+    task.spawn(function()
+        while Runtime.Running do
+            -- Collectibles: version bump (token scan tu doc folder, hub chi
+            -- danh thuc adaptive cadence + cho scheduler biet co moi).
+            ensureWatch("Collectibles", function() wake() end, function() wake() end)
+            -- Monsters: version + IMMEDIATE pending cho mob cao gia tri.
+            ensureWatch("Monsters", function(child)
+                local lowered = string.lower(tostring(child.Name))
+                if Config.AutoFarmViciousAlways and Config.AutoFarmVicious
+                    and string.find(lowered, "vicious", 1, true) then
+                    Runtime.ViciousPending = true
+                end
+                if Config.AutoFarmMondoChick and string.find(lowered, "mondochick", 1, true) then
+                    Runtime.MondoChickPending = true
+                end
+            end, function() wake() end)
+            -- NPCBees: firefly den di — wake de scanner gap ngay (dem qua ban
+            -- ngay, dem co firefly thi catch window ngan).
+            ensureWatch("NPCBees", function(child)
+                if string.lower(tostring(child.Name)) == "firefly" then
+                    Runtime.LastFireflySeen = os.clock()
+                end
+                wake()
+            end, function() wake() end)
+            -- Sprouts + Particles.Folder2 (runtime containers).
+            ensureWatch("Sprouts", function() wake() end, function() wake() end)
+            local folder2 = workspace:FindFirstChild("Particles")
+                and workspace.Particles:FindFirstChild("Folder2")
+            if folder2 then
+                ensureWatch("Folder2", function() wake() end, function() wake() end)
+            else
+                watched["Folder2"] = nil
+            end
+            -- Flowers: SPARKLES/LEAFBURST tile index (deep events — tile duoc
+            -- them marker luc runtime; tile moi join vao la DescendantAdded).
+            local flowersWatched = ensureWatch("Flowers", function(descendant)
+                local name = tostring(descendant.Name)
+                local tile = descendant.Parent
+                if tile and tile.Parent then
+                    if name == "Sparkles" and Config.AutoFarmSparkles then
+                        Runtime.FlowerEffectIndex[tile] = "Sparkles"
+                    elseif name == "LeafBurst" and Config.AutoFarmLeaves then
+                        Runtime.FlowerEffectIndex[tile] = "Leaves"
+                    end
+                end
+            end, function(descendant)
+                if descendant.Name == "Sparkles" or descendant.Name == "LeafBurst" then
+                    local tile = descendant.Parent
+                    if tile and Runtime.FlowerEffectIndex[tile] then
+                        Runtime.FlowerEffectIndex[tile] = nil
+                    end
+                end
+            end)
+            -- ONE-TIME POPULATE: marker ton tai TRUOC watch bat dau khong bao
+            -- gio fire ChildAdded (van ton tai cho den khi duoc thu hoam) —
+            -- quet 1 lan (batched) sau 5s cho world replicate, roi index-first
+            -- la day du.
+            if flowersWatched and not populatedFlowerEffects
+                and os.clock() - (Runtime.StartedAt or 0) > 5 then
+                populatedFlowerEffects = true
+                local flowersFolder = watched.Flowers and watched.Flowers.Folder
+                if flowersFolder then
+                    local scanned = 0
+                    for _, descendant in ipairs(flowersFolder:GetDescendants()) do
+                        local name = descendant.Name
+                        if descendant.Parent then
+                            if name == "Sparkles" and Config.AutoFarmSparkles then
+                                Runtime.FlowerEffectIndex[descendant.Parent] = "Sparkles"
+                            elseif name == "LeafBurst" and Config.AutoFarmLeaves then
+                                Runtime.FlowerEffectIndex[descendant.Parent] = "Leaves"
+                            end
+                        end
+                        scanned += 1
+                        if scanned % 1500 == 0 then task.wait() end
+                    end
+                end
+            end
+            task.wait(2)
+        end
+    end)
+end
+
 local function scanTokenNodesInStandingField()
     local folder = workspace:FindFirstChild("Collectibles")
     local _, humanoid, root = getCharacter(1)
@@ -4230,9 +4463,6 @@ end
 local function watchSprinklerSpawn(field)
     local deadline = os.clock() + 3
     local fieldCFrame, fieldSize = field and fieldBoundsOf(field) or nil, nil
-    if field then
-        fieldCFrame, fieldSize = fieldBoundsOf(field)
-    end
     local conn
     conn = workspace.DescendantAdded:Connect(function(object)
         local name = object.Name
@@ -4813,17 +5043,32 @@ Runtime.NormalizeMobType = function(value)
     return normalized
 end
 
+-- ROUTE PRECOMPUTE: QuestMobRoute re-normalize 10 route names per call +
+-- FindLiveQuestMob re-fetch Monsters + re-normalize moi mob name PER ROUTE
+-- (ScanBonusMob goi per route per 0.25s tick = 10 Monsters scans + tens of
+-- gsub/tick). Map normalized->canonical build 1 lan; FindLiveQuestMob nhan
+-- Monsters folder tu ngoai de ScanBonusMob fetch 1 lan/tick.
+local mobRouteByNormalized = nil
+local function normalizedRouteMap()
+    if not mobRouteByNormalized then
+        mobRouteByNormalized = {}
+        for name in pairs(Runtime.MobRoutes) do
+            mobRouteByNormalized[Runtime.NormalizeMobType(name)] = name
+        end
+    end
+    return mobRouteByNormalized
+end
+
 Runtime.QuestMobRoute = function(value)
     local wanted = Runtime.NormalizeMobType(value)
-    for name, route in pairs(Runtime.MobRoutes) do
-        if Runtime.NormalizeMobType(name) == wanted then return name, route end
-    end
+    local canonical = normalizedRouteMap()[wanted]
+    if canonical then return canonical, Runtime.MobRoutes[canonical] end
     return nil
 end
 
-Runtime.FindLiveQuestMob = function(mobType)
+Runtime.FindLiveQuestMob = function(mobType, monstersFolder)
     local canonical = Runtime.QuestMobRoute(mobType)
-    local monsters = workspace:FindFirstChild("Monsters")
+    local monsters = monstersFolder or workspace:FindFirstChild("Monsters")
     if not canonical or not monsters then return nil end
     local wanted = Runtime.NormalizeMobType(canonical)
     for _, mob in ipairs(monsters:GetChildren()) do
@@ -5238,11 +5483,16 @@ local function hiveBeeCells()
         local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
         if x and y and cellType and cellType:IsA("ValueBase") then
             local locked = cell:FindFirstChild("CellLocked")
+            local cellTypeText = tostring(cellType.Value)
             table.insert(result, {
                 Instance = cell,
                 X = tonumber(x),
                 Y = tonumber(y),
-                Type = tostring(cellType.Value),
+                Type = cellTypeText,
+                -- Precomputed: consumer (RJ upgrade/star treat/leveler) cần
+                -- normalized type — 1 lần per cell per cache thay vì gsub
+                -- chain per cell per consumer pass.
+                Normalized = Runtime.NormalizeEventBeeName(cellTypeText),
                 Gifted = cell:FindFirstChild("GiftedCell") ~= nil,
                 Locked = locked and locked:IsA("ValueBase") and locked.Value == true or false,
             })
@@ -5252,13 +5502,27 @@ local function hiveBeeCells()
     return result
 end
 
-function Runtime.IsCommonBeeType(value)
-    local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
-    for _, beeName in ipairs(Config.CommonBeeTypes or {}) do
-        local wanted = string.lower(tostring(beeName)):gsub("[^%w]", ""):gsub("bee$", "")
-        if normalized == wanted then return true end
+-- TYPE SETS (precomputed): IsCommon/IsBlue/IsMythic goi PER CELL trong moi
+-- scan hive — cu goi la loop config + 2 gsub/entry. Set normalization mot
+-- lan, membership sau do la O(1). Lazy-build sau khi Config override xong.
+local commonBeeSet, blueBeeSet, mythicBeeSet
+local function buildBeeTypeSets()
+    if commonBeeSet then return end
+    commonBeeSet, blueBeeSet, mythicBeeSet = {}, {}, {}
+    local function add(set, list)
+        for _, name in ipairs(list or {}) do
+            set[string.lower(tostring(name)):gsub("[^%w]", ""):gsub("bee$", "")] = true
+        end
     end
-    return false
+    add(commonBeeSet, Config.CommonBeeTypes or {})
+    add(blueBeeSet, Config.BlueBeeTypes or {})
+    add(mythicBeeSet, Config.MythicBeeTypes or {})
+end
+
+function Runtime.IsCommonBeeType(value)
+    buildBeeTypeSets()
+    local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
+    return commonBeeSet[normalized] == true
 end
 
 -- Safe target bee: non-gifted common is always safe; when not
@@ -6055,6 +6319,27 @@ function Runtime.HandleAmuletGui()
     local playerGui = Player:FindFirstChildOfClass("PlayerGui")
     if not playerGui then return false end
 
+    -- PRE-FILTER (2 cap, ~50-100 nodes thay vi GetDescendants 2-5k): deep
+    -- scan chi chay khi ton tai container ten chua "amulet" o cap 1-2;
+    -- steady state = chi re-probe nhe.
+    local hasAmuletContainer = false
+    for _, screen in ipairs(playerGui:GetChildren()) do
+        if string.lower(screen.Name):find("amulet", 1, true) then
+            hasAmuletContainer = true
+            break
+        end
+        if screen:IsA("ScreenGui") or screen:IsA("Frame") or screen:IsA("Folder") then
+            for _, child in ipairs(screen:GetChildren()) do
+                if string.lower(child.Name):find("amulet", 1, true) then
+                    hasAmuletContainer = true
+                    break
+                end
+            end
+            if hasAmuletContainer then break end
+        end
+    end
+    if not hasAmuletContainer then return false end
+
     local statLabels, acceptButton, declineButton, titleText = {}, nil, nil, nil
     for _, object in ipairs(playerGui:GetDescendants()) do
         if Runtime.IsAmuletGui(object) then
@@ -6240,6 +6525,36 @@ local function nearestFlowerEffect()
     -- Leaves are opportunistic field work: never leave the field the player is
     -- currently standing in just because a LeafBurst spawned elsewhere.
     local playerField = flowerFieldAtPosition(root.Position, 0)
+
+    -- INDEX-FIRST (detector hub): tile da duoc danh dau Sparkles/LeafBurst qua
+    -- DescendantAdded event — khong FindFirstChild per tile nua (1-2k tiles
+    -- x 2 lookups moi giay la chi phi cu). Loc cung logic voi legacy scan.
+    local indexBest, indexBestDistance, indexBestKind, indexBestField
+    local indexHits = 0
+    for flower, kind in pairs(Runtime.FlowerEffectIndex) do
+        if flower.Parent then
+            indexHits += 1
+            if (Runtime.FlowerEffectCooldown[flower] or 0) <= os.clock() then
+                local position = objectPosition(flower)
+                local field = position and flowerFieldAtPosition(position, kind == "Leaves" and 0 or 8)
+                local distance = position and (root.Position - position).Magnitude
+                local allowedField = kind ~= "Leaves" or (playerField and field == playerField)
+                if allowedField and field and fieldUnlocked(field.Name)
+                    and distance and distance <= Config.SpecialEffectMaxDistance
+                    and (not indexBestDistance or distance < indexBestDistance) then
+                    indexBest, indexBestDistance, indexBestKind, indexBestField =
+                        flower, distance, kind, field
+                end
+            end
+        else
+            Runtime.FlowerEffectIndex[flower] = nil
+        end
+    end
+    if indexHits > 0 then
+        return indexBest, indexBestKind, indexBestField
+    end
+
+    -- FALLBACK legacy scan (index chua kip populate — vua join/ua vua bat dau).
     local best, bestDistance, bestKind, bestField
     for _, flower in ipairs(flowers:GetChildren()) do
         local kind
@@ -6968,8 +7283,14 @@ function MaterialSystem.FindSprout()
         end
     end
     if #candidates == 0 and particles then
+        -- Fallback inline-filter: GetDescendants van phai duyet (khong nen
+        -- table trung gian hang loat node — Particles co the phinh to trong
+        -- effects), chi candidate dung ten "Sprout*" moi vao bang.
         for _, object in ipairs(particles:GetDescendants()) do
-            table.insert(candidates, object)
+            local n = object.Name
+            if n == "Sprout" or string.sub(n, 1, 6) == "Sprout" then
+                table.insert(candidates, object)
+            end
         end
     end
     local _, _, root = getCharacter(1)
@@ -7301,9 +7622,21 @@ task.spawn(function()
             local okScan, errScan = pcall(Runtime.ScanBonusMob)
             if not okScan then reportError("BonusMobScan", errScan) end
         end
-        task.wait(math.max(0.15, math.min(
+        -- ADAPTIVE CADENCE: khi co pending (sprout/firefly/mob) hoac vua co
+        -- hoat dong giay thi giu cadence nhanh (detection latency thap);
+        -- ruoi roi 120s khong pending → backoff x2.4 (mang tro luc, calo CPU
+        -- giam ~60% khi farm la nhung khong co event). Su kien luon den qua
+        -- worker khac nen backoff chi danh cho luc that su trong.
+        if Runtime.SproutPending or Runtime.FireflyPending
+            or Runtime.MondoChickPending or Runtime.ViciousPending
+            or Runtime.BonusMobPending then
+            Runtime.LastScannerHitAt = os.clock()
+        end
+        local baseCadence = math.max(0.15, math.min(
             math.max(0.1, tonumber(Config.SproutScanInterval) or 0.25),
-            math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25))))
+            math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25)))
+        local idleBackoff = os.clock() - (Runtime.LastScannerHitAt or 0) > 120
+        task.wait(idleBackoff and baseCadence * 2.4 or baseCadence)
     end
 end)
 
@@ -7458,7 +7791,7 @@ function Runtime.FarmMondoChick()
     -- LEVEL GATE ( nhu vicious/bonus): chick qua level so voi average hive
     -- la fight khong bao gio xong -> danh 2/3 runtime vo ich. Level cao qua
     -- thi retry sau 30s thay vi cam dau vao ngay.
-    if not Runtime.MobLevel or Runtime.MobLevel(chick) then
+    do
         local chickLevel = Runtime.MobLevel and Runtime.MobLevel(chick) or nil
         local average = Runtime.HiveAverageLevel and Runtime.HiveAverageLevel() or nil
         if chickLevel and average and chickLevel > average + 10 then
@@ -7525,10 +7858,13 @@ function Runtime.ScanBonusMob()
     local _, _, scanRoot = getCharacter(1)
     if not scanRoot then Runtime.BonusMobPending = nil return end
     local maxDistance = math.max(30, tonumber(Config.BonusMobMaxDistance) or 80)
+    -- Monsters fetch ONCE per tick (10 routes x re-fetch per route cu la
+    -- 10 workspace scans moi 0.25s tick).
+    local monstersFolder = workspace:FindFirstChild("Monsters")
     for canonical, route in pairs(Runtime.MobRoutes or {}) do
         if canonical ~= "Stump Snail"
             and os.clock() >= (Runtime.BonusMobRetryAt[canonical] or 0) then
-            local live = Runtime.FindLiveQuestMob(canonical)
+            local live = Runtime.FindLiveQuestMob(canonical, monstersFolder)
             local position = live and objectPosition(live)
             if live and position
                 and (scanRoot.Position - position).Magnitude <= maxDistance then
@@ -9362,7 +9698,7 @@ local function starTreatPendingCount(cells)
     for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
         for _, cell in ipairs(cells) do
-            if not cell.Locked and Runtime.NormalizeEventBeeName(cell.Type) == wanted and not cell.Gifted then
+            if not cell.Locked and (cell.Normalized or Runtime.NormalizeEventBeeName(cell.Type)) == wanted and not cell.Gifted then
                 pending += 1
                 break
             end
@@ -9481,7 +9817,7 @@ function Runtime.StarTreatStep()
     for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
         for _, cell in ipairs(cells) do
-            if not cell.Locked and Runtime.NormalizeEventBeeName(cell.Type) == wanted and not cell.Gifted then
+            if not cell.Locked and (cell.Normalized or Runtime.NormalizeEventBeeName(cell.Type)) == wanted and not cell.Gifted then
                 setStatus("Star Treat", string.format("Using on %s (%d,%d) | stock %d",
                     cell.Type, cell.X, cell.Y, starTreats))
                 -- Baseline FRESH ngay truoc khi fire (B2): cached stock gap
@@ -9565,7 +9901,7 @@ function Runtime.RJUpgradeBasicStep()
             pinnedKey = px and (px .. "," .. py) or nil
         end
         if not cell.Locked and not cell.Gifted and cellKey ~= pinnedKey
-            and Runtime.NormalizeEventBeeName(cell.Type) == "basic" then
+            and (cell.Normalized or Runtime.NormalizeEventBeeName(cell.Type)) == "basic" then
             local ok = remoteCall("ConstructHiveCellFromEgg", cell.X, cell.Y, "RoyalJelly", 1)
             if ok then
                 Runtime.RJStock -= 1
@@ -9692,7 +10028,7 @@ task.spawn(function()
             -- Cheap detection pass (workspace only, zero remotes).
             for _, cell in ipairs(hiveBeeCells()) do
                 if not cell.Locked and not cell.Gifted
-                    and Runtime.NormalizeEventBeeName(cell.Type) == "basic" then
+                    and (cell.Normalized or Runtime.NormalizeEventBeeName(cell.Type)) == "basic" then
                     Runtime.RJUpgradeExhausted = false
                     Runtime.RJUpgradeRetryAt = 0
                     break
@@ -9984,12 +10320,9 @@ task.spawn(function()
 end)
 
 function Runtime.IsBlueBeeType(value)
+    buildBeeTypeSets()
     local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
-    for _, beeName in ipairs(Config.BlueBeeTypes or {}) do
-        local wanted = string.lower(tostring(beeName)):gsub("[^%w]", ""):gsub("bee$", "")
-        if normalized == wanted then return true end
-    end
-    return false
+    return blueBeeSet[normalized] == true
 end
 
 function Runtime.BlueDiscoveryCount(refresh)
@@ -10020,12 +10353,9 @@ function Runtime.BlueDiscoveryCount(refresh)
 end
 
 function Runtime.IsMythicBeeType(value)
+    buildBeeTypeSets()
     local normalized = string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
-    for _, beeName in ipairs(Config.MythicBeeTypes or {}) do
-        local wanted = string.lower(tostring(beeName)):gsub("[^%w]", ""):gsub("bee$", "")
-        if normalized == wanted then return true end
-    end
-    return false
+    return mythicBeeSet[normalized] == true
 end
 
 function Runtime.MythicDiscoveryCount(refresh)
