@@ -5,6 +5,13 @@
     v1.6.3: the first 40 top-level helpers below are global `function` instead
     of `local function` (globals cost no local register; call sites unchanged).
     Also adds the boot print v1.2 never had, so Delta load can be confirmed.
+    ANTI-LAG (1+2, ported from v1.6.3): (1) DescendantAdded events only
+    enqueue - one worker drains max FixLagQueueBatch=150/tick, so sprinkler
+    token floods no longer spike a single frame; token fast-path uses
+    fastHideNode + FastHidden skip in optimizeObject. (2) Adaptive FPS:
+    watchdog sets Runtime.FpsLow (2 low 5s-windows to enter, 2 good to
+    leave) - re-hide interval x2 and scanner cadence floored at 0.5s while
+    low. Both default ON via FixLagQueueBatch / FixLagAdaptive.
     Place: Bee Swarm Simulator (1537690962)
 
     Main flow:
@@ -449,6 +456,14 @@ local DEFAULT_CONFIG = {
     FixLagDisableLights = true,
     FixLagStopBeeAnimations = true,
     FixLagScanBatch = 350,
+    -- Anti-lag queue: DescendantAdded bursts (sprinkler token floods) are
+    -- drained at most this many objects per tick instead of optimizing
+    -- synchronously inside the event, which spiked the frame that spawned
+    -- hundreds of tokens at once.
+    FixLagQueueBatch = 150,
+    -- Adaptive throttling: when FPS stays low, the scanners and the re-hide
+    -- pass slow down instead of competing with the renderer for CPU.
+    FixLagAdaptive = true,
     -- FLOWER LIFECYCLE (game mechanic): dug tiles SINK and later REGROW -
     -- the regrow animation restores Transparency, so a one-time hide fades
     -- back. Maintenance re-applies only CHANGED properties (compare-before-
@@ -7703,8 +7718,15 @@ task.spawn(function()
         local baseCadence = math.max(0.15, math.min(
             math.max(0.1, tonumber(Config.SproutScanInterval) or 0.25),
             math.max(0.1, tonumber(Config.FireflyScanInterval) or 0.25)))
+        -- Adaptive: while FPS is low, scan at most every 0.5s. The scans
+        -- walk NPCBees/Monsters/Collectibles, so slowing them is the fastest
+        -- way to give the renderer its CPU back.
+        local scanInterval = baseCadence
+        if Config.FixLagAdaptive and Runtime.FpsLow then
+            scanInterval = math.max(scanInterval, 0.5)
+        end
         local idleBackoff = os.clock() - (Runtime.LastScannerHitAt or 0) > 120
-        task.wait(idleBackoff and baseCadence * 2.4 or baseCadence)
+        task.wait(idleBackoff and scanInterval * 2.4 or scanInterval)
     end
 end)
 
@@ -8898,6 +8920,10 @@ local function applyLowGraphics(enabled)
 
     local function optimizeObject(object)
         if not object or not object.Parent then return end
+        -- Already fast-hidden (priority folders, token fast-path): the full
+        -- cascade below (ancestor walk + ~15 IsA checks) would be pure waste
+        -- on every sprinkler-flood token. Transparency=1 already hides it.
+        if Runtime.FastHidden[object] then return end
         -- ONE ancestor walk truoc: root group quyet dinh ca hidden lẫn việc
         -- có cần disposable check hay không. Disposable chi ton tai duoi
         -- Decorations/Decor - object nam duoi Bees/Tokens/Flowers/Hives
@@ -9215,10 +9241,39 @@ local function applyLowGraphics(enabled)
     end
     for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
 
+    -- Batched DescendantAdded queue: a sprinkler token flood used to run
+    -- optimizeObject synchronously inside every event (hundreds of
+    -- ancestor walks in a single frame). Now events only enqueue, and one
+    -- worker drains at most FixLagQueueBatch objects per tick.
+    local optimizeQueue, optimizeHead = {}, 1
+    local function enqueueOptimize(object)
+        if not object then return end
+        optimizeQueue[#optimizeQueue + 1] = object
+    end
+    task.spawn(function()
+        local batch = math.max(25, tonumber(Config.FixLagQueueBatch) or 150)
+        while Runtime.Running do
+            local processed = 0
+            while optimizeHead <= #optimizeQueue and processed < batch do
+                local object = optimizeQueue[optimizeHead]
+                optimizeQueue[optimizeHead] = nil
+                optimizeHead += 1
+                processed += 1
+                if Runtime.Running and Config.LowGraphics then
+                    pcall(optimizeObject, object)
+                end
+            end
+            if optimizeHead > 1000 and optimizeHead > #optimizeQueue then
+                optimizeQueue, optimizeHead = {}, 1
+            end
+            task.wait(processed > 0 and 0 or 0.1)
+        end
+    end)
+
     if Runtime.LowGraphicsBound then return end
     Runtime.LowGraphicsBound = true
     connect(workspace.DescendantAdded, function(object)
-        if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
+        if Runtime.Running and Config.LowGraphics then enqueueOptimize(object) end
     end)
     -- Token fast-path: tokens pop in with a visible Part + decal + gui before
     -- the generic descendant pass reaches each child. Hide the whole token
@@ -9228,18 +9283,18 @@ local function applyLowGraphics(enabled)
         if collectibles then
             connect(collectibles.ChildAdded, function(token)
                 if not (Runtime.Running and Config.LowGraphics) then return end
-                pcall(function()
-                    if token:IsA("BasePart") then token.LocalTransparencyModifier = 1 end
-                    if token:IsA("BasePart") then token.Transparency = 1 end
-                    for _, child in ipairs(token:GetChildren()) do
-                        pcall(optimizeObject, child)
-                    end
-                end)
+                -- fastHideNode (not optimizeObject): hides in one pass and
+                -- marks FastHidden, so the queued DescendantAdded events
+                -- for this token's children skip the full cascade entirely.
+                pcall(fastHideNode, token)
+                for _, child in ipairs(token:GetDescendants()) do
+                    pcall(fastHideNode, child)
+                end
             end)
         end
     end
     connect(Lighting.DescendantAdded, function(object)
-        if Runtime.Running and Config.LowGraphics then pcall(optimizeObject, object) end
+        if Runtime.Running and Config.LowGraphics then enqueueOptimize(object) end
     end)
     -- Atlas anti-lag hardening: the game RE-ENABLES shadows/lighting presets on
     -- respawn and zone changes - re-force them on every Lighting change, and
@@ -9257,8 +9312,11 @@ local function applyLowGraphics(enabled)
     -- not just once at boot. Scoped to the priority folders (the game only
     -- re-animates flowers/hives there), batched, compare-before-write.
     task.spawn(function()
-        local interval = math.max(2, tonumber(Config.FixLagRehideInterval) or 8)
         while Runtime.Running and Config.LowGraphics do
+            -- Adaptive: while FPS is low the re-hide pass runs half as often
+            -- instead of competing with the renderer for the same CPU.
+            local interval = math.max(2, tonumber(Config.FixLagRehideInterval) or 8)
+            if Config.FixLagAdaptive and Runtime.FpsLow then interval = interval * 2 end
             task.wait(interval)
             -- Sprinkler liveness: tracked instance chet (het han) -> clear
             -- flag de farm pass ke tiep dat lai DUNG MOT LAN.
@@ -9278,14 +9336,21 @@ local function applyLowGraphics(enabled)
     task.defer(function()
         remoteCall("PlayerSettingsEvent", "PollenPopUps", false)
     end)
-    -- FPS WATCHDOG: do RenderStepped thuc te; fps<=30 keo dai 5s -> in DUNG
-    -- MOT DONG kem state + so token trong field (de bao loi co data, khong
-    -- doan - vi du: "fps 18 | FarmToken | tokens=287 | Pine Tree Forest").
+    -- FPS WATCHDOG, now ADAPTIVE: it used to only warn every 5s while FPS
+    -- was low. Now it sets Runtime.FpsLow (hysteresis: 2 low windows to
+    -- enter, 2 good windows to leave) and the script throttles ITSELF -
+    -- scanners scan slower, the re-hide pass runs half as often - instead
+    -- of competing with the renderer for the same CPU while lagging.
     task.spawn(function()
         if not RunService or not RunService.RenderStepped then return end
-        local frames = 0
+        local accum, frames = 0, 0
         local windowStart = os.clock()
-        local fpsConn = RunService.RenderStepped:Connect(function(delta)
+        local lowWindows, goodWindows = 0, 0
+        -- Routed through connect() so Shutdown disconnects it: the old raw
+        -- :Connect leaked a live RenderStepped callback after shutdown
+        -- (it kept running and referencing Runtime on a dead script).
+        connect(RunService.RenderStepped, function(delta)
+            accum += delta
             frames += 1
         end)
         while Runtime.Running do
@@ -9295,19 +9360,32 @@ local function applyLowGraphics(enabled)
             if elapsed > 0.5 and frames > 0 then
                 local fps = frames / elapsed
                 if fps <= 30 then
+                    lowWindows += 1
+                    goodWindows = 0
+                elseif fps >= 45 then
+                    goodWindows += 1
+                    lowWindows = 0
+                else
+                    lowWindows, goodWindows = 0, 0
+                end
+                if Config.FixLagAdaptive and lowWindows >= 2 and not Runtime.FpsLow then
+                    Runtime.FpsLow = true
                     local tokens = 0
                     pcall(function()
                         local folder = workspace:FindFirstChild("Collectibles")
                         tokens = folder and #folder:GetChildren() or 0
                     end)
-                    warn(string.format("[BSS Kaitun] fps %d | %s | %s | tokens=%d | %s",
+                    warn(string.format("[BSS Kaitun] fps %d LOW | %s | %s | tokens=%d | %s - throttling scanners + re-hide",
                         math.floor(fps + 0.5), tostring(Runtime.State),
                         tostring(Runtime.Detail), tokens, tostring(Runtime.CurrentField)))
+                elseif Config.FixLagAdaptive and goodWindows >= 2 and Runtime.FpsLow then
+                    Runtime.FpsLow = false
+                    warn(string.format("[BSS Kaitun] fps %d recovered - full speed",
+                        math.floor(fps + 0.5)))
                 end
             end
-            frames = 0
+            accum, frames = 0, 0
         end
-        pcall(function() fpsConn:Disconnect() end)
     end)
     -- Hide every other player: their characters + accessories + tools are one of
     -- the biggest lag sources on busy servers. Local-only hiding (render), no effect
