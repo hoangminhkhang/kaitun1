@@ -1,2343 +1,1925 @@
--- TFFA Main v2.0.4 — Throw Food For Animals farm (Delta LocalScript).
--- PlaceId 120219252362013. GUI-first: moi thao tac qua UI game, mac dinh
--- KHONG goi remote nao. Remote chi khi RemoteCallsEnabled=true + nam trong
--- allowlist no-arg (Animations_Get, Offline_Claim, Training_Start/Stop,
--- Plot_EquipBest, Shop_ClaimFree). KHONG BAO GIO goi: Shop_Buy, Stand_Upgrade,
--- Player_SetThrowPower, Dev_Action, AdminAbuse_*, Plot_SellAll, Gift_*, Egg_Place.
--- Chay: tat recon truoc, luu file vao workspace Delta, mo file roi EXECUTE
--- (khong paste truc tiep). Log boot phai in dung version hien tai.
--- CANH BAO: auto-farm co the vi pham dieu khoan game/Roblox, nguy co kick/ban.
--- Dung chay 24/7, chi chay acc phu.
+-- =============================================================================
+-- BSS KAITUN UI  (ui.lua)  --  product build: polished, persistent, zero deps
+-- =============================================================================
+-- CONTRACT TÍCH HỢP (main script) - giữ nguyên từ bản trước:
+--   local UI = loadstring(readfile("ui.lua"))()
+--   UI.SetStatus(stateText, detailText)
+--   UI.SetStats{HoneyPerHour=.., Uptime=.., Bees=.., Honey=.., Capacity=.., ...}
+--   UI.SetGear("Pulsar | 42%")
+--   UI.SetPlanters{{Name="Paper Planter", Field="Clover", Percent=0.64}}
+--   UI.DefineControls{{Tab="Farm", Key="AutoFarm", Kind="Toggle", Label="Auto Farm"}, ...}
+--   UI.OnChange(key, fn) / UI.SetValues(Config) / UI.Toggle(false)
+--   UI.Notify(title, message, seconds, "info"|"good"|"warn")   -- MỚI: toast
+--   UI.CycleTheme()                                            -- MỚI: đổi theme
+--
+-- BUYER EXPERIENCE:
+--  * Bo tròn toàn bộ (window 14px, card 10px, control 8px) + shadow mềm
+--  * Gradient title bar + accent, hover trên mọi row/tab, knob toggle nảy
+--    (Back easing), slider có núm tròn phóng to khi chạm
+--  * Toast notification xếp chồng góc phải, tự biến mất
+--  * 2 theme: Honey (mặc định) / Midnight - đổi bằng nút 🎨 trên title bar
+--  * TỰ LƯU: vị trí cửa sổ, trạng thái collapse, theme + toàn bộ Values ra
+--    bss_kaitun_ui.json (writefile nếu executor hỗ trợ) - mở lại giữ nguyên
+--  * Animation: cửa sổ trượt vào khi load, đổi tab có slide nhẹ
+--
+-- IDEAS còn lại (chưa làm):
+--  [1] Minimap: chấm field + player + mob (Frame-based)
+--  [2] Graph honey/h theo thời gian (cột Frame segments)
+--  [3] Planter countdown mm:ss khi có dữ liệu giờ
+--  [4] Boost tracker: field boost đang chạy + giây còn lại
+--  [5] Nút "Panic" dừng mọi mover cạnh cửa sổ
+--  [6] Log panel: 10 dòng console gần nhất trong UI
+-- =============================================================================
 
-if getgenv and getgenv().__TFFA_MAIN and getgenv().__TFFA_MAIN.Stop then
-	pcall(getgenv().__TFFA_MAIN.Stop)
+local getgenvFn = getgenv or function() return _G end
+local ENV = getgenvFn()
+
+if ENV.__BSSKaitunUI_Cleanup and type(ENV.__BSSKaitunUI_Cleanup) == "function" then
+    pcall(ENV.__BSSKaitunUI_Cleanup)
 end
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-local PathfindingService = game:GetService("PathfindingService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local VirtualUser = game:GetService("VirtualUser")
+local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local LocalPlayer = Players.LocalPlayer
-local TFFA = {}
+local HttpService = game:GetService("HttpService")
 
-TFFA.VERSION = "v2.0.4"
-TFFA.BUILD = "2026-11-07 v2.0.4-plot-fix"
-TFFA.PLACE_ID = 120219252362013
+local Player = Players.LocalPlayer
+local writefileFn = rawget(ENV, "writefile") or (writefile and writefile)
+local readfileFn = rawget(ENV, "readfile") or (readfile and readfile)
+local SAVE_NAME = "bss_kaitun_ui.json"
 
-TFFA.DEFAULT_CONFIG = {
-	Enabled = true,
-	AutoTrain = true,
-	AutoThrow = true,
-	AutoEquipBest = true,
-	AutoSell = true,
-	AutoUpgradeFood = true,
-	AutoUpgradeBar = false,
-	AutoClaimOffline = false,
-	AutoTapBonus = true,
-	ProbeMode = true,
-	RemoteCallsEnabled = false,
-	RemoteAllow = { Animations_Get = false, Offline_Claim = false,
-		Training_Start = false, Training_Stop = false, Plot_EquipBest = false,
-		Shop_ClaimFree = false },
-
-	ThrowAt = 19,
-	ThrowsPerDecision = 3,
-	TrainMaxMinutes = 10,
-	TrainSlowSeconds = 180,
-	PowerCheckEvery = 5,
-	MaxConsecMisses = 3,
-	PlotCapacity = 14,
-	BackpackSellAt = 20,
-	TrainMinGainPerMin = 20,
-	IdleRestEveryCycles = 5,
-	RecoverMaxConsec = 3,
-	SessionMinutes = 60,
-	BreakMinutes = 15,
-	MaxTeleportsPerHour = 4,
-	PlotNumber = nil,
-	ThrowTimeout = 10,
-	CollectTimeoutBase = 15,
-	MinRemoteGap = 0.5,
-	ActionDelayMin = 0.3,
-	ActionDelayMax = 1.2,
-	MaxRemoteFails = 3,
-	AntiAfkEvery = 540,
-	Food = "",
+-- =============================================================================
+-- Themes
+-- =============================================================================
+local THEMES = {
+    Honey = {
+        Accent = Color3.fromRGB(255, 176, 32),
+        AccentDim = Color3.fromRGB(196, 132, 25),
+        AccentSoft = Color3.fromRGB(255, 208, 120),
+        Background = Color3.fromRGB(24, 24, 28),
+        Panel = Color3.fromRGB(32, 32, 38),
+        PanelHover = Color3.fromRGB(44, 44, 52),
+        PanelLight = Color3.fromRGB(48, 48, 57),
+        Stroke = Color3.fromRGB(70, 70, 82),
+        Text = Color3.fromRGB(240, 240, 240),
+        TextDim = Color3.fromRGB(165, 165, 175),
+        Good = Color3.fromRGB(96, 205, 125),
+        Bad = Color3.fromRGB(235, 95, 95),
+    },
+    Midnight = {
+        Accent = Color3.fromRGB(96, 165, 250),
+        AccentDim = Color3.fromRGB(70, 125, 200),
+        AccentSoft = Color3.fromRGB(150, 190, 250),
+        Background = Color3.fromRGB(16, 18, 26),
+        Panel = Color3.fromRGB(22, 25, 35),
+        PanelHover = Color3.fromRGB(32, 36, 50),
+        PanelLight = Color3.fromRGB(36, 41, 56),
+        Stroke = Color3.fromRGB(55, 62, 84),
+        Text = Color3.fromRGB(235, 240, 250),
+        TextDim = Color3.fromRGB(150, 158, 178),
+        Good = Color3.fromRGB(96, 205, 125),
+        Bad = Color3.fromRGB(235, 95, 95),
+    },
 }
+local currentThemeName = "Honey"
+local T = THEMES.Honey
 
-local UserConfig = nil
-if getgenv then UserConfig = getgenv().TFFA_MAIN_CONFIG end
-TFFA.Config = {}
-for k, v in pairs(TFFA.DEFAULT_CONFIG) do TFFA.Config[k] = v end
-if type(UserConfig) == "table" then
-	for k, v in pairs(UserConfig) do TFFA.Config[k] = v end
+local WINDOW_SIZE = UDim2.fromOffset(500, 360)
+local R_WINDOW, R_CARD, R_CTRL, R_PILL = 14, 10, 8, 999
+
+-- =============================================================================
+-- Helpers
+-- =============================================================================
+local function create(className, props, parent)
+    local object = Instance.new(className)
+    for key, value in pairs(props or {}) do
+        if key ~= "Parent" then object[key] = value end
+    end
+    object.Parent = parent
+    return object
 end
 
-TFFA.FOOD_LADDER = {
-	{ Name = "Carrot", Price = 0, Tier = 1 },
-	{ Name = "Apple", Price = 30, Tier = 1 },
-	{ Name = "Banana", Price = 150, Tier = 1 },
-	{ Name = "Toast", Price = 4000, Tier = 2 },
-	{ Name = "Orange", Price = 20000, Tier = 2 },
-	{ Name = "Pear", Price = 200000, Tier = 3 },
-	{ Name = "Cheese", Price = 1000000, Tier = 3 },
-	{ Name = "Bread Loaf", Price = 12000000, Tier = 4 },
-	{ Name = "WaterMelon", Price = 60000000, Tier = 4 },
-	{ Name = "Croissant", Price = 650000000, Tier = 5 },
-	{ Name = "Chocolate", Price = 3200000000, Tier = 5 },
-	{ Name = "Mushroom", Price = 30000000000, Tier = 6 },
-	{ Name = "Bacon", Price = 150000000000, Tier = 6 },
-	{ Name = "Burger", Price = 1300000000000, Tier = 7 },
-	{ Name = "Shank", Price = 6800000000000, Tier = 7 },
-	{ Name = "Fillet", Price = 57000000000000, Tier = 8 },
-	{ Name = "Steak", Price = 1500000000000000, Tier = 8 },
-	{ Name = "Royal Steak", Price = 50000000000000000, Tier = 9 },
-	{ Name = "Golden Apple", Price = 120000000000000000, Tier = 9 },
-	{ Name = "Crystal Melon", Price = 4000000000000000000, Tier = 10 },
-	{ Name = "Ember Bacon", Price = 18000000000000000000, Tier = 10 },
-	{ Name = "Lava Steak", Price = 120000000000000000000, Tier = 11 },
-	{ Name = "Elder Strawberry", Price = 700000000000000000000, Tier = 11 },
-	{ Name = "Phoenix Fillet", Price = 4000000000000000000000, Tier = 12 },
-	{ Name = "Star Jelly", Price = 27000000000000000000000, Tier = 12 },
-	{ Name = "Dragon's Apple", Price = 180000000000000000000000, Tier = 13 },
-	{ Name = "Starlight Donut", Price = 450000000000000000000000, Tier = 13 },
-	{ Name = "Glowshroom", Price = 1400000000000000000000000, Tier = 13 },
-	{ Name = "Sundae Tower", Price = 3500000000000000000000000, Tier = 13 },
-	{ Name = "Golden Corn", Price = 2500000000000000000000000000, Tier = 14 },
-	{ Name = "Roast Turkey", Price = 28000000000000000000000000000, Tier = 14 },
-	{ Name = "Caramel Apple", Price = 250000000000000000000000000000, Tier = 14 },
-	{ Name = "Candy Corn", Price = 750000000000000000000000000000000, Tier = 15 },
-	{ Name = "Hot Cider", Price = 8500000000000000000000000000000000, Tier = 15 },
-	{ Name = "Golden Pumpkin", Price = 75000000000000000000000000000000000, Tier = 15 },
-	{ Name = "Ghost Chowder", Price = 18000000000000000000000000000000000000, Tier = 16 },
-	{ Name = "Calamari Rings", Price = 200000000000000000000000000000000000000, Tier = 16 },
-	{ Name = "Phantom Lobster", Price = 1800000000000000000000000000000000000000, Tier = 16 },
-	{ Name = "Toxic Donut", Price = 1200000000000000000000000000000000000000000, Tier = 17 },
-	{ Name = "Mutant Melon", Price = 20000000000000000000000000000000000000000000, Tier = 17 },
-	{ Name = "Atomic Pizza", Price = 400000000000000000000000000000000000000000000, Tier = 17 },
-	{ Name = "Uranium Cake", Price = 9000000000000000000000000000000000000000000000, Tier = 17 },
-}
-TFFA.BAR_LADDER = {
-	{ Name = "Wooden Bar", Price = 0, XpPerRep = 1 },
-	{ Name = "Steel Bar", Price = 50, XpPerRep = 2 },
-	{ Name = "Gold Bar", Price = 2000, XpPerRep = 4 },
-	{ Name = "Cyan Bar", Price = 12000, XpPerRep = 8 },
-	{ Name = "Violet Bar", Price = 100000, XpPerRep = 16 },
-	{ Name = "Emerald Bar", Price = 1200000000000000, XpPerRep = 65536 },
-	{ Name = "Sapphire Bar", Price = 7000000000000000, XpPerRep = 131072 },
-}
-TFFA.MUT_MULT = { Gold = 1.5, Diamond = 3, Emerald = 5, Ruby = 10, Rainbow = 20 }
-TFFA.SIZE_MULT = { Big = 2.08, Large = 4.31, Huge = 8.94 }
-TFFA.ALL_FOODS = { "Pear", "WaterMelon", "Toast", "Croissant", "Apple", "Cheese",
-	"Carrot", "Bread Loaf", "Banana", "Golden Apple", "Mushroom", "Orange",
-	"Chocolate", "Elder Strawberry", "Bacon", "Burger", "Shank", "Fillet",
-	"Star Jelly", "Steak", "Crystal Melon", "Ember Bacon", "Royal Steak",
-	"Lava Steak", "Dragon's Apple", "Phoenix Fillet", "Glowshroom",
-	"Sundae Tower", "Golden Corn", "Starlight Donut", "Roast Turkey",
-	"Caramel Apple", "Candy Corn", "Hot Cider", "Golden Pumpkin",
-	"Ghost Chowder", "Calamari Rings", "Phantom Lobster", "Toxic Donut",
-	"Mutant Melon", "Atomic Pizza", "Uranium Cake" }
-TFFA.FOOD_SET = {}
+local function corner(object, radius)
+    create("UICorner", {CornerRadius = UDim.new(0, radius or R_CTRL)}, object)
+    return object
+end
+
+local function strokeOf(object, color, thickness, transparency)
+    create("UIStroke", {
+        Color = color or T.Stroke, Thickness = thickness or 1,
+        Transparency = transparency or 0,
+    }, object)
+    return object
+end
+
+local function vGradient(object, topAlpha, bottomAlpha)
+    create("UIGradient", {
+        Rotation = 90,
+        Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(1, 1, 1)),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, topAlpha or 0),
+            NumberSequenceKeypoint.new(1, bottomAlpha or 0.25),
+        }),
+    }, object)
+    return object
+end
+
+local function pad(object, all)
+    create("UIPadding", {
+        PaddingTop = UDim.new(0, all), PaddingBottom = UDim.new(0, all),
+        PaddingLeft = UDim.new(0, all), PaddingRight = UDim.new(0, all),
+    }, object)
+    return object
+end
+
+local function setText(object, text)
+    pcall(function() object.Text = text end)
+    return object
+end
+
+-- =============================================================================
+-- Game image resolver: lấy texture CỦA CHÍNH GAME (client đã load sẵn, không
+-- cần download gì) gán vào ImageLabel.Image qua chuỗi rbxassetid từ
+-- Decal.Texture. Nguồn chính: ReplicatedStorage.EggTypes.<...>Icon (icon
+-- planter/egg/tròng game). Tên lộn xộn ("Plastic Planter" -> "PlasticPlanterIcon",
+-- "The Planter Of Plenty" -> "PlentyPlanterIcon") nên so khớp BẰNG CHUẨN HÓA:
+-- bỏ mọi ký tự không phải chữ-số, thử full-name rồi từ-cuối + "plantericon".
+-- =============================================================================
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local function normalizeImageName(text)
+    return string.lower(tostring(text or "")):gsub("[^%w]", "")
+end
+
+local function textureOf(instance)
+    if not instance then return nil end
+    if instance:IsA("Decal") or instance:IsA("Texture") then
+        return instance.Texture ~= "" and instance.Texture or nil
+    end
+    if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+        return instance.Image ~= "" and instance.Image or nil
+    end
+    local inner = instance:FindFirstChildWhichIsA("Decal", true)
+        or instance:FindFirstChildWhichIsA("Texture", true)
+        or instance:FindFirstChildWhichIsA("ImageLabel", true)
+    return textureOf(inner)
+end
+
+local function resolveGameImage(itemName)
+    if type(itemName) ~= "string" or itemName == "" then return nil end
+    local eggTypes = ReplicatedStorage:FindFirstChild("EggTypes")
+    if not eggTypes then return nil end
+    local wantedFull = normalizeImageName(itemName) .. "icon"
+    local words = {}
+    for word in itemName:gmatch("%S+") do table.insert(words, normalizeImageName(word)) end
+    local wantedLast = words[#words] and (words[#words] .. "plantericon") or nil
+    local best
+    for _, child in ipairs(eggTypes:GetChildren()) do
+        local normalized = normalizeImageName(child.Name)
+        if normalized == wantedFull
+            or (wantedLast and normalized == wantedLast) then
+            best = child
+            if normalized == wantedFull then break end
+        end
+    end
+    if not best then
+        -- Fallback thoải mái hơn: icon chứa nguyên tên chuẩn hóa.
+        local stripped = normalizeImageName(itemName)
+        for _, child in ipairs(eggTypes:GetChildren()) do
+            local normalized = normalizeImageName(child.Name)
+            if normalized:sub(1, #stripped) == stripped then
+                best = child
+                break
+            end
+        end
+    end
+    return textureOf(best)
+end
+
+-- Texture nền honeycomb (nếu game có sẵn ảnh pattern) - tiled, rất mờ, làm
+-- nền chìm cho panel hive. Không tìm thấy thì bỏ qua (panel vẫn có gradient).
+local hivePatternCache
+local function resolveHivePattern()
+    if hivePatternCache ~= nil then return hivePatternCache end
+    hivePatternCache = false
+    local roots = {
+        ReplicatedStorage:FindFirstChild("Assets"),
+        ReplicatedStorage:FindFirstChild("UI"),
+        ReplicatedStorage:FindFirstChild("Images"),
+        ReplicatedStorage,
+    }
+    for _, root in ipairs(roots) do
+        if root then
+            for _, child in ipairs(root:GetChildren()) do
+                local n = normalizeImageName(child.Name)
+                if n:find("honeycomb", 1, true) or n:find("hexpattern", 1, true)
+                    or n:find("combpattern", 1, true) then
+                    local tex = textureOf(child)
+                    if tex then
+                        hivePatternCache = tex
+                        return tex
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function hoverify(object, baseColor, hoverColor)
+    object.MouseEnter:Connect(function()
+        TweenService:Create(object, TweenInfo.new(0.12), {BackgroundColor3 = hoverColor}):Play()
+    end)
+    object.MouseLeave:Connect(function()
+        TweenService:Create(object, TweenInfo.new(0.18), {BackgroundColor3 = baseColor}):Play()
+    end)
+end
+
+local function themeColor()
+    return T
+end
+
+-- =============================================================================
+-- Root ScreenGui (gethui > CoreGui > PlayerGui)
+-- =============================================================================
+local rootGui
 do
-	for _, n in ipairs(TFFA.ALL_FOODS) do TFFA.FOOD_SET[n] = true end
+    local candidates = {}
+    local gethuiFn = rawget(ENV, "gethui") or (gethui and gethui)
+    if type(gethuiFn) == "function" then
+        pcall(function() table.insert(candidates, gethuiFn()) end)
+    end
+    table.insert(candidates, game:GetService("CoreGui"))
+    if Player then table.insert(candidates, Player:FindFirstChildOfClass("PlayerGui")) end
+
+    rootGui = create("ScreenGui", {
+        Name = "BSSKaitunCard", ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9,
+    })
+    for _, candidate in ipairs(candidates) do
+        if candidate then
+            local ok = pcall(function() rootGui.Parent = candidate end)
+            if ok and rootGui.Parent == candidate then break end
+        end
+    end
+    if not rootGui.Parent then
+        rootGui.Parent = Player and Player:FindFirstChildOfClass("PlayerGui")
+    end
 end
-TFFA.ANIMAL_SET = {}
+
+-- =============================================================================
+-- UI table
+-- =============================================================================
+local UI = {
+    Values = {}, _tabs = {}, _pages = {}, _callbacks = {}, _refs = {},
+    _built = {}, _themeListeners = {},
+}
+
+-- =============================================================================
+-- Window + shadow + title bar
+-- =============================================================================
+local shadow = corner(create("Frame", {
+    Name = "Shadow",
+    Size = WINDOW_SIZE + UDim2.fromOffset(10, 12),
+    Position = UDim2.new(1, -WINDOW_SIZE.X.Offset - 24, 0, 58),
+    BackgroundColor3 = Color3.new(0, 0, 0),
+    BackgroundTransparency = 0.82,
+    BorderSizePixel = 0,
+}, rootGui), 18)
+
+local window = corner(create("Frame", {
+    Name = "Window",
+    Size = WINDOW_SIZE,
+    Position = UDim2.new(1, -WINDOW_SIZE.X.Offset - 20, 0, 60),
+    BackgroundColor3 = T.Background,
+    Active = true,
+    ClipsDescendants = false,
+}, rootGui), R_WINDOW)
+strokeOf(window, T.Stroke, 1, 0.25)
+vGradient(window, 0, 0.06)
+
+local titleBar = create("Frame", {
+    Name = "TitleBar",
+    Size = UDim2.new(1, 0, 0, 40),
+    BackgroundColor3 = T.Panel,
+}, window)
+corner(titleBar, R_WINDOW)
+-- Phủ đáy titleBar để chỉ bo TRÊN (UICorner không bo được nửa góc).
+create("Frame", {
+    Name = "SquarePatch",
+    Size = UDim2.new(1, 0, 0.5, 0),
+    Position = UDim2.new(0, 0, 0.5, 0),
+    BackgroundColor3 = T.Panel,
+    BorderSizePixel = 0,
+}, titleBar)
+vGradient(titleBar, 0, 0.18)
+
+-- Chấm accent nhấp nhô trước tiêu đề.
+local statusDot = create("Frame", {
+    Name = "Dot",
+    Size = UDim2.fromOffset(8, 8),
+    Position = UDim2.fromOffset(14, 16),
+    BackgroundColor3 = T.Good,
+}, titleBar)
+corner(statusDot, R_PILL)
+
+local titleLabel = create("TextLabel", {
+    Name = "Title",
+    Size = UDim2.new(1, -170, 1, 0),
+    Position = UDim2.fromOffset(30, 0),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamBold,
+    Text = "BSS Kaitun",
+    TextColor3 = T.Accent,
+    TextSize = 16,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, titleBar)
+
+local themeButton = corner(create("TextButton", {
+    Name = "Theme",
+    Size = UDim2.fromOffset(30, 26),
+    Position = UDim2.new(1, -100, 0.5, -13),
+    BackgroundColor3 = T.PanelLight,
+    Font = Enum.Font.GothamBold,
+    Text = "🎨",
+    TextColor3 = T.Text,
+    TextSize = 13,
+}, titleBar), R_CTRL)
+hoverify(themeButton, T.PanelLight, T.PanelHover)
+
+local collapseButton = corner(create("TextButton", {
+    Name = "Collapse",
+    Size = UDim2.fromOffset(34, 26),
+    Position = UDim2.new(1, -60, 0.5, -13),
+    BackgroundColor3 = T.PanelLight,
+    Font = Enum.Font.GothamBold,
+    Text = "—",
+    TextColor3 = T.Text,
+    TextSize = 13,
+}, titleBar), R_CTRL)
+hoverify(collapseButton, T.PanelLight, T.PanelHover)
+local collapsed = false
+
+-- Drag (freeze Scale->Offset trước khi kéo + release toàn cục + clamp theo viewport)
 do
-	local names = { "Aardvark", "Amphiptere", "Anglerfish", "ArcanePhoenix",
-		"Archaeopteryx", "Badger", "Banshee", "BarrelBrute", "Bat", "Bear",
-		"BlackCat", "Brachiosaurus", "Bull", "Bunny", "Bunyip", "Caladrius",
-		"Capybara", "Caracal", "Cerberus", "Chupacabra", "ClassicDragon", "Cobra",
-		"Cockatrice", "Cow", "Crab", "Crocodile", "CursedOwl", "CursedRaven",
-		"Demon", "Dimetrodon", "Dingo", "Dullahan", "Elephant", "Emu", "FairyFox",
-		"Fenrir", "FerroWyrm", "FirePhoenix", "Frog", "Gallimimus", "GargoyleBat",
-		"Ghost", "GhostPirate", "GhostlyHorse", "GiantSquid", "Giraffee",
-		"GlassbackColossus", "Goat", "GoblinShark", "GoldenRetriver", "Golem",
-		"Gorilla", "Griffin", "GuiennaPig", "Hamster", "Hellhound", "HoneyBadger",
-		"Horse", "Horseman", "Hydra", "Hyena", "IsotopeAngel", "JackOLantern",
-		"Jackal", "Jackalope", "JadeKirin", "Jellyfish", "Kangaroo", "Kitsune",
-		"Koala", "Kookaburra", "Kraken", "LeafySeaDragon", "Leviathan", "Lich",
-		"Lindworm", "Lion", "LivingPumpkin", "Lizard", "Llama", "Mamoth",
-		"Manticore", "MantisShrimp", "Megalodon", "MeltdownIdol", "Microraptor",
-		"Minotaur", "Mosasaurus", "Mothman", "MushroomBear", "MysticMandrake",
-		"Nightmare", "Ostrich", "Owl", "Parrot", "Pegasus", "PhantomDog",
-		"Plesiosaur", "Polar Bear", "Poltergeist", "Pony", "Pterodactyl", "Qilin",
-		"Quokka", "RadScarecrow", "Raiju", "RavenHalloween", "ReactorGolem",
-		"ReactorHound", "Reaper", "ReaperSteed", "Roc", "SaberToothedTiger",
-		"Scarecrow", "Seahorse", "Seal", "ShadowDemon", "ShadowWolf", "Shark",
-		"Simurgh", "SirenSpire", "Skeleton", "SkeletonHorse", "SludgeMimic",
-		"Snail", "Snake", "Specter", "SpellboundOwl", "Sphinx", "Spinosaurus",
-		"StymphalianBird", "Swordfish", "T-Rex", "Tanuki", "Thunderbird", "Tiger",
-		"Triceratops", "TripleCobra", "Turtle", "Unicorn", "UraniumStag",
-		"Velicoraptor", "WasteHarvester", "Whale", "WingedImp", "Witch",
-		"WitchFamiliarCat", "Wolf", "WoollyMammoth", "Wraith", "Wyvern", "Yak",
-		"Zebra", "ZombieCrow" }
-	for _, n in ipairs(names) do TFFA.ANIMAL_SET[n] = true end
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            pcall(function()
+                window.Position = UDim2.fromOffset(
+                    window.AbsolutePosition.X - rootGui.AbsolutePosition.X,
+                    window.AbsolutePosition.Y - rootGui.AbsolutePosition.Y)
+                shadow.Position = UDim2.fromOffset(
+                    window.Position.X.Offset - 5, window.Position.Y.Offset - 6)
+            end)
+            startPos = window.Position
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then UI._saveSoon() end
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            local maxX = math.max(80, rootGui.AbsoluteSize.X - 80)
+            local maxY = math.max(40, rootGui.AbsoluteSize.Y - 40)
+            local x = math.clamp(startPos.X.Offset + delta.X,
+                -WINDOW_SIZE.X.Offset + 80, maxX)
+            local y = math.clamp(startPos.Y.Offset + delta.Y, 0, maxY)
+            window.Position = UDim2.fromOffset(x, y)
+            shadow.Position = UDim2.fromOffset(x - 5, y - 6)
+        end
+    end)
 end
-TFFA.NEVER_SELL = { ["Pumpkin Monster"] = true, Reaper = true, ReaperSteed = true,
-	["Giant Squid"] = true, Demon = true, ["Skeleton Horse"] = true,
-	WoollyMammoth = true, Skeleton = true }
-TFFA.BIOMES = {
-	{ Name = "Forest", WallZ = -45 }, { Name = "Savana", WallZ = -213 },
-	{ Name = "Desert", WallZ = -381 }, { Name = "Jungle", WallZ = -549 },
-	{ Name = "Ocean", WallZ = -717 }, { Name = "Mountains", WallZ = -885 },
-	{ Name = "Taiga", WallZ = -1077 }, { Name = "Winter", WallZ = -1293 },
-	{ Name = "PrehistoricForest", WallZ = -1533 }, { Name = "DeepWaters", WallZ = -1797 },
-	{ Name = "Hell", WallZ = -2085 }, { Name = "AncientRuins", WallZ = -2421 },
-	{ Name = "MythicalParadise", WallZ = -2805 }, { Name = "ShadowRealm", WallZ = -3285 },
-	{ Name = "HarvestFields", WallZ = -4000 }, { Name = "PhantomHarbor", WallZ = -5000 },
-	{ Name = "NuclearWasteland", WallZ = -6200 },
+
+local bodyHolder = create("Frame", {
+    Name = "Body",
+    Size = UDim2.new(1, 0, 1, -40),
+    Position = UDim2.fromOffset(0, 40),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+}, window)
+
+-- =============================================================================
+-- Tab system (icon + label + underline active)
+-- =============================================================================
+local tabBar = create("Frame", {
+    Name = "Tabs",
+    Size = UDim2.new(1, -20, 0, 34),
+    Position = UDim2.fromOffset(10, 6),
+    BackgroundColor3 = T.Panel,
+}, bodyHolder)
+corner(tabBar, R_CARD)
+
+local pageHolder = create("Frame", {
+    Name = "Pages",
+    Size = UDim2.new(1, -20, 1, -76),
+    Position = UDim2.fromOffset(10, 48),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+}, bodyHolder)
+
+local TAB_DEFS = {
+    {Name = "Status", Icon = "📊"},
+    {Name = "Farm", Icon = "🏡"},
+    {Name = "Move", Icon = "👟"},
+    {Name = "Hive", Icon = "🍯"},
+    {Name = "Lag", Icon = "⚡"},
+    {Name = "Planter", Icon = "🪴"},
 }
-TFFA.ANCHORS = {
-	Spawn = Vector3.new(0, 2.5, 0),
-	ThrowLine = Vector3.new(0, 3, -38),
-	SellCircle = Vector3.new(53.92, 2.61, -28.49),
-	TrainingOffset = Vector3.new(-16, 0.5, -30.5),
-	FoodShopOffset = Vector3.new(10.5, 0.5, -30.8),
-	BarUpgradeOffset = Vector3.new(-16, 0.5, -39),
+
+do
+    create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 4),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    }, tabBar)
+    pad(tabBar, 4)
+
+    for index, def in ipairs(TAB_DEFS) do
+        local button = corner(create("TextButton", {
+            Name = def.Name,
+            LayoutOrder = index,
+            Size = UDim2.new(0, 72, 1, 0),
+            BackgroundColor3 = T.PanelLight,
+            Font = Enum.Font.GothamMedium,
+            Text = def.Icon .. " " .. def.Name,
+            TextColor3 = T.TextDim,
+            TextSize = 11,
+        }, tabBar), R_CTRL)
+        local underline = corner(create("Frame", {
+            Name = "Underline",
+            Size = UDim2.new(0, 0, 0, 3),
+            Position = UDim2.new(0.5, 0, 1, -3),
+            AnchorPoint = Vector2.new(0.5, 0),
+            BackgroundColor3 = T.Accent,
+        }, button), R_PILL)
+
+        local page = create("ScrollingFrame", {
+            Name = def.Name,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 4,
+            ScrollBarImageColor3 = T.AccentDim,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Visible = index == 1,
+        }, pageHolder)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, page)
+        pad(page, 4)
+
+        button.MouseEnter:Connect(function()
+            if not page.Visible then
+                TweenService:Create(button, TweenInfo.new(0.12),
+                    {BackgroundColor3 = T.PanelHover}):Play()
+            end
+        end)
+        button.MouseLeave:Connect(function()
+            if not page.Visible then
+                TweenService:Create(button, TweenInfo.new(0.18),
+                    {BackgroundColor3 = T.PanelLight}):Play()
+            end
+        end)
+        button.MouseButton1Click:Connect(function()
+            for name, other in pairs(UI._pages) do
+                other.Visible = (name == def.Name)
+            end
+            for name, other in pairs(UI._tabs) do
+                local active = (name == def.Name)
+                other.BackgroundColor3 = active and T.Accent or T.PanelLight
+                pcall(function()
+                    other.TextColor3 = active and T.Background or T.TextDim
+                end)
+                local bar = other:FindFirstChild("Underline")
+                if bar then
+                    TweenService:Create(bar, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+                        Size = active and UDim2.new(0.6, 0, 0, 3) or UDim2.new(0, 0, 0, 3),
+                    }):Play()
+                end
+            end
+            -- Slide nhẹ khi đổi tab.
+            page.Position = UDim2.fromOffset(10, 0)
+            TweenService:Create(page, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {
+                Position = UDim2.fromOffset(0, 0),
+            }):Play()
+        end)
+        UI._tabs[def.Name] = button
+        UI._pages[def.Name] = page
+    end
+    UI._tabs.Status.BackgroundColor3 = T.Accent
+    UI._tabs.Status.TextColor3 = T.Background
+    local firstBar = UI._tabs.Status:FindFirstChild("Underline")
+    if firstBar then firstBar.Size = UDim2.new(0.6, 0, 0, 3) end
+end
+
+-- =============================================================================
+-- Components
+-- =============================================================================
+local function applyValue(key, value)
+    UI.Values[key] = value
+    UI._saveSoon()
+    local callback = UI._callbacks[key]
+    if type(callback) == "function" then
+        task.spawn(function() pcall(callback, value) end)
+    end
+end
+
+local function buildToggle(page, def, order)
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -76, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = def.Danger and T.Bad or T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local track = corner(create("TextButton", {
+        Size = UDim2.fromOffset(48, 26),
+        Position = UDim2.new(1, -60, 0.5, -13),
+        BackgroundColor3 = T.PanelLight,
+        Text = "",
+    }, row), R_PILL)
+    strokeOf(track, T.Stroke, 1, 0.4)
+    local knob = corner(create("Frame", {
+        Size = UDim2.fromOffset(20, 20),
+        Position = UDim2.fromOffset(3, 3),
+        BackgroundColor3 = T.TextDim,
+    }, track), R_PILL)
+
+    local function render(state)
+        TweenService:Create(track, TweenInfo.new(0.18), {
+            BackgroundColor3 = state and T.Accent or T.PanelLight,
+        }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Position = state and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3),
+            BackgroundColor3 = state and T.Background or T.TextDim,
+        }):Play()
+    end
+    local current = UI.Values[def.Key] and true or false
+    render(current)
+    track.MouseButton1Click:Connect(function()
+        current = not current
+        render(current)
+        applyValue(def.Key, current)
+    end)
+    UI._refs[def.Key] = {Render = function(value) render(value and true or false) end}
+    return row
+end
+
+local function buildSlider(page, def, order)
+    local min = tonumber(def.Min) or 0
+    local max = tonumber(def.Max) or 100
+    local step = math.max(0.01, tonumber(def.Step) or 1)
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 52),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -96, 0, 20),
+        Position = UDim2.fromOffset(14, 6),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local valueLabel = create("TextLabel", {
+        Size = UDim2.fromOffset(78, 20),
+        Position = UDim2.new(1, -90, 0, 6),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "-",
+        TextColor3 = T.Accent,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, row)
+    local bar = corner(create("Frame", {
+        Size = UDim2.new(1, -28, 0, 8),
+        Position = UDim2.new(0, 14, 1, -16),
+        BackgroundColor3 = T.PanelLight,
+    }, row), R_PILL)
+    local fill = corner(create("Frame", {
+        Size = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = T.Accent,
+    }, bar), R_PILL)
+    vGradient(fill, 0, 0.3)
+    local handle = corner(create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        BackgroundColor3 = T.Text,
+        ZIndex = 2,
+    }, fill), R_PILL)
+    strokeOf(handle, T.Accent, 2, 0)
+
+    local function snap(value)
+        return math.clamp(math.floor(value / step + 0.5) * step, min, max)
+    end
+    local function render(value)
+        value = snap(tonumber(value) or min)
+        local alpha = math.clamp((value - min) / math.max(0.001, max - min), 0, 1)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        setText(valueLabel, tostring(value))
+    end
+    render(tonumber(UI.Values[def.Key]) or min)
+
+    local draggingSlider = false
+    local function setFromX(x)
+        local alpha = math.clamp((x - bar.AbsolutePosition.X) / math.max(1, bar.AbsoluteSize.X), 0, 1)
+        local value = snap(min + (max - min) * alpha)
+        render(value)
+        applyValue(def.Key, value)
+    end
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            draggingSlider = true
+            TweenService:Create(handle, TweenInfo.new(0.12), {Size = UDim2.fromOffset(18, 18)}):Play()
+            setFromX(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 and draggingSlider then
+            draggingSlider = false
+            TweenService:Create(handle, TweenInfo.new(0.15), {Size = UDim2.fromOffset(14, 14)}):Play()
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
+            setFromX(input.Position.X)
+        end
+    end)
+    UI._refs[def.Key] = {Render = function(value) render(tonumber(value) or min) end}
+    return row
+end
+
+-- =============================================================================
+-- Status page
+-- =============================================================================
+local statusLabel, statusCard, statCells, gearLine, bagFill, bagFillText, planterCells
+do
+    local page = UI._pages.Status
+    local order = 0
+    local function nextOrder() order += 1 return order end
+
+    statusCard = corner(create("Frame", {
+        Name = "StatusCard",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CARD)
+    strokeOf(statusCard, T.AccentDim, 1, 0.6)
+    vGradient(statusCard, 0, 0.22)
+    statusLabel = create("TextLabel", {
+        Size = UDim2.new(1, -18, 1, 0),
+        Position = UDim2.fromOffset(9, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "booting...",
+        TextColor3 = T.Text,
+        TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, statusCard)
+
+    statCells = {}
+    local statKeys = {
+        {"HoneyPerHour", "HONEY / H"},
+        {"Uptime", "UPTIME"},
+        {"Bees", "BEES"},
+        {"Tokens", "TOKENS"},
+        {"Honey", "HONEY"},
+        {"Capacity", "BAG SIZE"},
+        {"SproutsFarmed", "SPROUTS"},
+        {"PlanterHarvests", "HARVESTS"},
+    }
+    for index, entry in ipairs(statKeys) do
+        local rowIndex = math.ceil(index / 2)
+        local rowFrame = statCells["Row" .. rowIndex]
+        if not rowFrame then
+            rowFrame = create("Frame", {
+                Name = "Row" .. rowIndex,
+                LayoutOrder = nextOrder(),
+                Size = UDim2.new(1, 0, 0, 42),
+                BackgroundTransparency = 1,
+            }, page)
+            create("UIListLayout", {
+                FillDirection = Enum.FillDirection.Horizontal,
+                Padding = UDim.new(0, 6),
+            }, rowFrame)
+            statCells["Row" .. rowIndex] = rowFrame
+        end
+        local cell = corner(create("Frame", {
+            Name = "Cell_" .. entry[1],
+            Size = UDim2.new(0.5, -3, 1, 0),
+            BackgroundColor3 = T.Panel,
+        }, rowFrame), R_CTRL)
+        strokeOf(cell, T.Stroke, 1, 0.6)
+        create("TextLabel", {
+            Size = UDim2.new(1, -14, 0, 13),
+            Position = UDim2.fromOffset(8, 4),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = entry[2],
+            TextColor3 = T.TextDim,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, cell)
+        local valueLabel = create("TextLabel", {
+            Size = UDim2.new(1, -14, 0, 19),
+            Position = UDim2.fromOffset(8, 17),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold,
+            Text = "-",
+            TextColor3 = T.Text,
+            TextSize = 15,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, cell)
+        statCells[entry[1]] = valueLabel
+    end
+
+    gearLine = create("TextLabel", {
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 20),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        Text = "next gear: -",
+        TextColor3 = T.AccentSoft,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, page)
+
+    local bagFrame = corner(create("Frame", {
+        Name = "Bag",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 26),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(bagFrame, T.Stroke, 1, 0.6)
+    local bagTrack = corner(create("Frame", {
+        Size = UDim2.new(1, -8, 0, 12),
+        Position = UDim2.new(0, 4, 0.5, -6),
+        BackgroundColor3 = T.PanelLight,
+        ZIndex = 1,
+    }, bagFrame), R_PILL)
+    bagFill = corner(create("Frame", {
+        Size = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = T.Good,
+        ZIndex = 2,
+    }, bagTrack), R_PILL)
+    vGradient(bagFill, 0, 0.35)
+    bagFillText = create("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        Text = "bag -",
+        TextColor3 = T.Text,
+        TextSize = 12,
+        ZIndex = 3,
+    }, bagFrame)
+
+    local planterFrame = corner(create("Frame", {
+        Name = "Planters",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 80),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CARD)
+    strokeOf(planterFrame, T.Stroke, 1, 0.6)
+    create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 16),
+        Position = UDim2.fromOffset(9, 3),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "PLANTERS",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, planterFrame)
+    do
+        local slots = create("Frame", {
+            Size = UDim2.new(1, -14, 0, 50),
+            Position = UDim2.fromOffset(7, 22),
+            BackgroundTransparency = 1,
+        }, planterFrame)
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6),
+        }, slots)
+        planterCells = {}
+        for slot = 1, 3 do
+            local cell = corner(create("Frame", {
+                Size = UDim2.new(0.333, -4, 1, 0),
+                BackgroundColor3 = T.PanelLight,
+            }, slots), R_CTRL)
+            -- Icon THẬT của planter lấy từ EggTypes của game (rbxassetid trực
+            -- tiếp - client đã có texture, không download gì cả).
+            local iconImage = create("ImageLabel", {
+                Name = "Icon",
+                Size = UDim2.fromOffset(22, 22),
+                Position = UDim2.fromOffset(4, 3),
+                BackgroundTransparency = 1,
+                Image = "",
+                ScaleType = Enum.ScaleType.Fit,
+            }, cell)
+            local nameLabel = create("TextLabel", {
+                Size = UDim2.new(1, -32, 0, 14),
+                Position = UDim2.fromOffset(28, 4),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamMedium,
+                Text = "-",
+                TextColor3 = T.Text,
+                TextSize = 11,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            local fieldLabel = create("TextLabel", {
+                Size = UDim2.new(1, -32, 0, 12),
+                Position = UDim2.fromOffset(28, 18),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham,
+                Text = "",
+                TextColor3 = T.TextDim,
+                TextSize = 10,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            local fillTrack = corner(create("Frame", {
+                Size = UDim2.new(1, -12, 0, 7),
+                Position = UDim2.new(0, 6, 1, -13),
+                BackgroundColor3 = T.Background,
+            }, cell), R_PILL)
+            local fillBar = corner(create("Frame", {
+                Size = UDim2.new(0, 0, 1, 0),
+                BackgroundColor3 = T.Accent,
+            }, fillTrack), R_PILL)
+            planterCells[slot] = {Name = nameLabel, Field = fieldLabel, Fill = fillBar, Icon = iconImage}
+        end
+    end
+
+    -- Footer version line.
+    create("TextLabel", {
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 14),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = "BSS Kaitun • ui v2",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTransparency = 0.35,
+    }, page)
+end
+
+-- =============================================================================
+-- =============================================================================
+-- Hive page (tab 🍯): tổng quan tổ ong - cấp độ trung bình, gifted, màu.
+-- Main đẩy dữ liệu qua UI.SetHive{...} và UI.SetHiveGrid{{Type=,Gifted=,Level=,X=,Y=}}.
+-- =============================================================================
+-- Phân loại màu ô ong (file-level để SetHiveGrid dùng được - local trong
+-- do-block dưới kia sẽ không thấy).
+local HIVE_EVENT_MARKS = {
+    bear = true, cobalt = true, crimson = true, digital = true,
+    festive = true, gummy = true, photon = true, puppy = true,
+    tabby = true, vicious = true, windy = true,
 }
-TFFA.BLOCKED_REMOTES = { Player_SetThrowPower = true, Dev_Action = true,
-	AdminAbuse_Vote = true, AdminAbuse_VoteState = true, AdminAbuse_Gift = true,
-	Shop_Buy = true, Shop_Equip = true, Shop_Prompt = true, Stand_Upgrade = true,
-	Plot_SellAnimal = true, Plot_PlaceAnimal = true, Plot_EquipAnimal = true,
-	Plot_PickUpAnimal = true, Plot_UpgradeFence = true, Plot_SellAll = true,
-	Gift_Request = true, Gift_Respond = true, Gift_Cancel = true,
-	Throw_Start = true, Throw_Complete = true, Throw_Resolve = true,
-	Throw_UseSuper = true, Egg_Place = true, RingRush_Begin = true,
-	RingRush_Report = true, RingRush_End = true, Sell_Protected = true,
-	Player_SetSetting = true }
-TFFA.REMOTE_ALLOWLIST = { Animations_Get = true, Offline_Claim = true,
-	Training_Start = true, Training_Stop = true, Plot_EquipBest = true,
-	Shop_ClaimFree = true }
-
-TFFA.State = {
-	Running = false, MyPlot = nil, MyPlotCenter = nil, MyPlotNumber = nil,
-	Money = nil, ThrowPower = nil, Level = nil, PlotIncomePerSec = nil,
-	EquippedFood = nil, Throws = 0, Catches = 0, Misses = 0,
-	LastBiome = "?", LastLuck = "?", LastLandZ = nil, Cycles = 0,
-	DisabledFeatures = {}, RemoteFails = {}, LastRemoteCall = {},
-	ThrowHistory = {}, LearnedPower = {}, LastLevelUpAt = os.clock(),
-	Status = "Dang khoi dong...", StopFlag = false, Throwing = false,
-	StuckStreak = 0, LastProgressAt = os.clock(), NoProgressCycles = 0,
-	FoodFailStreak = 0, FoodBlocked = false, FoodConfirmed = false,
-	RecoveryCount = 0, TeleportsThisHour = 0, TeleportHourStart = os.clock(),
-	SessionStartedAt = os.clock(), DecideCycles = 0,
+-- =============================================================================
+-- RARITY -> MÀU Ô (giống ảnh mẫu hive của game):
+--   Common trắng, Rare xanh lá, Epic xanh dương, Legendary đỏ,
+--   Mythic tím, Event cyan. Gifted = viền VÀNG + tint kim nhẹ.
+-- =============================================================================
+local GOLD = Color3.fromRGB(255, 210, 63)
+local RARITY_COLORS = {
+    Common = Color3.fromRGB(232, 230, 223),
+    Rare = Color3.fromRGB(155, 214, 90),
+    Epic = Color3.fromRGB(91, 155, 239),
+    Legendary = Color3.fromRGB(239, 106, 90),
+    Mythic = Color3.fromRGB(185, 166, 236),
+    Event = Color3.fromRGB(111, 227, 214),
 }
-TFFA.ReconLog = {}
-TFFA.StuckLedger = {}
-
-function TFFA.log(...)
-	local parts = {}
-	for i = 1, select("#", ...) do parts[i] = tostring(select(i, ...)) end
-	local line = "[TFFA-Main] " .. table.concat(parts, " ")
-	print(line)
-	table.insert(TFFA.ReconLog, line)
-	if #TFFA.ReconLog > 400 then table.remove(TFFA.ReconLog, 1) end
-end
-
-function TFFA.logStuck(action, sign, target, level, result)
-	local root = TFFA.getRootPart()
-	local pos = root and root.Position or Vector3.new(0, 0, 0)
-	local _, humanoid = TFFA.getCharacter()
-	local hp = humanoid and humanoid.Health or -1
-	local sit = humanoid and tostring(humanoid.Sit) or "?"
-	local state = "?"
-	if humanoid then
-		local ok, st = pcall(function() return humanoid:GetState() end)
-		if ok then state = tostring(st):gsub("Enum.HumanoidStateType.", "") end
-	end
-	local dist = target and (Vector2.new(pos.X - target.X, pos.Z - target.Z).Magnitude) or -1
-	local line = string.format("[TFFA-KET] %s | %s | pos=(%.1f,%.1f,%.1f) -> dich=(%.1f,%.1f,%.1f) distXZ=%.1f | HP=%.0f Sit=%s State=%s | streak=%d | %s -> %s",
-		action, sign, pos.X, pos.Y, pos.Z,
-		target and target.X or 0, target and target.Y or 0, target and target.Z or 0,
-		dist, hp, sit, state, TFFA.State.StuckStreak, level, result)
-	print(line)
-	table.insert(TFFA.StuckLedger, line)
-	if #TFFA.StuckLedger > 20 then table.remove(TFFA.StuckLedger, 1) end
-end
-
-function TFFA.noteProgress()
-	TFFA.State.StuckStreak = 0
-	TFFA.State.NoProgressCycles = 0
-	TFFA.State.LastProgressAt = os.clock()
-end
-
-function TFFA.randRange(a, b)
-	return a + math.random() * (b - a)
-end
-
-function TFFA.triDelay(a, b)
-	local mid = (a + b) / 2
-	local r = (math.random() + math.random()) / 2
-	return a + (b - a) * r
-end
-
-function TFFA.randDelay()
-	task.wait(TFFA.triDelay(TFFA.Config.ActionDelayMin, TFFA.Config.ActionDelayMax))
-end
-
-function TFFA.pickMeterTarget()
-	local roll = math.random()
-	if roll < 0.65 then return TFFA.randRange(19, 20) end
-	if roll < 0.90 then return TFFA.randRange(17, 18.5) end
-	return TFFA.randRange(15, 16.5)
-end
-
-TFFA.SUFFIXES = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Qa = 1e15, Qi = 1e18,
-	Sx = 1e21, Sp = 1e24, Oc = 1e27, No = 1e30, Dc = 1e33, Ud = 1e36,
-	Dd = 1e39, Td = 1e42, Qad = 1e45 }
-
-function TFFA.parseMoney(text)
-	if type(text) ~= "string" then return nil end
-	local chunk = text:match("%$%s*([%d%.,]+%s*[A-Za-z]*)")
-	if not chunk then
-		chunk = text:match("([%d%.,]+%s*[A-Za-z]*)")
-	end
-	if not chunk then return nil end
-	local clean = chunk:gsub(",", ""):gsub("%s+", "")
-	local num, suf = clean:match("^([%d%.]+)([A-Za-z]*)$")
-	if not num then return nil end
-	local value = tonumber(num)
-	if not value then return nil end
-	if suf ~= "" then value = value * (TFFA.SUFFIXES[suf] or 1) end
-	return value
-end
-
-function TFFA.formatMoney(value)
-	if not value then return "?" end
-	local order = { { "Qad", 1e45 }, { "Td", 1e42 }, { "Dd", 1e39 }, { "Ud", 1e36 },
-		{ "Dc", 1e33 }, { "No", 1e30 }, { "Oc", 1e27 }, { "Sp", 1e24 },
-		{ "Sx", 1e21 }, { "Qi", 1e18 }, { "Qa", 1e15 }, { "T", 1e12 },
-		{ "B", 1e9 }, { "M", 1e6 }, { "K", 1e3 } }
-	for _, pair in ipairs(order) do
-		if value >= pair[2] then
-			return string.format("$%.2f%s", value / pair[2], pair[1])
-		end
-	end
-	return string.format("$%d", math.floor(value))
-end
-
-function TFFA.biomeFromZ(z)
-	if not z then return "?" end
-	local best = "Lobby"
-	for _, b in ipairs(TFFA.BIOMES) do
-		if z <= b.WallZ then best = b.Name end
-	end
-	return best
-end
-
-function TFFA.distXZ(a, b)
-	return Vector2.new(a.X - b.X, a.Z - b.Z).Magnitude
-end
-
-function TFFA.getPlayerGui()
-	local gui = LocalPlayer:FindFirstChild("PlayerGui")
-	if gui then return gui end
-	return LocalPlayer:WaitForChild("PlayerGui", 10)
-end
-
-function TFFA.isVisible(inst)
-	local cur = inst
-	while cur do
-		if cur:IsA("GuiObject") and not cur.Visible then return false end
-		if cur:IsA("ScreenGui") and not cur.Enabled then return false end
-		cur = cur.Parent
-	end
-	return true
-end
-
-function TFFA.findGuiTexts(needle, classFilter)
-	local found = {}
-	local gui = TFFA.getPlayerGui()
-	if not gui then return found end
-	local lowerNeedle = string.lower(needle)
-	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("GuiObject") then
-			if not classFilter or inst:IsA(classFilter) then
-				local ok, text = pcall(function() return inst.Text end)
-				if ok and type(text) == "string" and text ~= "" then
-					if string.find(string.lower(text), lowerNeedle, 1, true) then
-						table.insert(found, inst)
-					end
-				end
-			end
-		end
-	end
-	return found
-end
-
-function TFFA.findButtonByText(needle, ancestor)
-	local gui = TFFA.getPlayerGui()
-	if not gui then return nil end
-	local lowerNeedle = string.lower(needle)
-	local root = ancestor or gui
-	for _, inst in ipairs(root:GetDescendants()) do
-		if inst:IsA("TextButton") or inst:IsA("ImageButton") then
-			if TFFA.isVisible(inst) and inst.Active and inst.AbsoluteSize.X > 0 then
-				local ok, text = pcall(function() return inst.Text end)
-				if ok and type(text) == "string" then
-					local trimmed = string.lower(text:gsub("^%s+", ""):gsub("%s+$", ""))
-					if trimmed == lowerNeedle then return inst end
-				end
-			end
-		end
-	end
-	for _, inst in ipairs(root:GetDescendants()) do
-		if inst:IsA("TextButton") or inst:IsA("ImageButton") then
-			if TFFA.isVisible(inst) and inst.Active and inst.AbsoluteSize.X > 0 then
-				local ok, text = pcall(function() return inst.Text end)
-				if ok and type(text) == "string" and text ~= "" then
-					if string.find(string.lower(text), lowerNeedle, 1, true) then
-						return inst
-					end
-				end
-			end
-		end
-	end
-	return nil
-end
-
-function TFFA.findImageButton(namePart)
-	local gui = TFFA.getPlayerGui()
-	if not gui then return nil end
-	local lowerPart = string.lower(namePart)
-	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("ImageButton") and TFFA.isVisible(inst) and inst.Active then
-			local hay = string.lower(inst.Name)
-			if string.find(hay, lowerPart, 1, true) then return inst end
-		end
-	end
-	return nil
-end
-
-function TFFA.findCardByName(name, ancestor)
-	local gui = TFFA.getPlayerGui()
-	if not gui then return nil end
-	local root = ancestor or gui
-	local lowerName = string.lower(name)
-	for _, inst in ipairs(root:GetDescendants()) do
-		if inst:IsA("TextLabel") then
-			local ok, text = pcall(function() return inst.Text end)
-			if ok and type(text) == "string" then
-				if string.lower(text:gsub("^%s+", ""):gsub("%s+$", "")) == lowerName then
-					local card = inst.Parent
-					if card and card.Parent then card = card.Parent end
-					if card and card.Parent then card = card.Parent end
-					return card
-				end
-			end
-		end
-	end
-	return nil
-end
-
-TFFA.MeterSource = nil
-
-function TFFA.findMeterValue()
-	local gui = TFFA.getPlayerGui()
-	if not gui then return nil, nil end
-	if TFFA.MeterSource and TFFA.MeterSource.inst
-		and TFFA.MeterSource.inst.Parent ~= nil then
-		local src = TFFA.MeterSource
-		if src.kind == "fill" then
-			local ok, scale = pcall(function() return src.inst.Size.X.Scale end)
-			if ok and scale and scale >= 0 and scale <= 1 then
-				return scale * 20, "fill:" .. src.inst.Name
-			end
-		else
-			local ok, text = pcall(function() return src.inst.Text end)
-			if ok and type(text) == "string" then
-				local num = tonumber(text)
-				if num and num >= 0 and num <= 20 then
-					return num, "label:" .. src.inst.Name
-				end
-			end
-		end
-		TFFA.MeterSource = nil
-	end
-	local cands = {}
-	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("Frame") and TFFA.isVisible(inst) then
-			local parentName = inst.Parent and inst.Parent.Name or ""
-			local grandName = (inst.Parent and inst.Parent.Parent and inst.Parent.Parent.Name) or ""
-			local hay = string.lower(inst.Name .. " " .. parentName .. " " .. grandName)
-			if string.find(hay, "meter") or string.find(hay, "throw")
-				or string.find(hay, "power") or string.find(hay, "slider") then
-				local ok, scale = pcall(function() return inst.Size.X.Scale end)
-				if ok and scale and scale > 0 and scale <= 1 then
-					table.insert(cands, { inst = inst, scale1 = scale })
-				end
-			end
-		end
-	end
-	if #cands > 0 then
-		task.wait(0.1)
-		for _, c in ipairs(cands) do
-			local ok, scale2 = pcall(function() return c.inst.Size.X.Scale end)
-			if ok and scale2 and math.abs(scale2 - c.scale1) > 0.01 then
-				TFFA.MeterSource = { kind = "fill", inst = c.inst }
-				TFFA.log("Tim thay thanh meter: fill frame", c.inst.Name)
-				return scale2 * 20, "fill:" .. c.inst.Name
-			end
-		end
-		if #cands == 1 and cands[1].scale1 > 0.05 and cands[1].scale1 < 0.95 then
-			TFFA.MeterSource = { kind = "fill", inst = cands[1].inst }
-			return cands[1].scale1 * 20, "fill?:" .. cands[1].inst.Name
-		end
-	end
-	local samples = {}
-	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("TextLabel") and TFFA.isVisible(inst) then
-			local ok, text = pcall(function() return inst.Text end)
-			if ok and type(text) == "string" then
-				local num = tonumber(text)
-				if num and num >= 0 and num <= 20 then
-					local parentName = inst.Parent and inst.Parent.Name or ""
-					local grandName = (inst.Parent and inst.Parent.Parent and inst.Parent.Parent.Name) or ""
-					local hay = string.lower(inst.Name .. " " .. parentName .. " " .. grandName)
-					if string.find(hay, "throw") or string.find(hay, "meter")
-						or string.find(hay, "power") or string.find(hay, "slider") then
-						table.insert(samples, { inst = inst, t1 = text })
-					end
-				end
-			end
-		end
-	end
-	if #samples > 0 then
-		task.wait(0.15)
-		for _, s in ipairs(samples) do
-			local ok, t2 = pcall(function() return s.inst.Text end)
-			if ok and t2 ~= s.t1 then
-				local num = tonumber(t2)
-				if num then
-					TFFA.MeterSource = { kind = "label", inst = s.inst }
-					TFFA.log("Tim thay thanh meter: label so", s.inst.Name)
-					return num, "label:" .. s.inst.Name
-				end
-			end
-		end
-	end
-	return nil, nil
-end
-
-function TFFA.clickButton(btn, verifyFn)
-	if not btn then return false end
-	local tried = {}
-	if firesignal then
-		local ok = pcall(function() firesignal(btn.MouseButton1Click) end)
-		if ok then table.insert(tried, "firesignal") end
-	end
-	if verifyFn then
-		task.wait(0.4)
-		local ok, good = pcall(verifyFn)
-		if ok and good then return true end
-	elseif #tried > 0 then
-		return true
-	end
-	local pos = btn.AbsolutePosition
-	local size = btn.AbsoluteSize
-	local jx = TFFA.randRange(-0.35, 0.35) * size.X
-	local jy = TFFA.randRange(-0.35, 0.35) * size.Y
-	local x = pos.X + size.X / 2 + jx
-	local y = pos.Y + size.Y / 2 + jy
-	local holdTime = TFFA.randRange(0.06, 0.18)
-	local okTouch = pcall(function()
-		if VirtualInputManager.SendTouchEvent then
-			VirtualInputManager:SendTouchEvent(x, y, 0, true, game, 0)
-			task.wait(holdTime)
-			VirtualInputManager:SendTouchEvent(x, y, 0, false, game, 0)
-		else
-			error("no SendTouchEvent")
-		end
-	end)
-	if okTouch then table.insert(tried, "touch") end
-	if verifyFn then
-		task.wait(0.4)
-		local ok, good = pcall(verifyFn)
-		if ok and good then return true end
-	elseif okTouch then
-		return true
-	end
-	local okMouse = pcall(function()
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-		task.wait(holdTime)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
-	end)
-	if verifyFn then
-		task.wait(0.4)
-		local ok, good = pcall(verifyFn)
-		if ok and good then return true end
-	elseif okMouse then
-		return true
-	end
-	TFFA.log("CLICK_FAIL:", btn.Name, "da thu:", table.concat(tried, ","))
-	return false
-end
-
-function TFFA.getRemotesFolder()
-	return ReplicatedStorage:FindFirstChild("Remotes")
-end
-
-function TFFA.getRemote(name)
-	local folder = TFFA.getRemotesFolder()
-	if not folder then return nil end
-	return folder:FindFirstChild(name)
-end
-
-function TFFA.safeInvokeNoArg(name)
-	if TFFA.BLOCKED_REMOTES[name] then
-		TFFA.log("BLOCKED remote khong bao gio goi:", name)
-		return false, "blocked"
-	end
-	if not TFFA.Config.RemoteCallsEnabled then
-		return false, "remote calls disabled (chay recon truoc)"
-	end
-	if not TFFA.Config.RemoteAllow[name] then
-		return false, "remote chua duoc bat trong RemoteAllow"
-	end
-	if not TFFA.REMOTE_ALLOWLIST[name] then
-		return false, "remote khong nam trong allowlist no-arg"
-	end
-	if TFFA.State.DisabledFeatures[name] then
-		return false, "disabled after failures"
-	end
-	local remote = TFFA.getRemote(name)
-	if not remote then return false, "khong tim thay remote" end
-	local last = TFFA.State.LastRemoteCall[name] or 0
-	local gap = os.clock() - last
-	if gap < TFFA.Config.MinRemoteGap then task.wait(TFFA.Config.MinRemoteGap - gap) end
-	TFFA.State.LastRemoteCall[name] = os.clock()
-	local done = false
-	local ok, res = false, nil
-	task.spawn(function()
-		ok, res = pcall(function() return remote:InvokeServer() end)
-		done = true
-	end)
-	local t0 = os.clock()
-	while not done and os.clock() - t0 < 8 do task.wait(0.1) end
-	if not done then
-		TFFA.log("TIMEOUT remote:", name)
-		return false, "timeout"
-	end
-	if ok then
-		TFFA.State.RemoteFails[name] = 0
-		if TFFA.Config.ProbeMode then
-			TFFA.log("REMOTE OK:", name, "->", tostring(res))
-		end
-		return true, res
-	end
-	local fails = (TFFA.State.RemoteFails[name] or 0) + 1
-	TFFA.State.RemoteFails[name] = fails
-	TFFA.log("REMOTE FAIL:", name, "lan", fails, "->", tostring(res))
-	if fails >= TFFA.Config.MaxRemoteFails then
-		TFFA.State.DisabledFeatures[name] = true
-		TFFA.log("TAT remote do loi lien tiep:", name)
-	end
-	return false, res
-end
-
-function TFFA.getCharacter()
-	local char = LocalPlayer.Character
-	if not char then return nil, nil end
-	return char, char:FindFirstChildOfClass("Humanoid")
-end
-
-function TFFA.getRootPart()
-	local char = LocalPlayer.Character
-	if not char then return nil end
-	return char:FindFirstChild("HumanoidRootPart")
-end
-
-function TFFA.findMyPlot()
-	local plotsFolder = Workspace:FindFirstChild("Plots")
-	if not plotsFolder then
-		plotsFolder = Workspace:WaitForChild("Plots", 30)
-	end
-	if not plotsFolder then
-		TFFA.log("UNKNOWN: khong tim thay Workspace.Plots")
-		return nil, nil
-	end
-	if TFFA.Config.PlotNumber then
-		local plot = plotsFolder:FindFirstChild("Plot " .. tostring(TFFA.Config.PlotNumber))
-		if plot then
-			TFFA.log("Plot ep thu cong:", plot.Name, "(qua Config.PlotNumber)")
-			return plot, plot.Position
-		end
-		TFFA.log("Config.PlotNumber =", tostring(TFFA.Config.PlotNumber), "nhung khong thay plot do.")
-	end
-	local myName = LocalPlayer.Name
-	local myDisplay = LocalPlayer.DisplayName
-	local function ownerText(plot)
-		local tag = plot:FindFirstChild("OwnerTag")
-		if not tag then return nil end
-		for _, desc in ipairs(tag:GetDescendants()) do
-			if desc:IsA("TextLabel") then
-				local ok, text = pcall(function() return desc.Text end)
-				if ok and type(text) == "string" and text ~= "" then return text end
-			end
-		end
-		return nil
-	end
-	for _, plot in ipairs(plotsFolder:GetChildren()) do
-		if plot:IsA("BasePart") then
-			local text = ownerText(plot)
-			if text == myName then
-				TFFA.log("Plot cua ban:", plot.Name, "(qua OwnerTag == username)")
-				return plot, plot.Position
-			end
-		end
-	end
-	for _, plot in ipairs(plotsFolder:GetChildren()) do
-		if plot:IsA("BasePart") then
-			local text = ownerText(plot)
-			if text == myDisplay then
-				TFFA.log("Plot cua ban:", plot.Name, "(qua OwnerTag == DisplayName)")
-				return plot, plot.Position
-			end
-		end
-	end
-	for _, plot in ipairs(plotsFolder:GetChildren()) do
-		if plot:IsA("BasePart") then
-			local server = plot:FindFirstChild("Server")
-			if server and server:FindFirstChild("TrainingRig_" .. myName) then
-				TFFA.log("Plot cua ban:", plot.Name, "(qua TrainingRig)")
-				return plot, plot.Position
-			end
-		end
-	end
-	for _, plot in ipairs(plotsFolder:GetChildren()) do
-		if plot:IsA("BasePart") then
-			local text = ownerText(plot)
-			if text and (string.find(text, myName, 1, true)
-				or string.find(text, myDisplay, 1, true)) then
-				TFFA.log("CANH BAO: plot doan theo chuoi con (do tin cay thap):", plot.Name)
-				return plot, plot.Position
-			end
-		end
-	end
-	local root = TFFA.getRootPart()
-	if root then
-		local nearest, nearestDist = nil, 30
-		for _, plot in ipairs(plotsFolder:GetChildren()) do
-			if plot:IsA("BasePart") then
-				local d = TFFA.distXZ(root.Position, plot.Position)
-				if d < nearestDist then nearest, nearestDist = plot, d end
-			end
-		end
-		if nearest then
-			TFFA.log("Plot cua ban:", nearest.Name, "(nhan vat dang dung tren)")
-			return nearest, nearest.Position
-		end
-	end
-	TFFA.log("UNKNOWN: khong xac dinh duoc plot cua minh (OwnerTag/TrainingRig).")
-	TFFA.log("  Hay dung yen o plot cua ban roi chay lai, hoac set Config.PlotNumber = so plot (1-5).")
-	return nil, nil
-end
-
-function TFFA.readMoney()
-	local gui = TFFA.getPlayerGui()
-	if not gui then return nil end
-	local function scanOnce()
-		local best, bestSrc = nil, nil
-		for _, inst in ipairs(gui:GetDescendants()) do
-			if inst:IsA("TextLabel") and TFFA.isVisible(inst) then
-				local ok, text = pcall(function() return inst.Text end)
-				if ok and type(text) == "string" and string.find(text, "%$") then
-					local value = TFFA.parseMoney(text)
-					if value and value >= 0 then
-						local parentName = inst.Parent and inst.Parent.Name or ""
-						local hay = string.lower(inst.Name .. " " .. parentName)
-						if string.find(hay, "cash") or string.find(hay, "money")
-							or string.find(hay, "hud") or string.find(hay, "top") then
-							return value, inst.Name .. "=\"" .. text .. "\""
-						end
-						if not best then
-							best = value
-							bestSrc = inst.Name .. "=\"" .. text .. "\""
-						end
-					end
-				end
-			end
-		end
-		return best, bestSrc
-	end
-	local v1, src1 = scanOnce()
-	task.wait(0.5)
-	local v2, src2 = scanOnce()
-	if v1 and v2 and v1 == v2 then
-		TFFA.MoneySource = src1
-		return v1
-	end
-	TFFA.MoneySource = src2 or src1
-	return v2 or v1
-end
-
-function TFFA.readPowerLevel()
-	local gui = TFFA.getPlayerGui()
-	if not gui then return nil, nil end
-	local power, level = nil, nil
-	local function numbersIn(inst)
-		local out = {}
-		local function collect(node)
-			if node:IsA("TextLabel") then
-				local ok, text = pcall(function() return node.Text end)
-				if ok and type(text) == "string" then
-					local v = TFFA.parseMoney(text)
-					if v then table.insert(out, v) end
-				end
-			end
-			for _, child in ipairs(node:GetChildren()) do collect(child) end
-		end
-		collect(inst)
-		return out
-	end
-	for _, inst in ipairs(gui:GetDescendants()) do
-		if inst:IsA("GuiObject") then
-			local low = string.lower(inst.Name)
-			if not power and string.find(low, "power") then
-				local nums = numbersIn(inst.Parent or inst)
-				if #nums > 0 then power = nums[1] end
-			end
-			if not level and (string.find(low, "level") or string.find(low, "lvl")) then
-				local nums = numbersIn(inst.Parent or inst)
-				if #nums > 0 then level = nums[1] end
-			end
-		end
-		if inst:IsA("TextLabel") then
-			local ok, text = pcall(function() return inst.Text end)
-			if ok and type(text) == "string" and text ~= "" then
-				local low = string.lower(text)
-				if not power and string.find(low, "throw power") then
-					power = TFFA.parseMoney(text)
-				end
-				if not level then
-					local lv = text:match("[Ll][Ee][Vv][Ee][Ll]%s*%:?%s*(%d+)")
-						or text:match("[Ll][Vv][Ll]%s*%.?%s*(%d+)")
-						or text:match("[Ll][Vv]%s*%.?%s*(%d+)")
-					if lv then level = tonumber(lv) end
-				end
-			end
-		end
-	end
-	return power, level
-end
-
-function TFFA.readPlotIncome()
-	local plot = TFFA.State.MyPlot
-	if not plot then return nil end
-	local animalsFolder = plot:FindFirstChild("Animals")
-	if not animalsFolder then return nil end
-	local total = 0
-	local found = 0
-	for _, desc in ipairs(animalsFolder:GetDescendants()) do
-		if desc:IsA("TextLabel") then
-			local ok, text = pcall(function() return desc.Text end)
-			if ok and type(text) == "string" and string.find(text, "%$/s") then
-				local value = TFFA.parseMoney(text)
-				if value then total = total + value; found = found + 1 end
-			end
-		end
-	end
-	if found == 0 then return nil end
-	return total
-end
-
-function TFFA.readPlotAnimals()
-	local plot = TFFA.State.MyPlot
-	if not plot then return {} end
-	local animalsFolder = plot:FindFirstChild("Animals")
-	if not animalsFolder then return {} end
-	local out = {}
-	for _, model in ipairs(animalsFolder:GetChildren()) do
-		if model:IsA("Model") then
-			local income = nil
-			local mutation, size = nil, nil
-			for _, desc in ipairs(model:GetDescendants()) do
-				if desc:IsA("TextLabel") then
-					local ok, text = pcall(function() return desc.Text end)
-					if ok and type(text) == "string" then
-						if string.find(text, "%$/s") then
-							income = TFFA.parseMoney(text)
-						end
-						for mut in pairs(TFFA.MUT_MULT) do
-							if string.find(string.upper(text), string.upper(mut), 1, true) then
-								mutation = mut
-							end
-						end
-						for sz in pairs(TFFA.SIZE_MULT) do
-							if string.find(string.upper(text), string.upper(sz), 1, true) then
-								size = sz
-							end
-						end
-					end
-				end
-			end
-			table.insert(out, { species = model.Name, income = income,
-				mutation = mutation, size = size, instance = model })
-		end
-	end
-	return out
-end
-
-function TFFA.countAnimalsOnPlot()
-	return #TFFA.readPlotAnimals()
-end
-
-function TFFA.countBackpackAnimals()
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	if not backpack then return 0 end
-	local n = 0
-	for _, tool in ipairs(backpack:GetChildren()) do
-		if tool:IsA("Tool") and TFFA.ANIMAL_SET[tool.Name] then n = n + 1 end
-	end
-	return n
-end
-
-function TFFA.countBackpackFoods()
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	if not backpack then return 0 end
-	local n = 0
-	for _, tool in ipairs(backpack:GetChildren()) do
-		if tool:IsA("Tool") and TFFA.FOOD_SET[tool.Name] then n = n + 1 end
-	end
-	return n
-end
-
-function TFFA.bestOwnedFood()
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	if not backpack then return nil end
-	local owned = {}
-	for _, tool in ipairs(backpack:GetChildren()) do
-		if tool:IsA("Tool") then owned[tool.Name] = true end
-	end
-	local char = LocalPlayer.Character
-	if char then
-		for _, tool in ipairs(char:GetChildren()) do
-			if tool:IsA("Tool") then owned[tool.Name] = true end
-		end
-	end
-	local best = nil
-	local bestIdx = 0
-	for idx, entry in ipairs(TFFA.FOOD_LADDER) do
-		if owned[entry.Name] and idx > bestIdx then best = entry.Name; bestIdx = idx end
-	end
-	if not best then
-		for _, name in ipairs(TFFA.ALL_FOODS) do
-			if owned[name] then best = name; break end
-		end
-	end
-	if not best and TFFA.State.EquippedFood then
-		return TFFA.State.EquippedFood
-	end
-	return best
-end
-
-function TFFA.equipFood(foodName)
-	if not foodName or foodName == "" then return false end
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	local char, humanoid = TFFA.getCharacter()
-	if not backpack or not humanoid then return false end
-	local tool = backpack:FindFirstChild(foodName)
-	if tool then
-		humanoid:EquipTool(tool)
-		TFFA.State.EquippedFood = foodName
-		return true
-	end
-	if char then
-		local held = char:FindFirstChild(foodName)
-		if held then TFFA.State.EquippedFood = foodName; return true end
-	end
-	return false
-end
-
-function TFFA.heldFood()
-	local char = LocalPlayer.Character
-	if not char then return nil end
-	for _, tool in ipairs(char:GetChildren()) do
-		if tool:IsA("Tool") and TFFA.FOOD_SET[tool.Name] then return tool.Name end
-	end
-	return nil
-end
-
-function TFFA.hasFood()
-	return TFFA.bestOwnedFood() ~= nil
-		or TFFA.countBackpackFoods() > 0
-		or TFFA.State.EquippedFood ~= nil
-		or TFFA.State.FoodConfirmed
-end
-
-function TFFA.canTeleport()
-	local now = os.clock()
-	if now - TFFA.State.TeleportHourStart > 3600 then
-		TFFA.State.TeleportHourStart = now
-		TFFA.State.TeleportsThisHour = 0
-	end
-	return TFFA.State.TeleportsThisHour < TFFA.Config.MaxTeleportsPerHour
-end
-
-function TFFA.teleportTo(pos, reason)
-	if not TFFA.canTeleport() then
-		TFFA.log("Het luot teleport trong gio nay (toi da "
-			.. tostring(TFFA.Config.MaxTeleportsPerHour) .. ") — khong teleport:", reason)
-		return false
-	end
-	local root = TFFA.getRootPart()
-	if not root then return false end
-	TFFA.State.TeleportsThisHour = TFFA.State.TeleportsThisHour + 1
-	pcall(function()
-		root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-	end)
-	task.wait(0.5)
-	TFFA.log("Teleport (" .. reason .. ") toi", tostring(pos),
-		"(lan " .. tostring(TFFA.State.TeleportsThisHour) .. " trong gio nay)")
-	return true
-end
-
-function TFFA.moveTo(cf, timeout)
-	local root = TFFA.getRootPart()
-	local _, humanoid = TFFA.getCharacter()
-	if not root or not humanoid or humanoid.Health <= 0 then return false end
-	timeout = timeout or 20
-	local target = cf.Position
-	local function stillValid()
-		local r = TFFA.getRootPart()
-		local _, h = TFFA.getCharacter()
-		return r ~= nil and h ~= nil and h.Health > 0 and r.Parent ~= nil
-	end
-	if humanoid.Sit then
-		pcall(function()
-			humanoid.Sit = false
-			humanoid.Jump = true
-		end)
-		task.wait(0.7)
-	end
-	local t0 = os.clock()
-	local teleports = 0
-	local lastDist = TFFA.distXZ(root.Position, target)
-	local lastImprove = os.clock()
-	local path = nil
-	local waypoints = nil
-	local wpIndex = 1
-	local issuedTarget = nil
-	local lastIssue = 0
-	local function issueMove(pos)
-		humanoid:MoveTo(pos)
-		issuedTarget = pos
-		lastIssue = os.clock()
-	end
-	local function computePath()
-		local ok, p = pcall(function()
-			return PathfindingService:CreatePath({
-				AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
-				AgentCanClimb = false, WaypointSpacing = 8,
-				Costs = { Water = math.huge },
-			})
-		end)
-		if not ok or not p then return false end
-		local ok2 = pcall(function()
-			p:ComputeAsync(root.Position, target)
-		end)
-		if not ok2 then return false end
-		if p.Status ~= Enum.PathStatus.Success then
-			TFFA.log("Pathfinding khong tim duoc duong toi", tostring(target),
-				"status:", tostring(p.Status), "- dung MoveTo truc tiep.")
-			return false
-		end
-		path = p
-		waypoints = p:GetWaypoints()
-		wpIndex = 1
-		return true
-	end
-	local usePath = computePath()
-	if not usePath then
-		issueMove(target)
-	end
-	while os.clock() - t0 < timeout do
-		if not stillValid() then
-			TFFA.logStuck("moveTo", "nhan vat chet/respawn giua duong", target, "L5", "dung leg")
-			return false
-		end
-		local dist = TFFA.distXZ(root.Position, target)
-		if dist < 3 then
-			TFFA.noteProgress()
-			return true
-		end
-		if dist < lastDist - 0.5 then
-			lastDist = dist
-			lastImprove = os.clock()
-		end
-		local desired = target
-		if usePath and waypoints then
-			local wp = waypoints[wpIndex]
-			while wp and TFFA.distXZ(root.Position, wp.Position) < 3 do
-				wpIndex = wpIndex + 1
-				wp = waypoints[wpIndex]
-			end
-			if wp then
-				if wp.Action == Enum.PathWaypointAction.Jump
-					and TFFA.distXZ(root.Position, wp.Position) < 5 then
-					pcall(function() humanoid.Jump = true end)
-				end
-				desired = wp.Position
-			end
-		end
-		if not issuedTarget or TFFA.distXZ(desired, issuedTarget) > 1
-			or os.clock() - lastIssue > 4 then
-			issueMove(desired)
-		end
-		if os.clock() - lastImprove > 3 then
-			TFFA.logStuck("moveTo", "khong tien ve dich 3s", target, "L1", "nhay + tinh lai path")
-			pcall(function() humanoid.Jump = true end)
-			task.wait(0.8)
-			if TFFA.distXZ(root.Position, target) < lastDist - 0.5 then
-				lastDist = TFFA.distXZ(root.Position, target)
-				lastImprove = os.clock()
-			else
-				teleports = teleports + 1
-				if teleports > 2 then
-					TFFA.logStuck("moveTo", "het 2 luot teleport", target, "L3", "bo leg")
-					return false
-				end
-				if TFFA.teleportTo(target, "ket khi di chuyen") then
-					if TFFA.distXZ(root.Position, target) < 5 then
-						TFFA.noteProgress()
-						return true
-					end
-				end
-				lastDist = TFFA.distXZ(root.Position, target)
-				lastImprove = os.clock()
-				usePath = computePath()
-				issuedTarget = nil
-				if not usePath then
-					issueMove(target)
-				end
-			end
-		end
-		task.wait(0.2)
-	end
-	TFFA.logStuck("moveTo", "TIMEOUT", target, "L3", "het gio")
-	return false
-end
-
-function TFFA.goThrowLine()
-	return TFFA.moveTo(CFrame.new(TFFA.ANCHORS.ThrowLine), 20)
-end
-
-function TFFA.goTrainingSpot()
-	if not TFFA.State.MyPlotCenter then return false end
-	local target = TFFA.State.MyPlotCenter + TFFA.ANCHORS.TrainingOffset
-	return TFFA.moveTo(CFrame.new(target), 25)
-end
-
-function TFFA.goFoodShop()
-	if not TFFA.State.MyPlotCenter then return false end
-	local target = TFFA.State.MyPlotCenter + TFFA.ANCHORS.FoodShopOffset
-	return TFFA.moveTo(CFrame.new(target), 25)
-end
-
-function TFFA.goSell()
-	return TFFA.moveTo(CFrame.new(TFFA.ANCHORS.SellCircle), 25)
-end
-
-function TFFA.goSpawn()
-	return TFFA.moveTo(CFrame.new(TFFA.ANCHORS.Spawn), 15)
-end
-
-function TFFA.goBarUpgradePad()
-	if not TFFA.State.MyPlotCenter then return false end
-	local target = TFFA.State.MyPlotCenter + TFFA.ANCHORS.BarUpgradeOffset
-	return TFFA.moveTo(CFrame.new(target), 25)
-end
-
-function TFFA.waitForThrowUI(timeout)
-	local t0 = os.clock()
-	while os.clock() - t0 < (timeout or 10) do
-		if #TFFA.findGuiTexts("TAP TO THROW") > 0 then return true end
-		task.wait(0.3)
-	end
-	return false
-end
-
-function TFFA.waitForResultText(timeout)
-	local t0 = os.clock()
-	while os.clock() - t0 < (timeout or 5) do
-		if #TFFA.findGuiTexts("PERFECT") > 0 then return "PERFECT" end
-		if #TFFA.findGuiTexts("GREAT") > 0 then return "GREAT" end
-		local found = TFFA.findGuiTexts("+")
-		for _, inst in ipairs(found) do
-			local ok, text = pcall(function() return inst.Text end)
-			if ok and type(text) == "string" and string.find(text, "POWER") then
-				return text
-			end
-		end
-		task.wait(0.2)
-	end
-	return nil
-end
-
-function TFFA.watchMeterAndThrow(target)
-	target = target or TFFA.pickMeterTarget()
-	TFFA.log("Canh meter, muc tieu:", string.format("%.1f", target))
-	local t0 = os.clock()
-	local prev = nil
-	local lastLog = 0
-	while os.clock() - t0 < TFFA.Config.ThrowTimeout do
-		local meter = TFFA.findMeterValue()
-		if meter then
-			if os.clock() - lastLog > 1 then
-				lastLog = os.clock()
-				TFFA.log("Meter:", string.format("%.1f", meter),
-					"-> muc tieu", string.format("%.1f", target))
-			end
-			if prev and meter >= prev and meter >= target - 0.5 then
-				task.wait(TFFA.randRange(0.08, 0.35))
-				local btn = TFFA.findButtonByText("TAP TO THROW")
-					or TFFA.findButtonByText("TAP TO THROW!")
-				if btn then
-					TFFA.clickButton(btn)
-				else
-					pcall(function()
-						local cam = Workspace.CurrentCamera
-						if cam then
-							local vs = cam.ViewportSize
-							VirtualInputManager:SendMouseButtonEvent(vs.X / 2, vs.Y / 2, 0, true, game, 0)
-							task.wait(TFFA.randRange(0.06, 0.18))
-							VirtualInputManager:SendMouseButtonEvent(vs.X / 2, vs.Y / 2, 0, false, game, 0)
-						end
-					end)
-				end
-				TFFA.log("Da bam nem o meter", string.format("%.1f", meter))
-				return true
-			end
-			prev = meter
-		end
-		task.wait(TFFA.randRange(0.02, 0.03))
-	end
-	TFFA.log("Khong thay meter len toi muc tieu trong "
-		.. tostring(TFFA.Config.ThrowTimeout) .. "s - co the khong doc duoc thanh meter.")
-	TFFA.log("  Hay nem tay 1 lan, chup anh GUI luc meter dang chay roi gui cho Muse.")
-	return false
-end
-
-function TFFA.doOneThrow()
-	local food = TFFA.Config.Food
-	if food == "" or food == nil then food = TFFA.bestOwnedFood() end
-	if not food then food = TFFA.State.EquippedFood end
-	if food then
-		local equipped = TFFA.equipFood(food)
-		if not equipped and TFFA.State.EquippedFood ~= food then
-			TFFA.log("Khong equip duoc mon an:", tostring(food))
-			return false
-		end
-		task.wait(0.5)
-	else
-		TFFA.log("Khong biet ten mon an - thu ra vach nem de kiem tra.")
-	end
-	if not TFFA.goThrowLine() then
-		TFFA.log("Khong toi duoc vach nem - bo qua luot nay")
-		return false
-	end
-	TFFA.State.Throwing = true
-	if not TFFA.waitForThrowUI(10) then
-		TFFA.log("Khong thay UI nem (TAP TO THROW) sau 10s - bo qua luot nay.")
-		TFFA.log("  Hay nem tay 1 lan va gui anh GUI nem cho Muse de chinh do tim meter.")
-		TFFA.State.Throwing = false
-		return false
-	end
-	TFFA.State.FoodConfirmed = true
-	TFFA.State.FoodBlocked = false
-	TFFA.State.FoodFailStreak = 0
-	local target = TFFA.pickMeterTarget()
-	TFFA.log("Nem voi mon:", tostring(food), "| muc tieu meter:", string.format("%.1f", target))
-	local clicked = TFFA.watchMeterAndThrow(target)
-	TFFA.State.Throwing = false
-	if not clicked then
-		TFFA.State.Misses = TFFA.State.Misses + 1
-		return false
-	end
-	TFFA.State.Throws = TFFA.State.Throws + 1
-	TFFA.noteProgress()
-	local result = TFFA.waitForResultText(5)
-	if result then
-		TFFA.log("Ket qua nem:", tostring(result))
-		TFFA.State.FoodConfirmed = true
-	else
-		TFFA.log("Khong thay chu PERFECT/GREAT sau khi nem - co the nem hong hoac UI khac.")
-	end
-	local skipBtn = TFFA.findButtonByText("SKIP")
-	if skipBtn then TFFA.clickButton(skipBtn) end
-	return true
-end
-
-function TFFA.collectCaughtAnimal()
-	local t0 = os.clock()
-	local species = nil
-	while os.clock() - t0 < 20 do
-		local found = TFFA.findGuiTexts("NEW!")
-		if #found > 0 then break end
-		task.wait(0.5)
-		if os.clock() - t0 > 20 then break end
-	end
-	local gui = TFFA.getPlayerGui()
-	if gui then
-		for _, inst in ipairs(gui:GetDescendants()) do
-			if inst:IsA("TextLabel") and TFFA.isVisible(inst) then
-				local ok, text = pcall(function() return inst.Text end)
-				if ok and type(text) == "string" and TFFA.ANIMAL_SET[text] then
-					species = text
-					break
-				end
-			end
-		end
-	end
-	if not species then
-		TFFA.log("Khong doc duoc the reveal (khong thay ten loai) - co the nem truot.")
-		TFFA.State.Misses = TFFA.State.Misses + 1
-		return false
-	end
-	TFFA.log("The reveal: vua bat duoc", species)
-	local target = nil
-	local targetModel = nil
-	local pollEnd = os.clock() + 60
-	while os.clock() < pollEnd do
-		for _, child in ipairs(Workspace:GetDescendants()) do
-			if child:IsA("Model") and child.Name == species then
-				local underPlots = false
-				local cur = child.Parent
-				while cur do
-					if cur.Name == "Plots" then underPlots = true; break end
-					cur = cur.Parent
-				end
-				if not underPlots then
-					local hasBillboard = false
-					for _, desc in ipairs(child:GetDescendants()) do
-						if desc:IsA("BillboardGui") then hasBillboard = true; break end
-					end
-					if not hasBillboard then
-						local primary = child.PrimaryPart
-						if primary then
-							target = primary.Position
-							targetModel = child
-							break
-						end
-					end
-				end
-			end
-		end
-		if target then break end
-		task.wait(1.5)
-	end
-	if not target or not targetModel then
-		TFFA.log("Khong thay model", species, "ngoai san sau 60s - bo qua.")
-		TFFA.State.Misses = TFFA.State.Misses + 1
-		return false
-	end
-	local landZ = target.Z
-	TFFA.State.LastLandZ = landZ
-	TFFA.State.LastBiome = TFFA.biomeFromZ(landZ)
-	TFFA.log("Thu roi tai Z=" .. string.format("%.0f", landZ)
-		.. " biome=" .. TFFA.State.LastBiome .. " loai=" .. species)
-	local power = TFFA.State.ThrowPower
-	if power then
-		local known = TFFA.State.LearnedPower[TFFA.State.LastBiome]
-		if not known or power < known then
-			TFFA.State.LearnedPower[TFFA.State.LastBiome] = power
-		end
-	end
-	table.insert(TFFA.State.ThrowHistory, { biome = TFFA.State.LastBiome, z = landZ })
-	if #TFFA.State.ThrowHistory > 50 then table.remove(TFFA.State.ThrowHistory, 1) end
-	local dist = math.abs(landZ) + 40
-	local timeout = dist / 16 * 1.5 + TFFA.Config.CollectTimeoutBase
-	local root = TFFA.getRootPart()
-	if root and math.abs(landZ) > 800 and TFFA.canTeleport() then
-		TFFA.log("Diem roi xa (|Z| > 800) - teleport ho tro toi gan diem roi.")
-		TFFA.teleportTo(Vector3.new(0, 3, landZ + 20), "diem roi xa")
-	end
-	local ok = TFFA.moveTo(CFrame.new(target), timeout)
-	if not ok then
-		local primary = targetModel.PrimaryPart
-		if primary then
-			ok = TFFA.moveTo(CFrame.new(primary.Position), 20)
-		end
-	end
-	task.wait(1.5)
-	local gone = not targetModel:IsDescendantOf(Workspace)
-	if ok and gone then
-		TFFA.State.Catches = TFFA.State.Catches + 1
-		TFFA.noteProgress()
-		TFFA.log("Da nhat duoc", species)
-		return true
-	end
-	TFFA.log("Chua xac minh duoc da nhat", species, "(moveTo:", tostring(ok), ", model bien mat:", tostring(gone), ")")
-	return false
-end
-
-function TFFA.trainCycle()
-	if not TFFA.goTrainingSpot() then
-		TFFA.log("Khong toi duoc TrainingSpot - bo qua vong tap")
-		return false
-	end
-	TFFA.State.LastLevelUpAt = os.clock()
-	local power0, level0 = TFFA.readPowerLevel()
-	local powerStart = power0
-	local lastPowerCheck = os.clock()
-	local lastPower = power0
-	local lastGainCheck = os.clock()
-	local started = false
-	local tStart = os.clock()
-	while os.clock() - tStart < 30 do
-		if TFFA.findButtonByText("STOP") then started = true; break end
-		local p = TFFA.readPowerLevel()
-		if p and powerStart and p > powerStart then started = true; break end
-		if p and not powerStart then started = true; break end
-		task.wait(1)
-	end
-	if not started then
-		TFFA.log("KHONG VAO DUOC CHE DO TAP sau 30s (khong thay nut STOP, Power khong tang).")
-		TFFA.log("  Co the xa van khoa (chua xong tutorial) hoac dung lech pad - bo vong tap.")
-		return false
-	end
-	TFFA.log("Da vao che do tap.")
-	local duration = TFFA.Config.TrainMaxMinutes * 60
-	local t0 = os.clock()
-	local lastBonusTap = 0
-	while os.clock() - t0 < duration do
-		if not TFFA.Config.Enabled or TFFA.State.StopFlag then break end
-		local root = TFFA.getRootPart()
-		local center = TFFA.State.MyPlotCenter
-		if root and center then
-			local spot = center + TFFA.ANCHORS.TrainingOffset
-			if TFFA.distXZ(root.Position, spot) > 10 then
-				TFFA.log("Nhan vat roi khoi vung tap - ket thuc vong tap.")
-				break
-			end
-		end
-		if TFFA.Config.AutoTapBonus and os.clock() - lastBonusTap > 2 then
-			local bonusBtn = TFFA.findButtonByText("TAP!")
-				or TFFA.findButtonByText("BONUS")
-				or TFFA.findButtonByText("x2!")
-			if bonusBtn then
-				lastBonusTap = os.clock()
-				TFFA.clickButton(bonusBtn)
-			end
-		end
-		if os.clock() - lastPowerCheck > TFFA.Config.PowerCheckEvery then
-			lastPowerCheck = os.clock()
-			local power, level = TFFA.readPowerLevel()
-			if level and level0 and level > level0 then
-				TFFA.State.LastLevelUpAt = os.clock()
-				TFFA.log("Len level:", tostring(level), "power:", tostring(power))
-			end
-			if level then level0 = level end
-			if power then
-				TFFA.State.ThrowPower = power
-				if lastPower and power > lastPower then
-					TFFA.State.LastLevelUpAt = os.clock()
-				end
-				lastPower = power
-			end
-			local targetPower = TFFA.targetPower()
-			if targetPower and power and power >= targetPower then
-				TFFA.log("Du Power toi biome tiep theo (", tostring(power), " >= ", tostring(targetPower), ") - dung tap.")
-				break
-			end
-			if os.clock() - lastGainCheck > 60 then
-				lastGainCheck = os.clock()
-				if powerStart and power then
-					local mins = (os.clock() - t0) / 60
-					if mins > 1 then
-						local rate = (power - powerStart) / mins
-						if rate < TFFA.Config.TrainMinGainPerMin then
-							TFFA.log("Toc do tang Power cham (", string.format("%.0f", rate),
-								"/phut) - xa hien tai yeu, dung tap de xem xet nang xa.")
-							break
-						end
-					end
-				end
-			end
-			if os.clock() - TFFA.State.LastLevelUpAt > TFFA.Config.TrainSlowSeconds then
-				TFFA.log("Tap cham qua (khong len level/Power > 3 phut) - doi sang nem.")
-				break
-			end
-		end
-		task.wait(TFFA.triDelay(0.8, 1.6))
-	end
-	local stopBtn = TFFA.findButtonByText("STOP")
-	if stopBtn then
-		TFFA.clickButton(stopBtn, function()
-			return TFFA.findButtonByText("STOP") == nil
-		end)
-		task.wait(1)
-	end
-	local _, humanoid = TFFA.getCharacter()
-	if humanoid and humanoid.Sit then
-		pcall(function()
-			humanoid.Sit = false
-			humanoid.Jump = true
-		end)
-		task.wait(0.7)
-	end
-	return true
-end
-
-function TFFA.targetPower()
-	local best = nil
-	local bestIdx = 0
-	for i, b in ipairs(TFFA.BIOMES) do
-		if TFFA.State.LearnedPower[b.Name] then
-			if i > bestIdx then bestIdx = i; best = b.Name end
-		end
-	end
-	if not best then return nil end
-	local nextBiome = TFFA.BIOMES[bestIdx + 1]
-	if not nextBiome then return nil end
-	local known = TFFA.State.LearnedPower[nextBiome.Name]
-	if known then return known end
-	local power = TFFA.State.ThrowPower
-	if power then return power + 100 end
-	return nil
-end
-
-function TFFA.equipBest()
-	local incomeBefore = TFFA.readPlotIncome()
-	local btn = TFFA.findImageButton("Animal") or TFFA.findImageButton("Paw")
-		or TFFA.findImageButton("Pet") or TFFA.findButtonByText("Animals")
-	if not btn then
-		TFFA.log("Khong tim thay nut Animals tren HUD (icon chan thu) - khong mo duoc panel.")
-		TFFA.log("  Xem dong PROBE ImageButton o log boot de biet ten that cua nut.")
-		return false
-	end
-	local opened = TFFA.clickButton(btn, function()
-		return TFFA.findButtonByText("EQUIP BEST") ~= nil
-	end)
-	if not opened then
-		local t0 = os.clock()
-		while os.clock() - t0 < 8 do
-			if TFFA.findButtonByText("EQUIP BEST") then opened = true; break end
-			task.wait(0.3)
-		end
-	end
-	if not opened then
-		TFFA.log("Mo panel Animals nhung khong thay nut EQUIP BEST sau 8s - bo qua.")
-		return false
-	end
-	local equipBtn = TFFA.findButtonByText("EQUIP BEST")
-	local clicked = TFFA.clickButton(equipBtn, function()
-		task.wait(1)
-		local incomeAfter = TFFA.readPlotIncome()
-		if incomeBefore and incomeAfter then return incomeAfter >= incomeBefore end
-		return true
-	end)
-	task.wait(1)
-	local incomeAfter = TFFA.readPlotIncome()
-	if incomeBefore and incomeAfter and incomeAfter < incomeBefore then
-		TFFA.log("CANH BAO: thu nhap plot GIAM sau EQUIP BEST ("
-			.. TFFA.formatMoney(incomeBefore) .. " -> "
-			.. TFFA.formatMoney(incomeAfter) .. ") - kiem tra lai bang tay.")
-		return false
-	end
-	TFFA.log("Da bam EQUIP BEST (plot: "
-		.. (incomeAfter and TFFA.formatMoney(incomeAfter) .. "/s" or "?") .. ")")
-	TFFA.noteProgress()
-	return clicked
-end
-
-function TFFA.sellAll()
-	local backpackBefore = TFFA.countBackpackAnimals()
-	if backpackBefore == 0 then
-		TFFA.log("Backpack trong - khong co gi de ban.")
-		return true
-	end
-	if TFFA.Config.AutoEquipBest then
-		if not TFFA.equipBest() then
-			TFFA.log("EQUIP BEST that bai - KHONG BAN de khoi mat thu ngon.")
-			return false
-		end
-	end
-	local moneyBefore = TFFA.readMoney()
-	if not TFFA.goSell() then
-		TFFA.log("Khong toi duoc quai SELL - bo qua ban.")
-		return false
-	end
-	local sellBtn = nil
-	local t0 = os.clock()
-	while os.clock() - t0 < 8 do
-		sellBtn = TFFA.findButtonByText("SELL ALL")
-		if sellBtn then break end
-		task.wait(0.3)
-	end
-	if not sellBtn then
-		TFFA.log("Khong thay nut SELL ALL sau 8s - bo qua ban.")
-		return false
-	end
-	local clicked = TFFA.clickButton(sellBtn)
-	if not clicked then
-		TFFA.log("Khong bam duoc SELL ALL.")
-		return false
-	end
-	local confirmBtn = nil
-	local t1 = os.clock()
-	while os.clock() - t1 < 5 do
-		confirmBtn = TFFA.findButtonByText("YES")
-			or TFFA.findButtonByText("CONFIRM")
-			or TFFA.findButtonByText("SELL")
-		if confirmBtn then break end
-		task.wait(0.3)
-	end
-	if confirmBtn then
-		TFFA.clickButton(confirmBtn)
-	else
-		TFFA.log("Khong thay hop xac nhan sau SELL ALL (co the game khong hoi) - kiem tra tien.")
-	end
-	task.wait(1.5)
-	local moneyAfter = TFFA.readMoney()
-	local backpackAfter = TFFA.countBackpackAnimals()
-	if moneyBefore and moneyAfter and moneyAfter > moneyBefore then
-		TFFA.log("Da ban", tostring(backpackBefore - backpackAfter), "thu, +",
-			TFFA.formatMoney(moneyAfter - moneyBefore))
-		TFFA.noteProgress()
-		return true
-	end
-	if backpackAfter < backpackBefore then
-		TFFA.log("Da ban", tostring(backpackBefore - backpackAfter), "thu (tien doc khong on dinh).")
-		TFFA.noteProgress()
-		return true
-	end
-	TFFA.log("Chua xac minh duoc da ban xong (tien/backpack khong doi) - kiem tra bang tay.")
-	return false
-end
-
-function TFFA.scanShopPrices()
-	local gui = TFFA.getPlayerGui()
-	if not gui then return {} end
-	local out = {}
-	for _, btn in ipairs(gui:GetDescendants()) do
-		if (btn:IsA("TextButton") or btn:IsA("ImageButton")) and TFFA.isVisible(btn) then
-			local ok, text = pcall(function() return btn.Text end)
-			if ok and type(text) == "string" and text ~= "" then
-				local up = string.upper(text)
-				local isAction = string.find(up, "EQUIP") or text:match("^%$")
-				if isAction then
-					local card = btn.Parent
-					local name = nil
-					local depth = 0
-					while card and depth < 5 do
-						for _, desc in ipairs(card:GetDescendants()) do
-							if desc:IsA("TextLabel") then
-								local ok2, t2 = pcall(function() return desc.Text end)
-								if ok2 and type(t2) == "string" and TFFA.FOOD_SET[t2] then
-									name = t2
-									break
-								end
-							end
-						end
-						if name then break end
-						card = card.Parent
-						depth = depth + 1
-					end
-					if name and not out[name] then
-						local price = nil
-						if text:match("^%$") then price = TFFA.parseMoney(text) end
-						out[name] = { price = price, button = btn, status = text }
-					end
-				end
-			end
-		end
-	end
-	return out
-end
-
-function TFFA.closePopups()
-	local closed = false
-	for _, text in ipairs({ "YOU CAN NOW BUY", "NEW FOOD UNLOCKED" }) do
-		if #TFFA.findGuiTexts(text) > 0 then
-			local closeBtn = TFFA.findButtonByText("X") or TFFA.findButtonByText("CLOSE")
-			if closeBtn then
-				TFFA.clickButton(closeBtn)
-				closed = true
-			else
-				local shopBtn = TFFA.findButtonByText("SHOP")
-				if shopBtn then
-					TFFA.clickButton(shopBtn)
-					closed = true
-				end
-			end
-			task.wait(0.5)
-		end
-	end
-	if #TFFA.findGuiTexts("NEW EQUIPMENT") > 0 then
-		local closeBtn = TFFA.findButtonByText("X") or TFFA.findButtonByText("CLOSE")
-		if closeBtn then
-			TFFA.clickButton(closeBtn)
-			closed = true
-		end
-	end
-	return closed
-end
-
-function TFFA.buyCheapestVisibleFood()
-	if not TFFA.goFoodShop() then
-		TFFA.log("Khong toi duoc Food Shop - bo qua mua.")
-		return false
-	end
-	if not TFFA.waitForShopOpen(10) then
-		TFFA.log("Shop khong mo sau 10s - bo qua mua.")
-		return false
-	end
-	local scan = TFFA.scanShopPrices()
-	for name, info in pairs(scan) do
-		local status = string.upper(info.status or "")
-		if string.find(status, "EQUIP") and not string.find(status, "EQUIPPED") then
-			TFFA.log("Mon da mua, can EQUIP:", name)
-			return TFFA.tryBuyFood(name)
-		end
-	end
-	for name, info in pairs(scan) do
-		if string.find(string.upper(info.status or ""), "EQUIPPED") then
-			TFFA.State.EquippedFood = name
-			TFFA.log("Mon dang EQUIPPED trong Shop:", name)
-			return true
-		end
-	end
-	local money = TFFA.readMoney() or 0
-	local cheapest, cheapestPrice = nil, nil
-	for name, info in pairs(scan) do
-		local price = info.price
-		if price and price > 0 and money >= price * 1.5 then
-			if not cheapestPrice or price < cheapestPrice then
-				cheapest, cheapestPrice = name, price
-			end
-		end
-	end
-	if cheapest then
-		return TFFA.tryBuyFood(cheapest)
-	end
-	TFFA.log("Khong co mon an nao trong Shop hien tai mua/equip duoc (tien:",
-		TFFA.formatMoney(money), ")")
-	return false
-end
-
-function TFFA.waitForShopOpen(timeout)
-	local t0 = os.clock()
-	while os.clock() - t0 < (timeout or 10) do
-		for _, food in ipairs(TFFA.ALL_FOODS) do
-			if #TFFA.findGuiTexts(food) > 0 then return true end
-		end
-		task.wait(0.3)
-	end
-	return false
-end
-
-function TFFA.tryBuyFood(name)
-	if not name or name == "" then return false end
-	local entry = nil
-	for _, e in ipairs(TFFA.FOOD_LADDER) do
-		if e.Name == name then entry = e; break end
-	end
-	local ladderPrice = entry and entry.Price or nil
-	if not TFFA.goFoodShop() then
-		TFFA.log("Khong toi duoc Food Shop - bo qua mua", name)
-		return false
-	end
-	if not TFFA.waitForShopOpen(10) then
-		TFFA.log("Shop khong mo sau 10s (khong thay ten mon an nao) - bo qua mua.")
-		return false
-	end
-	local scan = TFFA.scanShopPrices()
-	local cardInfo = scan[name]
-	if not cardInfo then
-		TFFA.log("Mon", name, "khong hien trong Shop luc nay (Shop chi hien 3 mon).")
-		TFFA.log("  Hay mua mon tiep theo dung thu tu game thay vi mon nay.")
-		return false
-	end
-	local status = string.upper(cardInfo.status or "")
-	if string.find(status, "EQUIPPED") then
-		TFFA.State.EquippedFood = name
-		TFFA.log("Mon", name, "da EQUIPPED san.")
-		TFFA.noteProgress()
-		return true
-	end
-	if string.find(status, "EQUIP") or (ladderPrice == 0) then
-		local btn = cardInfo.button
-		if not btn then
-			TFFA.log("The cua", name, "khong co nut EQUIP - bo qua.")
-			return false
-		end
-		local ok = TFFA.clickButton(btn, function()
-			local scan2 = TFFA.scanShopPrices()
-			local info2 = scan2[name]
-			return info2 and string.find(string.upper(info2.status or ""), "EQUIPPED") ~= nil
-		end)
-		if ok then
-			TFFA.State.EquippedFood = name
-			TFFA.log("Da EQUIP", name)
-			TFFA.noteProgress()
-			return true
-		end
-		TFFA.log("Khong EQUIP duoc", name, "(the khong chuyen sang EQUIPPED).")
-		return false
-	end
-	local price = cardInfo.price or ladderPrice
-	if not price then
-		TFFA.log("Khong doc duoc gia live cua", name, "- khong doan gia, bo qua.")
-		return false
-	end
-	local money = TFFA.readMoney()
-	if not money then
-		TFFA.log("Khong doc duoc tien - khong mua", name, "(so mua nham).")
-		return false
-	end
-	if money < price * 1.5 then
-		TFFA.log("Chua du tien mua", name, "(", TFFA.formatMoney(price),
-			" can >= ", TFFA.formatMoney(price * 1.5), ", dang co ",
-			TFFA.formatMoney(money), ")")
-		return false
-	end
-	local btn = cardInfo.button
-	if not btn then
-		TFFA.log("The cua", name, "khong co nut gia - bo qua.")
-		return false
-	end
-	local moneyBefore = money
-	local clicked = TFFA.clickButton(btn)
-	if not clicked then
-		TFFA.log("Khong bam duoc nut gia cua", name)
-		return false
-	end
-	task.wait(1.5)
-	local scan2 = TFFA.scanShopPrices()
-	local info2 = scan2[name]
-	local moneyAfter = TFFA.readMoney()
-	local cardOk = info2 and string.find(string.upper(info2.status or ""), "EQUIP") ~= nil
-	local moneyOk = moneyAfter and moneyBefore
-		and (moneyBefore - moneyAfter) >= price * 0.9
-		and (moneyBefore - moneyAfter) <= price * 1.1
-	if cardOk and moneyOk then
-		TFFA.log("Da mua", name, "gia", TFFA.formatMoney(price))
-		TFFA.noteProgress()
-		if info2 and info2.button and not string.find(string.upper(info2.status or ""), "EQUIPPED") then
-			TFFA.clickButton(info2.button, function()
-				local scan3 = TFFA.scanShopPrices()
-				local info3 = scan3[name]
-				return info3 and string.find(string.upper(info3.status or ""), "EQUIPPED") ~= nil
-			end)
-			TFFA.State.EquippedFood = name
-		end
-		return true
-	end
-	TFFA.log("Mua", name, "chua xac minh duoc (tien tru:", tostring(moneyBefore),
-		"->", tostring(moneyAfter), ", the chuyen sang EQUIP:", tostring(cardOk), ")")
-	return false
-end
-
-function TFFA.upgradeBar()
-	if not TFFA.Config.AutoUpgradeBar then return false end
-	if not TFFA.goBarUpgradePad() then return false end
-	task.wait(2)
-	if #TFFA.findGuiTexts("Upgraded to") > 0 or #TFFA.findGuiTexts("NEW EQUIPMENT") > 0 then
-		TFFA.log("Da nang xa (thay banner).")
-		TFFA.noteProgress()
-		return true
-	end
-	TFFA.log("Khong thay banner nang xa - co the chua du tien hoac be vang o vi tri khac.")
-	return false
-end
-
-function TFFA.maybeSwapPlot()
-	local plotAnimals = TFFA.readPlotAnimals()
-	if #plotAnimals < TFFA.Config.PlotCapacity then return false end
-	local weakest = nil
-	for _, a in ipairs(plotAnimals) do
-		if a.income and (not weakest or a.income < weakest.income) then weakest = a end
-	end
-	if not weakest then return false end
-	TFFA.log("Plot day (", tostring(#plotAnimals), " con). Yeu nhat:",
-		weakest.species, TFFA.formatMoney(weakest.income or 0) .. "/s")
-	TFFA.log("  De xuat: giu lai thu moi nao >= "
-		.. TFFA.formatMoney((weakest.income or 0) * 1.5)
-		.. "/s roi dung EQUIP BEST de thay the tu dong. KHONG ban tay con yeu.")
-	return false
-end
-
-function TFFA.claimOffline()
-	if not TFFA.Config.AutoClaimOffline then
-		TFFA.log("AutoClaimOffline TAT (bat sau khi recon xac nhan Offline_Claim).")
-		return false
-	end
-	local ok, res = TFFA.safeInvokeNoArg("Offline_Claim")
-	if ok then
-		TFFA.log("Da claim offline earnings:", tostring(res))
-		return true
-	end
-	return false
-end
-
-function TFFA.nextFoodToBuy()
-	local owned = {}
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	if backpack then
-		for _, tool in ipairs(backpack:GetChildren()) do
-			if tool:IsA("Tool") then owned[tool.Name] = true end
-		end
-	end
-	local money = TFFA.readMoney() or 0
-	local best = nil
-	local bestTier = -1
-	for _, e in ipairs(TFFA.FOOD_LADDER) do
-		if not owned[e.Name] and e.Price > 0 and money >= e.Price * 1.5 then
-			if e.Tier > bestTier then best = e; bestTier = e.Tier end
-		end
-	end
-	return best
-end
-
-TFFA.States = {}
-
-function TFFA.States.BOOT()
-	TFFA.log("=== TFFA Main boot:", TFFA.BUILD, "===")
-	TFFA.log("GUI-first | Remote mac dinh TAT | Ban nay choi theo thu tu game day (nem -> nhat -> dat plot -> mua food -> tap xa).")
-	if getgenv and getgenv().__TFFA then
-		TFFA.log("CANH BAO: ban recon van dang chay (getgenv().__TFFA) — AFK nudge cua no se danh nhau voi Main.")
-		TFFA.log("  Hay tat recon truoc: getgenv().__TFFA.Stop()")
-	end
-	local gui = TFFA.getPlayerGui()
-	if not gui then
-		TFFA.log("PlayerGui chua load xong - doi 5s roi thu lai.")
-		task.wait(5)
-	end
-	local plot, center = TFFA.findMyPlot()
-	TFFA.State.MyPlot = plot
-	TFFA.State.MyPlotCenter = center
-	if plot then
-		TFFA.State.MyPlotNumber = tonumber(plot.Name:match("Plot%s*(%d+)"))
-	end
-	local money = TFFA.readMoney()
-	local power, level = TFFA.readPowerLevel()
-	local income = TFFA.readPlotIncome()
-	local remotes = TFFA.getRemotesFolder()
-	local remoteCount = 0
-	if remotes then
-		for _ in ipairs(remotes:GetChildren()) do remoteCount = remoteCount + 1 end
-	end
-	TFFA.log("PROBE | Plot:", plot and plot.Name or "?",
-		"| Tien:", money and TFFA.formatMoney(money) or "?",
-		"| Power:", power and tostring(power) or "UNKNOWN (binh thuong neu dang o Lobby - Power chi hien trong panel Power/luc tap/nem)",
-		"| Level:", level and tostring(level) or "?",
-		"| Thu nhap plot:", income and TFFA.formatMoney(income) .. "/s" or "?",
-		"| Remotes:", tostring(remoteCount),
-		"| Remote calls:", TFFA.Config.RemoteCallsEnabled and "BAT" or "TAT")
-	if TFFA.Config.RemoteCallsEnabled then
-		TFFA.safeInvokeNoArg("Animations_Get")
-	end
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	local bpNames = {}
-	if backpack then
-		for _, tool in ipairs(backpack:GetChildren()) do
-			table.insert(bpNames, tool.Name .. "(" .. tool.ClassName .. ")")
-		end
-	end
-	TFFA.log("PROBE Backpack:", #bpNames > 0 and table.concat(bpNames, ", ") or "(trong)")
-	local charTools = {}
-	local char = LocalPlayer.Character
-	if char then
-		for _, tool in ipairs(char:GetChildren()) do
-			if tool:IsA("Tool") then table.insert(charTools, tool.Name) end
-		end
-	end
-	TFFA.log("PROBE dang cam:", #charTools > 0 and table.concat(charTools, ", ") or "(khong co Tool)")
-	local gui2 = TFFA.getPlayerGui()
-	if gui2 then
-		for _, inst in ipairs(gui2:GetDescendants()) do
-			if inst:IsA("ImageButton") and TFFA.isVisible(inst) then
-				TFFA.log("PROBE ImageButton:", inst.Name, "tai (",
-					tostring(math.floor(inst.AbsolutePosition.X)), ",",
-					tostring(math.floor(inst.AbsolutePosition.Y)), ")")
-			end
-		end
-	end
-	TFFA.State.Status = "Dang chay"
-	return "DECIDE"
-end
-
-function TFFA.States.DECIDE()
-	TFFA.State.DecideCycles = TFFA.State.DecideCycles + 1
-	if os.clock() - TFFA.State.SessionStartedAt > TFFA.Config.SessionMinutes * 60 then
-		TFFA.log("Het phien farm ", tostring(TFFA.Config.SessionMinutes),
-			" phut - nghi ", tostring(TFFA.Config.BreakMinutes), " phut roi chay tiep.")
-		TFFA.State.SessionStartedAt = os.clock()
-		return "IDLE"
-	end
-	if not TFFA.Config.Enabled or TFFA.State.StopFlag then return "STOPPED" end
-	if not TFFA.Config.AutoTrain and not TFFA.Config.AutoThrow then
-		TFFA.log("Ca 2 toggle (luyen + nem) deu TAT - dung yen cho lenh.")
-		return "IDLE"
-	end
-	local money = TFFA.readMoney()
-	local power, level = TFFA.readPowerLevel()
-	if money then TFFA.State.Money = money end
-	if power then TFFA.State.ThrowPower = power end
-	if level then TFFA.State.Level = level end
-	TFFA.State.PlotIncomePerSec = TFFA.readPlotIncome()
-	local plotAnimals = TFFA.readPlotAnimals()
-	local backpackAnimals = TFFA.countBackpackAnimals()
-	local backpackFoods = TFFA.countBackpackFoods()
-	local bestFood = TFFA.bestOwnedFood()
-	if not TFFA.State.MyPlot then
-		local plot, center = TFFA.findMyPlot()
-		if plot then
-			TFFA.State.MyPlot = plot
-			TFFA.State.MyPlotCenter = center
-			TFFA.State.MyPlotNumber = tonumber(plot.Name:match("Plot%s*(%d+)"))
-		end
-	end
-	if not TFFA.State.MyPlot or TFFA.State.FoodBlocked
-		or TFFA.State.DecideCycles % 5 == 0 then
-		TFFA.log("DECIDE: plot=", TFFA.State.MyPlot and TFFA.State.MyPlot.Name or "?",
-			"thu tui=", tostring(backpackAnimals), "thu plot=", tostring(#plotAnimals),
-			"food=", bestFood or TFFA.State.EquippedFood or "?")
-	end
-	local hasFood = TFFA.hasFood()
-	if backpackAnimals > 0 and #plotAnimals < TFFA.Config.PlotCapacity then
-		return "PLACE"
-	end
-	if backpackAnimals >= TFFA.Config.BackpackSellAt or #plotAnimals >= TFFA.Config.PlotCapacity then
-		return "SELL"
-	end
-	if not hasFood and not TFFA.State.FoodBlocked then
-		return "BUY_FIRST_FOOD"
-	end
-	if not hasFood then
-		if TFFA.Config.AutoThrow and TFFA.State.DecideCycles % 3 == 0 then
-			return "THROW"
-		end
-		if TFFA.Config.AutoTrain then
-			TFFA.log("Chua co mon an (FOOD BLOCKED) - tap xa trong luc cho.")
-			return "TRAIN"
-		end
-		TFFA.log("Chua co mon an - dung yen cho (hay EQUIP mon an bang tay).")
-		return "IDLE"
-	end
-	if TFFA.Config.AutoThrow and TFFA.Config.AutoTrain then
-		local targetPower = TFFA.targetPower()
-		if targetPower == nil then
-			if TFFA.State.Throws == 0 then return "THROW" end
-			return "TRAIN"
-		end
-		if TFFA.State.ThrowPower and TFFA.State.ThrowPower >= targetPower then
-			return "THROW"
-		end
-		if TFFA.State.Misses >= TFFA.Config.MaxConsecMisses then
-			TFFA.log("Nem truot ", tostring(TFFA.State.Misses),
-				" lan lien tiep - co the Power chua du, di tap.")
-			TFFA.State.Misses = 0
-			return "TRAIN"
-		end
-		return "TRAIN"
-	end
-	if TFFA.Config.AutoThrow then return "THROW" end
-	if TFFA.Config.AutoTrain then return "TRAIN" end
-	return "IDLE"
-end
-
-function TFFA.States.BUY_FIRST_FOOD()
-	TFFA.closePopups()
-	if TFFA.buyCheapestVisibleFood() then
-		TFFA.State.FoodFailStreak = 0
-		TFFA.noteProgress()
-		return "DECIDE"
-	end
-	if TFFA.tryBuyFood("Carrot") then
-		TFFA.State.FoodFailStreak = 0
-		TFFA.noteProgress()
-		return "DECIDE"
-	end
-	TFFA.State.FoodFailStreak = TFFA.State.FoodFailStreak + 1
-	TFFA.log("BUY_FIRST_FOOD that bai lan", tostring(TFFA.State.FoodFailStreak),
-		"/3 — khong tim thay mon an nao de equip/mua.")
-	if TFFA.State.FoodFailStreak >= 3 then
-		TFFA.State.FoodBlocked = true
-		TFFA.log("FOOD BLOCKED: tam dung tim mon an sau 3 lan that bai.")
-		TFFA.log("  Hay EQUIP mon an bang tay (mo Shop, bam EQUIP tren the mon an),")
-		TFFA.log("  roi chay lai script. Trong luc do bot van dat pet/ban thu/tap xa.")
-		return "DECIDE"
-	end
-	return "IDLE"
-end
-
-function TFFA.States.PLACE()
-	if TFFA.equipBest() then
-		TFFA.noteProgress()
-	else
-		TFFA.log("PLACE that bai - quay ve DECIDE (khong ban gi het).")
-	end
-	return "DECIDE"
-end
-
-function TFFA.States.SELL()
-	if TFFA.sellAll() then TFFA.noteProgress() end
-	return "DECIDE"
-end
-
-function TFFA.States.TRAIN()
-	if TFFA.trainCycle() then TFFA.noteProgress() end
-	return "DECIDE"
-end
-
-function TFFA.States.THROW()
-	local maxThrows = TFFA.hasFood() and TFFA.Config.ThrowsPerDecision or 1
-	local throws = 0
-	local done = false
-	while throws < maxThrows do
-		if not TFFA.Config.Enabled or TFFA.State.StopFlag then break end
-		local ok = TFFA.doOneThrow()
-		if ok then
-			throws = throws + 1
-			local caught = TFFA.collectCaughtAnimal()
-			if caught then
-				TFFA.State.Misses = 0
-				done = true
-			end
-			TFFA.randDelay()
-		else
-			break
-		end
-	end
-	if not done and throws == 0 then
-		TFFA.State.NoProgressCycles = TFFA.State.NoProgressCycles + 1
-	end
-	return "DECIDE"
-end
-
-function TFFA.States.UPGRADE()
-	local nextFood = TFFA.nextFoodToBuy()
-	if nextFood then
-		TFFA.log("Mua nang cap:", nextFood.Name, TFFA.formatMoney(nextFood.Price))
-		TFFA.tryBuyFood(nextFood.Name)
-	else
-		TFFA.log("Chua du tien mua mon tiep theo - tiep tuc farm.")
-	end
-	if TFFA.Config.AutoUpgradeBar then TFFA.upgradeBar() end
-	return "DECIDE"
-end
-
-function TFFA.States.IDLE()
-	local rest = TFFA.triDelay(3, 9)
-	if TFFA.State.DecideCycles % TFFA.Config.IdleRestEveryCycles == 0 then
-		rest = TFFA.triDelay(10, 20)
-	end
-	TFFA.log("Nghi", string.format("%.0f", rest), "s (vong DECIDE #",
-		tostring(TFFA.State.DecideCycles), ")")
-	task.wait(rest)
-	return "DECIDE"
-end
-
-function TFFA.States.RECOVER()
-	TFFA.State.RecoveryCount = TFFA.State.RecoveryCount + 1
-	if TFFA.State.RecoveryCount > TFFA.Config.RecoverMaxConsec then
-		TFFA.log("RECOVER that bai ", tostring(TFFA.Config.RecoverMaxConsec),
-			" lan lien tiep - DUNG AN TOAN, gui log cho Muse.")
-		return "STOPPED"
-	end
-	local plot, center = TFFA.findMyPlot()
-	if plot then
-		TFFA.State.MyPlot = plot
-		TFFA.State.MyPlotCenter = center
-	end
-	local root = TFFA.getRootPart()
-	local _, humanoid = TFFA.getCharacter()
-	if root and humanoid and humanoid.Health > 0 then
-		TFFA.log("RECOVER: teleport ve Spawn roi quay ve DECIDE.")
-		TFFA.teleportTo(TFFA.ANCHORS.Spawn, "recover")
-	else
-		TFFA.log("RECOVER: nhan vat khong hop le - doi respawn 10s.")
-		task.wait(10)
-	end
-	task.wait(2)
-	return "DECIDE"
-end
-
-function TFFA.States.STOPPED()
-	TFFA.log("=== TFFA Main da dung. ===")
-	TFFA.log("Thong ke: nem", tostring(TFFA.State.Throws), "lan, nhat",
-		tostring(TFFA.State.Catches), "con, thu nhap plot",
-		TFFA.State.PlotIncomePerSec and TFFA.formatMoney(TFFA.State.PlotIncomePerSec) .. "/s" or "?")
-	return "STOPPED"
-end
-
-function TFFA.step()
-	local current = TFFA.CurrentState or "BOOT"
-	local fn = TFFA.States[current]
-	if not fn then
-		TFFA.log("State khong ton tai:", tostring(current), "- ve DECIDE.")
-		TFFA.CurrentState = "DECIDE"
-		return true
-	end
-	local ok, next = pcall(fn)
-	if not ok then
-		TFFA.log("LOI o state", current, ":", tostring(next), "- chuyen sang RECOVER.")
-		TFFA.State.StuckStreak = TFFA.State.StuckStreak + 1
-		if TFFA.State.StuckStreak >= 5 then
-			TFFA.log("StuckStreak >= 5 - DUNG AN TOAN.")
-			TFFA.CurrentState = "STOPPED"
-			return false
-		end
-		TFFA.CurrentState = "RECOVER"
-		return true
-	end
-	TFFA.CurrentState = next
-	if next == "STOPPED" then return false end
-	return true
-end
-
-function TFFA.mainLoop()
-	TFFA.State.Running = true
-	TFFA.CurrentState = "BOOT"
-	while TFFA.Config.Enabled and not TFFA.State.StopFlag do
-		local ok = TFFA.step()
-		if not ok then break end
-		if os.clock() - TFFA.State.LastProgressAt > 600 then
-			TFFA.log("WATCHDOG: khong co tien bo that su trong 600s - DUNG AN TOAN.")
-			break
-		end
-		task.wait(0.2)
-	end
-	TFFA.State.Running = false
-	TFFA.log("Farm da dung. Neu can chay lai, mo file va EXECUTE lai.")
-end
-
-function TFFA.buildUI()
-	local gui = TFFA.getPlayerGui()
-	if not gui then return end
-	local old = gui:FindFirstChild("TFFA_UI")
-	if old then old:Destroy() end
-	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = "TFFA_UI"
-	screenGui.ResetOnSpawn = false
-	screenGui.Parent = gui
-	local frame = Instance.new("Frame")
-	frame.Name = "Main"
-	frame.Size = UDim2.new(0, 220, 0, 280)
-	frame.Position = UDim2.new(0, 10, 0, 60)
-	frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	frame.BackgroundTransparency = 0.3
-	frame.BorderSizePixel = 0
-	frame.Parent = screenGui
-	local function makeLabel(name, text, y)
-		local lbl = Instance.new("TextLabel")
-		lbl.Name = name
-		lbl.Size = UDim2.new(1, -10, 0, 20)
-		lbl.Position = UDim2.new(0, 5, 0, y)
-		lbl.BackgroundTransparency = 1
-		lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
-		lbl.TextSize = 13
-		lbl.Font = Enum.Font.SourceSans
-		lbl.TextXAlignment = Enum.TextXAlignment.Left
-		lbl.Text = text
-		lbl.Parent = frame
-		return lbl
-	end
-	makeLabel("Title", "TFFA Main " .. TFFA.VERSION, 5)
-	local statusLabel = makeLabel("Status", "Trang thai: " .. TFFA.State.Status, 25)
-	local trainBtn = Instance.new("TextButton")
-	trainBtn.Name = "TrainBtn"
-	trainBtn.Size = UDim2.new(1, -10, 0, 34)
-	trainBtn.Position = UDim2.new(0, 5, 0, 50)
-	trainBtn.BackgroundColor3 = Color3.fromRGB(60, 140, 60)
-	trainBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	trainBtn.TextSize = 15
-	trainBtn.Text = "Tap: " .. (TFFA.Config.AutoTrain and "BAT" or "TAT")
-	trainBtn.Parent = frame
-	local throwBtn = Instance.new("TextButton")
-	throwBtn.Name = "ThrowBtn"
-	throwBtn.Size = UDim2.new(1, -10, 0, 34)
-	throwBtn.Position = UDim2.new(0, 5, 0, 90)
-	throwBtn.BackgroundColor3 = Color3.fromRGB(60, 100, 180)
-	throwBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	throwBtn.TextSize = 15
-	throwBtn.Text = "Nem: " .. (TFFA.Config.AutoThrow and "BAT" or "TAT")
-	throwBtn.Parent = frame
-	local statsLabel = makeLabel("Stats", "Nem: 0 | Nhat: 0", 130)
-	local sessionLabel = makeLabel("Session", "Phien: 0 phut", 150)
-	local stopBtn = Instance.new("TextButton")
-	stopBtn.Name = "StopBtn"
-	stopBtn.Size = UDim2.new(1, -10, 0, 30)
-	stopBtn.Position = UDim2.new(0, 5, 0, 200)
-	stopBtn.BackgroundColor3 = Color3.fromRGB(160, 50, 50)
-	stopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	stopBtn.TextSize = 14
-	stopBtn.Text = "DUNG"
-	stopBtn.Parent = frame
-	trainBtn.MouseButton1Click:Connect(function()
-		TFFA.Config.AutoTrain = not TFFA.Config.AutoTrain
-		trainBtn.Text = "Tap: " .. (TFFA.Config.AutoTrain and "BAT" or "TAT")
-		TFFA.log("Tap luyen:", TFFA.Config.AutoTrain and "BAT" or "TAT")
-	end)
-	throwBtn.MouseButton1Click:Connect(function()
-		TFFA.Config.AutoThrow = not TFFA.Config.AutoThrow
-		throwBtn.Text = "Nem: " .. (TFFA.Config.AutoThrow and "BAT" or "TAT")
-		TFFA.log("Nem:", TFFA.Config.AutoThrow and "BAT" or "TAT")
-	end)
-	stopBtn.MouseButton1Click:Connect(function()
-		TFFA.State.StopFlag = true
-		TFFA.log("Nguoi dung bam DUNG.")
-	end)
-	task.spawn(function()
-		while screenGui.Parent do
-			task.wait(1)
-			pcall(function()
-				statusLabel.Text = "Trang thai: " .. (TFFA.CurrentState or "?")
-				statsLabel.Text = "Nem: " .. tostring(TFFA.State.Throws)
-					.. " | Nhat: " .. tostring(TFFA.State.Catches)
-					.. " | Plot: " .. (TFFA.State.PlotIncomePerSec and TFFA.formatMoney(TFFA.State.PlotIncomePerSec) .. "/s" or "?")
-				local mins = math.floor((os.clock() - TFFA.State.SessionStartedAt) / 60)
-				sessionLabel.Text = "Phien: " .. tostring(mins) .. " phut / "
-					.. tostring(TFFA.Config.SessionMinutes) .. " phut"
-			end)
-		end
-	end)
-end
-
-function TFFA.startAntiAfk()
-	task.spawn(function()
-		while not TFFA.State.StopFlag do
-			task.wait(TFFA.randRange(420, 660))
-			if TFFA.State.StopFlag then break end
-			local _, humanoid = TFFA.getCharacter()
-			if humanoid and not humanoid.Sit and not TFFA.State.Throwing then
-				local ok = pcall(function()
-					VirtualUser:CaptureController()
-					VirtualUser:ClickButton2(Vector2.new(0, 0))
-				end)
-				if not ok then
-					local root = TFFA.getRootPart()
-					if root then
-						pcall(function()
-							root.CFrame = root.CFrame + Vector3.new(
-								TFFA.randRange(-2, 2), 0, TFFA.randRange(-2, 2))
-						end)
-					end
-				end
-				TFFA.log("[TFFA afk] Chong AFK (1 hanh dong).")
-			end
-		end
-	end)
-end
-
-function TFFA.Stop()
-	TFFA.State.StopFlag = true
-	TFFA.Config.Enabled = false
-	TFFA.log("TFFA Main da nhan lenh dung.")
-end
-
-if getgenv then
-	getgenv().__TFFA_MAIN = TFFA
-end
-TFFA.buildUI()
-TFFA.startAntiAfk()
-TFFA.mainLoop()
-
--- Test tung pha (<=5 phut/pha, dung va doc log sau moi pha): 0 Probe,
--- 1 mua Carrot, 2 tap 1 phut, 3 nem 1 lan, 4 nhat + dat plot, 5 ban, 6 farm 15 phut.
--- Bao loi gui kem: log console tu boot + anh man hinh + dung o pha nao.
+local BEE_RARITY = {
+    basic = "Common",
+    bomber = "Rare", brave = "Rare", bumble = "Rare", cool = "Rare", hasty = "Rare",
+    looker = "Rare", rad = "Rare", rascal = "Rare", stubborn = "Rare",
+    baby = "Epic", carpenter = "Epic", commander = "Epic", demon = "Epic",
+    exhausted = "Epic", fire = "Epic", frosty = "Epic", honey = "Epic",
+    rage = "Epic", riley = "Epic", shy = "Epic",
+    bucko = "Legendary", diamond = "Legendary", lion = "Legendary", music = "Legendary",
+    ninja = "Legendary", shimmer = "Legendary", shocked = "Legendary",
+    buoyant = "Mythic", fuzzy = "Mythic", precise = "Mythic", spicy = "Mythic",
+    tadpole = "Mythic", vector = "Mythic",
+    bear = "Event", cobalt = "Event", crimson = "Event", digital = "Event",
+    festive = "Event", gummy = "Event", photon = "Event", puppy = "Event",
+    tabby = "Event", vicious = "Event", windy = "Event",
+}
+local function rarityOf(beeType)
+    local n = normalizeImageName(beeType)
+    local bare = n:gsub("bee$", "")
+    return BEE_RARITY[bare] or BEE_RARITY[n]
+        or (HIVE_EVENT_MARKS[n] or HIVE_EVENT_MARKS[bare]) and "Event" or "Common"
+end
+
+-- =============================================================================
+-- HEXAGON bằng Frame: flat-top = kim cương trái (45°) + chữ nhật giữa + kim
+-- cương phải. Các ô khớp cạnh nhau khi COL_PITCH = HEX_W - HEX_H/2 (tổ ong
+-- liền mạch, không hở/không chồng). Cột chẵn/lẻ lệch nhau nửa ô theo chiều dọc.
+-- =============================================================================
+local HEX_W, HEX_H = 88, 62
+local COL_PITCH = HEX_W - HEX_H / 2          -- 57: cạnh phải ô trước = cạnh trái ô sau
+local ROW_PITCH = HEX_H
+local COL_OFFSET = HEX_H / 2                 -- cột chẵn (1,3,5) đẩy xuống nửa ô
+local GRID_COLS, GRID_ROWS = 5, 10
+local GRID_W = (GRID_COLS - 1) * COL_PITCH + HEX_W
+local GRID_H = (GRID_ROWS - 1) * ROW_PITCH + HEX_H + COL_OFFSET
+local FACE_SIZE = math.floor(HEX_W * 0.6)
+
+local function makeHex(parent, zIndex)
+    local holder = create("Frame", {
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        ClipsDescendants = true, ZIndex = zIndex,
+        Size = UDim2.fromOffset(1, 1),
+    }, parent)
+    local left = create("Frame", {
+        BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5),
+        Rotation = 45, ZIndex = zIndex,
+    }, holder)
+    local right = create("Frame", {
+        BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5),
+        Rotation = 45, ZIndex = zIndex,
+    }, holder)
+    local mid = create("Frame", {BorderSizePixel = 0, ZIndex = zIndex}, holder)
+    return {Frame = holder, Left = left, Right = right, Mid = mid}
+end
+
+local function layoutHex(hex, w, h, x, y, color)
+    hex.Frame.Position = UDim2.fromOffset(x, y)
+    hex.Frame.Size = UDim2.fromOffset(w, h)
+    local side = h / math.sqrt(2)
+    hex.Left.Size = UDim2.fromOffset(side, side)
+    hex.Left.Position = UDim2.fromOffset(h / 2, h / 2)
+    hex.Left.BackgroundColor3 = color
+    hex.Right.Size = UDim2.fromOffset(side, side)
+    hex.Right.Position = UDim2.fromOffset(w - h / 2, h / 2)
+    hex.Right.BackgroundColor3 = color
+    hex.Mid.Position = UDim2.fromOffset(h / 2, 0)
+    hex.Mid.Size = UDim2.fromOffset(math.max(0, w - h), h)
+    hex.Mid.BackgroundColor3 = color
+end
+
+-- MẶT ONG THẬT: nguồn chuẩn = BeeTypes.Thumbnails/<Tên> ( GiftedThumbnails
+-- cho ong gifted - đúng bộ asset UI hive của game tự dùng). Fallback:
+-- TopDecals rồi GiftedBeeModels.FaceTexture. Cache theo loại + gifted.
+local beeFaceCache = {}
+local function beeFaceTexture(beeType, gifted)
+    local key = tostring(beeType or "") .. (gifted and "|g" or "")
+    if beeFaceCache[key] ~= nil then return beeFaceCache[key] end
+    local texture
+    local firstName = tostring(beeType or ""):match("^(%S+)")
+    if firstName and firstName ~= "" then
+        local beeTypes = ReplicatedStorage:FindFirstChild("BeeTypes")
+        if beeTypes then
+            local folder = beeTypes:FindFirstChild(gifted and "GiftedThumbnails" or "Thumbnails")
+            texture = textureOf(folder and folder:FindFirstChild(firstName))
+            if not texture and folder then
+                -- Khớp CHUẨN HÓA (tránh lệch "Basic Bee" / "BasicBee"):
+                -- so tên loại (bỏ đuôi "bee") với tên child đã chuẩn hóa.
+                local wanted = normalizeImageName(beeType)
+                local wantedBare = wanted:gsub("bee$", "")
+                for _, child in ipairs(folder:GetChildren()) do
+                    local n = normalizeImageName(child.Name)
+                    if n == wanted or n == wantedBare then
+                        texture = textureOf(child)
+                        break
+                    end
+                end
+            end
+            if not texture then
+                local decals = beeTypes:FindFirstChild("TopDecals")
+                texture = textureOf(decals and decals:FindFirstChild(firstName))
+            end
+        end
+        if not texture then
+            local models = ReplicatedStorage:FindFirstChild("GiftedBeeModels")
+            texture = textureOf(models and models:FindFirstChild(firstName))
+        end
+    end
+    beeFaceCache[key] = texture or false
+    if not texture then
+        print("[BSS UI] bee icon not found for: " .. tostring(beeType) .. " (gifted=" .. tostring(gifted and true or false) .. ")")
+    end
+    return texture
+end
+local hiveCells
+do
+    local page = UI._pages.Hive
+    if page then
+        create("TextLabel", {
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 20),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            Text = "HIVE OVERVIEW",
+            TextColor3 = T.AccentDim,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, page)
+        hiveCells = {}
+        local hiveKeys = {
+            {"Bees", "BEES"},
+            {"Gifted", "GIFTED"},
+            {"AverageLevel", "AVG LEVEL"},
+            {"Blue", "BLUE"},
+            {"Red", "RED"},
+            {"Event", "EVENT"},
+        }
+        for index, entry in ipairs(hiveKeys) do
+            local rowIndex = math.ceil(index / 2)
+            local rowFrame = hiveCells["Row" .. rowIndex]
+            if not rowFrame then
+                rowFrame = create("Frame", {
+                    Name = "Row" .. rowIndex,
+                    LayoutOrder = 10 + rowIndex,
+                    Size = UDim2.new(1, 0, 0, 46),
+                    BackgroundTransparency = 1,
+                }, page)
+                create("UIListLayout", {
+                    FillDirection = Enum.FillDirection.Horizontal,
+                    Padding = UDim.new(0, 6),
+                }, rowFrame)
+                hiveCells["Row" .. rowIndex] = rowFrame
+            end
+            local cell = corner(create("Frame", {
+                Name = "Cell_" .. entry[1],
+                Size = UDim2.new(0.5, -3, 1, 0),
+                BackgroundColor3 = T.Panel,
+            }, rowFrame), R_CTRL)
+            strokeOf(cell, T.Stroke, 1, 0.6)
+            create("TextLabel", {
+                Size = UDim2.new(1, -14, 0, 14),
+                Position = UDim2.fromOffset(8, 6),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham,
+                Text = entry[2],
+                TextColor3 = T.TextDim,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            local valueLabel = create("TextLabel", {
+                Size = UDim2.new(1, -14, 0, 20),
+                Position = UDim2.fromOffset(8, 21),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                Text = "-",
+                TextColor3 = T.Text,
+                TextSize = 16,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            hiveCells[entry[1]] = valueLabel
+        end
+        -- SHOW HIVE: tổ ong lục giác 50 slot giống ảnh mẫu - flat-top, cột
+        -- chẵn/lẻ lệch nửa ô, màu theo rarity, GIFTED viền vàng + ✦, mặt ong
+        -- thật ở giữa, level góc dưới-trái có viền đen. Page tự scroll.
+        local gridFrame = corner(create("Frame", {
+            Name = "HiveGrid",
+            LayoutOrder = 20,
+            Size = UDim2.new(1, 0, 0, 21 + GRID_H + 12),
+            BackgroundColor3 = T.Panel,
+        }, page), R_CARD)
+        strokeOf(gridFrame, T.Stroke, 1, 0.6)
+        vGradient(gridFrame, 0, 0.12)
+        local hivePattern = resolveHivePattern()
+        if hivePattern then
+            create("ImageLabel", {
+                Name = "Pattern",
+                Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                Image = hivePattern,
+                ImageColor3 = T.Accent,
+                ImageTransparency = 0.9,
+                ScaleType = Enum.ScaleType.Tile,
+                TileSize = UDim2.fromOffset(58, 58),
+                ZIndex = 0,
+            }, gridFrame)
+        end
+        local gridCountLabel = create("TextLabel", {
+            Size = UDim2.new(1, -14, 0, 16),
+            Position = UDim2.fromOffset(8, 3),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold,
+            Text = "HONEYCOMB  -/50",
+            TextColor3 = T.TextDim,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, gridFrame)
+        hiveCells.GridCount = gridCountLabel
+        local gridHolder = create("Frame", {
+            Name = "Comb",
+            Size = UDim2.fromOffset(GRID_W, GRID_H),
+            Position = UDim2.new(0.5, -GRID_W / 2, 0, 21),
+            BackgroundTransparency = 1,
+        }, gridFrame)
+        hiveCells.GridSlot = {}
+        for slot = 1, 50 do
+            local col = (slot - 1) % GRID_COLS        -- X 1..5
+            local row = math.floor((slot - 1) / GRID_COLS) -- Y 1..10
+            local cx = col * COL_PITCH
+            local cy = row * ROW_PITCH + (col % 2 == 0 and COL_OFFSET or 0)
+            local cell = create("Frame", {
+                Name = "Slot" .. slot,
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(cx, cy),
+                Size = UDim2.fromOffset(HEX_W, HEX_H),
+                Visible = false,
+            }, gridHolder)
+            -- Viền (hex ngoài) + ruột (hex trong nhỏ hơn) = viền theo silhouette.
+            local border = makeHex(cell, 1)
+            local fill = makeHex(cell, 2)
+            layoutHex(border, HEX_W, HEX_H, 0, 0, T.Background)
+            layoutHex(fill, HEX_W - 4, HEX_H - 4, 2, 2, T.PanelLight)
+            local faceIcon = create("ImageLabel", {
+                Name = "Face",
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0.5, 0, 0.5, -1),
+                Size = UDim2.fromOffset(FACE_SIZE, FACE_SIZE),
+                BackgroundTransparency = 1,
+                Image = "",
+                ScaleType = Enum.ScaleType.Fit,
+                ZIndex = 3,
+            }, cell)
+            local levelText = create("TextLabel", {
+                Name = "Level",
+                Size = UDim2.fromOffset(36, 16),
+                Position = UDim2.fromOffset(8, HEX_H - 20),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                Text = "",
+                TextColor3 = Color3.new(1, 1, 1),
+                TextSize = 14,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextStrokeTransparency = 0,
+                TextStrokeColor3 = Color3.new(0, 0, 0),
+                ZIndex = 4,
+            }, cell)
+            local star = create("TextLabel", {
+                Name = "Star",
+                Size = UDim2.fromOffset(16, 16),
+                Position = UDim2.fromOffset(HEX_W - 22, 5),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                Text = "✦",
+                TextColor3 = GOLD,
+                TextSize = 13,
+                TextStrokeTransparency = 0.4,
+                TextStrokeColor3 = Color3.new(0, 0, 0),
+                Visible = false,
+                ZIndex = 4,
+            }, cell)
+            hiveCells.GridSlot[slot] = {
+                Frame = cell, Border = border, Fill = fill,
+                Level = levelText, Face = faceIcon, Star = star,
+            }
+        end
+    end
+end
+
+-- Toasts (góc phải trên, xếp chồng, tự biến mất)
+-- =============================================================================
+local toastHolder = create("Frame", {
+    Name = "Toasts",
+    Size = UDim2.fromOffset(300, 400),
+    Position = UDim2.new(1, -320, 0, 8),
+    BackgroundTransparency = 1,
+}, rootGui)
+create("UIListLayout", {
+    Padding = UDim.new(0, 6),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Right,
+}, toastHolder)
+
+function UI.Notify(title, message, seconds, kind)
+    local palette = {
+        info = {Bar = T.Accent, Icon = "ℹ️"},
+        good = {Bar = T.Good, Icon = "✅"},
+        warn = {Bar = T.Bad, Icon = "⚠️"},
+    }
+    local skin = palette[kind] or palette.info
+    local card = corner(create("Frame", {
+        Name = "Toast",
+        Size = UDim2.new(1, 0, 0, 54),
+        BackgroundColor3 = T.Panel,
+        Position = UDim2.new(1, 60, 0, 0),
+    }, toastHolder), R_CARD)
+    strokeOf(card, skin.Bar, 1, 0.2)
+    create("Frame", {
+        Size = UDim2.new(0, 4, 1, -10),
+        Position = UDim2.fromOffset(4, 5),
+        BackgroundColor3 = skin.Bar,
+        BorderSizePixel = 0,
+    }, card)
+    create("TextLabel", {
+        Size = UDim2.new(1, -44, 0, 18),
+        Position = UDim2.fromOffset(16, 6),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = tostring(title or ""),
+        TextColor3 = T.Text,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, card)
+    create("TextLabel", {
+        Size = UDim2.new(1, -44, 0, 26),
+        Position = UDim2.fromOffset(16, 24),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = tostring(message or ""),
+        TextColor3 = T.TextDim,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        TextWrapped = true,
+    }, card)
+    card.Position = UDim2.new(1, 60, 0, 0)
+    TweenService:Create(card, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Position = UDim2.new(0, 0, 0, 0),
+    }):Play()
+    task.delay(math.max(1.5, tonumber(seconds) or 4), function()
+        local out = TweenService:Create(card, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Position = UDim2.new(1, 60, 0, 0), BackgroundTransparency = 1,
+        })
+        out:Play()
+        out.Completed:Wait()
+        pcall(function() card:Destroy() end)
+    end)
+end
+
+-- =============================================================================
+-- Floating toggle pill (mặc định góc dưới-phải): ẩn/hiện cửa sổ, kéo được.
+-- =============================================================================
+local togglePill = corner(create("TextButton", {
+    Name = "TogglePill",
+    AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -16, 1, -16),
+    Size = UDim2.fromOffset(48, 48),
+    BackgroundColor3 = T.Panel,
+    Text = "🐝",
+    Font = Enum.Font.GothamBold,
+    TextSize = 22,
+    AutoButtonColor = false,
+}, rootGui), 14)
+strokeOf(togglePill, T.Accent, 1.5, 0.25)
+vGradient(togglePill, 0, 0.25)
+hoverify(togglePill, T.Panel, T.PanelHover)
+local pillMoved = false -- kéo pill rồi thả = KHÔNG toggle (chỉ click-thật mới)
+
+do
+    local pillDragging, pillDragStart, pillStart
+    togglePill.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            pillDragging = true
+            pillMoved = false
+            pillDragStart = input.Position
+            pillStart = togglePill.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    if pillDragging then UI._saveSoon() end
+                    pillDragging = false
+                end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if pillDragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - pillDragStart
+            if delta.Magnitude > 6 then pillMoved = true end
+            -- Kéo theo Anchor(1,1): offset âm kể từ mép phải/dưới.
+            local x = math.clamp(pillStart.X.Offset - delta.X, 8, rootGui.AbsoluteSize.X - 8)
+            local y = math.clamp(pillStart.Y.Offset - delta.Y, 8, rootGui.AbsoluteSize.Y - 8)
+            togglePill.Position = UDim2.new(1, -x, 1, -y)
+        end
+    end)
+end
+
+-- =============================================================================
+-- Persistence (bss_kaitun_ui.json): vị trí + collapse + theme + Values
+-- =============================================================================
+local saveQueued = false
+function UI._saveSoon()
+    if saveQueued or type(writefileFn) ~= "function" then return end
+    saveQueued = true
+    task.delay(0.5, function()
+        saveQueued = false
+        local payload = {
+            X = window.Position.X.Offset, Y = window.Position.Y.Offset,
+            Collapsed = collapsed or nil, Theme = currentThemeName,
+            PillX = -togglePill.Position.X.Offset, PillY = -togglePill.Position.Y.Offset,
+            Values = UI.Values,
+        }
+        local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
+        if ok and encoded then pcall(writefileFn, SAVE_NAME, encoded) end
+    end)
+end
+
+local function loadSaved()
+    if type(readfileFn) ~= "function" then return nil end
+    local ok, content = pcall(readfileFn, SAVE_NAME)
+    if not ok or type(content) ~= "string" or content == "" then return nil end
+    local okDecode, data = pcall(function() return HttpService:JSONDecode(content) end)
+    if okDecode and type(data) == "table" then return data end
+    return nil
+end
+
+-- =============================================================================
+-- Public API
+-- =============================================================================
+local function formatCount(number)
+    number = tonumber(number) or 0
+    local abs = math.abs(number)
+    if abs >= 1e9 then return string.format("%.2fB", number / 1e9) end
+    if abs >= 1e6 then return string.format("%.2fM", number / 1e6) end
+    if abs >= 1e3 then return string.format("%.1fK", number / 1e3) end
+    return tostring(math.floor(number + 0.5))
+end
+
+function UI.SetStatus(stateText, detailText)
+    local combined = tostring(stateText or "")
+        .. (detailText and detailText ~= "" and (" | " .. tostring(detailText)) or "")
+    pcall(function() statusLabel.Text = combined end)
+    -- Dot màu theo trạng thái: đang farm = xanh, meteor/warn = đỏ.
+    local lower = string.lower(combined)
+    local color = T.Good
+    if string.find(lower, "meteor", 1, true) or string.find(lower, "avoid", 1, true) then
+        color = T.Bad
+    elseif string.find(lower, "convert", 1, true) or string.find(lower, "buy", 1, true) then
+        color = T.Accent
+    end
+    pcall(function()
+        TweenService:Create(statusDot, TweenInfo.new(0.3), {BackgroundColor3 = color}):Play()
+    end)
+end
+
+function UI.SetStats(stats)
+    if type(stats) ~= "table" then return end
+    for key, value in pairs(stats) do
+        local label = statCells[tostring(key)]
+        if label then
+            local rendered
+            if key == "Uptime" then
+                local seconds = math.max(0, math.floor(tonumber(value) or 0))
+                rendered = string.format("%02d:%02d:%02d",
+                    math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60)
+            elseif key == "Honey" or key == "Capacity" or key == "HoneyPerHour" then
+                rendered = formatCount(value)
+            else
+                rendered = tostring(value)
+            end
+            pcall(function() label.Text = rendered end)
+        end
+    end
+    local honey = tonumber(stats.Honey)
+    local capacity = tonumber(stats.Capacity)
+    if honey and capacity and capacity > 0 then
+        local ratio = math.clamp(honey / capacity, 0, 1)
+        pcall(function()
+            bagFill.Size = UDim2.new(ratio, 0, 1, 0)
+            bagFill.BackgroundColor3 = ratio > 0.85 and T.Bad or T.Good
+            bagFillText.Text = string.format("bag %s / %s (%d%%)",
+                formatCount(honey), formatCount(capacity), math.floor(ratio * 100 + 0.5))
+        end)
+    end
+end
+
+function UI.SetGear(text)
+    pcall(function() gearLine.Text = "next gear: " .. tostring(text or "-") end)
+end
+
+-- Hive tab: main đẩy {Bees, Gifted, AverageLevel, Blue, Red, Event}.
+function UI.SetHive(stats)
+    if type(stats) ~= "table" or type(hiveCells) ~= "table" then return end
+    for key, value in pairs(stats) do
+        local label = hiveCells[tostring(key)]
+        if label then
+            local rendered
+            if key == "AverageLevel" then
+                rendered = string.format("%.1f", tonumber(value) or 0)
+            else
+                rendered = tostring(value)
+            end
+            pcall(function() label.Text = rendered end)
+        end
+    end
+end
+
+-- SHOW HIVE: vẽ tổ ong lục giác 50 slot. entries = mảng {
+--   Type = "Basic Bee", Gifted = true/false, Level = 7,
+--   X = col 1-5, Y = row 1-10 (tuỳ chọn - thiếu thì điền tuần tự)}.
+-- Màu theo rarity, gifted = viền vàng dày + ✦ + tint kim, mặt ong thật ở giữa.
+function UI.SetHiveGrid(entries, existingSlots)
+    if type(hiveCells) ~= "table" or type(hiveCells.GridSlot) ~= "table" then return end
+    local darkBorder = T.Background
+    local emptyFill = T.PanelLight
+    -- Reset: ẩn hết, chỉ hiện slot đã MỞ trong hive (tổ thật chỉ có ô đã
+    -- unlock). existingSlots = mảng {X=,Y=} các ô tồn tại; nil = hiện đủ 50.
+    for slot = 1, 50 do
+        local cell = hiveCells.GridSlot[slot]
+        pcall(function()
+            cell.Frame.Visible = false
+            layoutHex(cell.Border, HEX_W, HEX_H, 0, 0, darkBorder)
+            layoutHex(cell.Fill, HEX_W - 4, HEX_H - 4, 2, 2, emptyFill)
+            cell.Face.Image = ""
+            cell.Level.Text = ""
+            cell.Star.Visible = false
+        end)
+    end
+    if type(existingSlots) == "table" then
+        for _, slot in ipairs(existingSlots) do
+            if type(slot) == "table" and type(slot.X) == "number" and type(slot.Y) == "number" then
+                -- 5 cột × 10 hàng: index = (Y-1)*5 + X.
+                local index = math.clamp(math.floor((slot.Y - 1) * 5 + slot.X + 0.5), 1, 50)
+                local cell = hiveCells.GridSlot[index]
+                if cell then pcall(function() cell.Frame.Visible = true end) end
+            end
+        end
+    else
+        for slot = 1, 50 do
+            local cell = hiveCells.GridSlot[slot]
+            pcall(function() cell.Frame.Visible = true end)
+        end
+    end
+    local list = type(entries) == "table" and entries or {}
+    local filled = 0
+    for index, entry in ipairs(list) do
+        if type(entry) == "table" and entry.Type then
+            filled += 1
+            local slot = index
+            if type(entry.X) == "number" and type(entry.Y) == "number" then
+                slot = math.clamp(math.floor((entry.Y - 1) * 5 + entry.X + 0.5), 1, 50)
+            end
+            local cell = hiveCells.GridSlot[slot]
+            if cell then
+                local gifted = entry.Gifted and true or false
+                local base = RARITY_COLORS[rarityOf(entry.Type)] or RARITY_COLORS.Common
+                local fillC = gifted and base:Lerp(GOLD, 0.28) or base
+                local borderC = gifted and GOLD or darkBorder
+                local b = gifted and 4 or 2
+                -- Mặt ong thật: bản gifted riêng (nền vàng) khi có ✦.
+                local face = beeFaceTexture(entry.Type, gifted)
+                pcall(function()
+                    cell.Frame.Visible = true
+                    layoutHex(cell.Border, HEX_W, HEX_H, 0, 0, borderC)
+                    layoutHex(cell.Fill, HEX_W - 2 * b, HEX_H - 2 * b, b, b, fillC)
+                    cell.Face.Image = face or ""
+                    cell.Level.Text = tostring(tonumber(entry.Level) or "")
+                    cell.Star.Visible = gifted
+                end)
+            end
+        end
+    end
+    if hiveCells.GridCount then
+        pcall(function() hiveCells.GridCount.Text = string.format("HONEYCOMB  %d/50", filled) end)
+    end
+end
+
+-- =============================================================================
+-- AUTO HIVE: đọc TRỰC TIẾP hive thật trong game (không cần main đẩy gì).
+-- Công thức giống hệt hiveBeeCells của script chính: cell tên "C<x>,<y>",
+-- loại ở CellType/BeeType, gifted = có con "GiftedCell", level ở
+-- Level/BeeLevel/CellLevel (fallback qua ObjectValue "Bee"). Poll nhẹ mỗi
+-- 2.5s và tự cập nhật cả 6 ô stat + comb 50 slot.
+-- =============================================================================
+-- Level fallback: module stats của game - stats.Honeycomb["x,y"].Level
+-- (công thức hiveCellData của script chính). Lazy require, không yield.
+local statCacheModule
+local function getStatCache()
+    if statCacheModule ~= nil then return statCacheModule end
+    local module = ReplicatedStorage:FindFirstChild("ClientStatCache")
+    if not module then return nil end
+    local ok, result = pcall(require, module)
+    statCacheModule = (ok and type(result) == "table") and result or false
+    return statCacheModule
+end
+
+local statCacheLastUpdate = 0
+local function statHiveLevel(x, y)
+    local cache = getStatCache()
+    if type(cache) ~= "table" then return nil end
+    -- Get trước; nếu chưa có bảng Honeycomb (cache lạnh) thì Update một
+    -- nhịp rồi Get lại - đúng vòng getStats của script chính.
+    local ok, stats = pcall(cache.Get, cache)
+    if not ok or type(stats) ~= "table" or type(stats.Honeycomb) ~= "table" then
+        if type(cache.Update) == "function" and os.clock() - statCacheLastUpdate > 2 then
+            statCacheLastUpdate = os.clock()
+            pcall(cache.Update, cache)
+            ok, stats = pcall(cache.Get, cache)
+        end
+    end
+    if not ok or type(stats) ~= "table" then return nil end
+    local honeycomb = stats.Honeycomb
+    if type(honeycomb) ~= "table" then return nil end
+    -- Dạng THẬT của bảng (khám phá từ atlas): Honeycomb["x<col>"]["y<row>"],
+    -- level field tên "Lvl". Thử đủ các biến thể key cho chắc.
+    local column = honeycomb["x" .. tostring(x)]
+        or honeycomb[x] or honeycomb[tostring(x)]
+        or honeycomb[tostring(x) .. "," .. tostring(y)]
+    local cell = nil
+    if type(column) == "table" then
+        cell = column["y" .. tostring(y)]
+            or column[y] or column[tostring(y)]
+    end
+    if type(cell) ~= "table" and type(column) == "table" then
+        cell = column -- dạng phẳng "x,y" trả thẳng cell
+    end
+    if type(cell) ~= "table" then
+        local row = honeycomb[x] or honeycomb[tostring(x)]
+        if type(row) == "table" then
+            cell = row[y] or row[tostring(y)]
+        end
+    end
+    if type(cell) ~= "table" then
+        for _, entry in pairs(honeycomb) do
+            if type(entry) == "table" then
+                local cx = tonumber(entry.CellX or entry.X or entry.Column)
+                local cy = tonumber(entry.CellY or entry.Y or entry.Row)
+                if cx == x and cy == y then
+                    cell = entry
+                    break
+                end
+            end
+        end
+    end
+    if type(cell) == "table" then
+        return tonumber(cell.Lvl or cell.Level or cell.BeeLevel or cell.CellLevel)
+    end
+    return nil
+end
+
+local function readHiveCell(cell)
+    local x, y = cell.Name:match("^C(%d+),(%d+)$")
+    if not x or not y then return nil end
+    local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+    if not (cellType and cellType:IsA("ValueBase")) then return nil end
+    local beeType = tostring(cellType.Value)
+    -- Cell trống của game ghi "Empty" - phải lọc đủ cả 4 dạng (v1.2
+    -- beeTypePresent) kẻo 50 ô "Empty" + COMB 50/50 như bản trước.
+    local normalizedType = normalizeImageName(beeType)
+    if normalizedType == "" or normalizedType == "none"
+        or normalizedType == "empty" or normalizedType == "nil" then
+        return nil
+    end
+    local level
+    for _, name in ipairs({"Level", "BeeLevel", "CellLevel"}) do
+        local value = cell:FindFirstChild(name)
+        if value and value:IsA("ValueBase") and tonumber(value.Value) then
+            level = tonumber(value.Value)
+            break
+        end
+    end
+    if not level then
+        local bee = cell:FindFirstChild("Bee")
+        if bee and bee:IsA("ObjectValue") and bee.Value then
+            for _, name in ipairs({"Level", "BeeLevel"}) do
+                local value = bee.Value:FindFirstChild(name)
+                if value and value:IsA("ValueBase") and tonumber(value.Value) then
+                    level = tonumber(value.Value)
+                    break
+                end
+            end
+        end
+    end
+    if not level then
+        level = statHiveLevel(tonumber(x), tonumber(y))
+    end
+    return {
+        X = tonumber(x), Y = tonumber(y),
+        Type = beeType,
+        Gifted = cell:FindFirstChild("GiftedCell") ~= nil,
+        Level = level,
+    }
+end
+
+local autoHiveRunning = false
+function UI.AutoHive(intervalSeconds)
+    if autoHiveRunning then return end
+    autoHiveRunning = true
+    task.spawn(function()
+        while rootGui.Parent do
+            local reference = Player and Player:FindFirstChild("Honeycomb")
+            local hive = reference and reference:IsA("ObjectValue") and reference.Value
+            local cellsFolder = hive and hive:FindFirstChild("Cells")
+            if cellsFolder then
+                local entries = {}
+                local slotList = {}
+                local bees, giftedCount = 0, 0
+                local blueCount, redCount, eventCount = 0, 0, 0
+                local levelTotal, levelCount = 0, 0
+                for _, cell in ipairs(cellsFolder:GetChildren()) do
+                    local entry = readHiveCell(cell)
+                    if entry then
+                        table.insert(entries, entry)
+                        table.insert(slotList, {X = entry.X, Y = entry.Y})
+                        bees += 1
+                        if entry.Gifted then giftedCount += 1 end
+                        if entry.Level then
+                            levelTotal += entry.Level
+                            levelCount += 1
+                        end
+                        local n = normalizeImageName(entry.Type)
+                        local bare = n:gsub("bee$", "")
+                        if HIVE_EVENT_MARKS[n] or HIVE_EVENT_MARKS[bare] then
+                            eventCount += 1
+                        elseif n:find("blue", 1, true) then
+                            blueCount += 1
+                        elseif n:find("red", 1, true) then
+                            redCount += 1
+                        end
+                    else
+                        -- Ô đã mở nhưng trống: vẫn vẽ placeholder cho đúng
+                        -- hình dáng tổ thật.
+                        local ex, ey = cell.Name:match("^C(%d+),(%d+)$")
+                        if ex and ey then
+                            table.insert(slotList, {X = tonumber(ex), Y = tonumber(ey)})
+                        end
+                    end
+                end
+                UI.SetHiveGrid(entries, slotList)
+                UI.SetHive{
+                    Bees = bees,
+                    Gifted = giftedCount,
+                    AverageLevel = levelCount > 0 and (levelTotal / levelCount) or 0,
+                    Blue = blueCount,
+                    Red = redCount,
+                    Event = eventCount,
+                }
+            end
+            task.wait(math.max(1, tonumber(intervalSeconds) or 2.5))
+        end
+        autoHiveRunning = false
+    end)
+end
+
+function UI.SetPlanters(entries)
+    for slot = 1, 3 do
+        local entry = type(entries) == "table" and entries[slot] or nil
+        local cell = planterCells[slot]
+        if cell then
+            pcall(function()
+                if entry then
+                    cell.Name.Text = tostring(entry.Name or "Planter")
+                    cell.Field.Text = tostring(entry.Field or "")
+                    cell.Fill.Size = UDim2.new(math.clamp(tonumber(entry.Percent) or 0, 0, 1), 0, 1, 0)
+                    cell.Icon.Image = resolveGameImage(tostring(entry.Name or "")) or ""
+                else
+                    cell.Name.Text = "-"
+                    cell.Field.Text = ""
+                    cell.Fill.Size = UDim2.new(0, 0, 1, 0)
+                    cell.Icon.Image = ""
+                end
+            end)
+        end
+    end
+end
+
+-- Public: lấy asset string (rbxassetid://...) của icon item trong game - gán
+-- trực tiếp vào bất kỳ ImageLabel.Image nào, không cần tải file.
+function UI.GetGameImage(itemName)
+    return resolveGameImage(itemName)
+end
+
+function UI.DefineControls(definitions)
+    if type(definitions) ~= "table" then return end
+    for _, rows in pairs(UI._built) do
+        for _, row in ipairs(rows) do pcall(function() row:Destroy() end) end
+    end
+    UI._built = {}
+    for index, def in ipairs(definitions) do
+        local page = UI._pages[tostring(def.Tab)]
+        if page and def.Tab ~= "Status" and def.Key then
+            local row
+            if def.Kind == "Slider" then
+                row = buildSlider(page, def, 100 + index)
+            else
+                row = buildToggle(page, def, 100 + index)
+            end
+            local list = UI._built[tostring(def.Tab)] or {}
+            table.insert(list, row)
+            UI._built[tostring(def.Tab)] = list
+        end
+    end
+end
+
+function UI.OnChange(key, callback)
+    if type(key) == "string" and type(callback) == "function" then
+        UI._callbacks[key] = callback
+        task.spawn(function() pcall(callback, UI.Values[key]) end)
+    end
+end
+
+function UI.SetValues(values)
+    if type(values) ~= "table" then return end
+    for key, value in pairs(values) do
+        UI.Values[key] = value
+        local ref = UI._refs[tostring(key)]
+        if ref and ref.Render then pcall(ref.Render, value) end
+    end
+end
+
+local uiVisible = true
+local windowHome = nil -- vị trí thật của window (trước khi slide-out ẩn đi)
+function UI.Toggle(visible)
+    pcall(function()
+        if visible == nil then visible = not uiVisible end
+        visible = visible and true or false
+        if visible == uiVisible then return end
+        uiVisible = visible
+        if visible then
+            local home = windowHome or window.Position
+            windowHome = nil
+            window.Position = home
+            window.Visible = true
+            shadow.Visible = true
+            window.Position = UDim2.new(home.X.Scale, home.X.Offset + 70,
+                home.Y.Scale, home.Y.Offset)
+            TweenService:Create(window, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                Position = home,
+            }):Play()
+            TweenService:Create(shadow, TweenInfo.new(0.35), {BackgroundTransparency = 0.82}):Play()
+        else
+            -- Nhớ vị trí thật trước khi trượt ra ngoài màn hình.
+            windowHome = window.Position
+            local slideOut = UDim2.new(windowHome.X.Scale, windowHome.X.Offset + 70,
+                windowHome.Y.Scale, windowHome.Y.Offset)
+            TweenService:Create(window, TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Position = slideOut,
+            }):Play()
+            TweenService:Create(shadow, TweenInfo.new(0.28), {BackgroundTransparency = 1}):Play()
+            task.delay(0.32, function()
+                if not uiVisible then
+                    window.Visible = false
+                    shadow.Visible = false
+                end
+            end)
+        end
+    end)
+end
+
+togglePill.MouseButton1Click:Connect(function()
+    -- Kéo-để-di-chuyển không được tính là click toggle.
+    if pillMoved then pillMoved = false return end
+    -- Feedback nảy nhẹ rồi toggle.
+    TweenService:Create(togglePill, TweenInfo.new(0.1, Enum.EasingStyle.Quad), {
+        Size = UDim2.fromOffset(42, 42),
+    }):Play()
+    task.delay(0.1, function()
+        TweenService:Create(togglePill, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(48, 48),
+        }):Play()
+    end)
+    UI.Toggle()
+end)
+
+function UI.CycleTheme()
+    local names = {}
+    for name in pairs(THEMES) do table.insert(names, name) end
+    table.sort(names)
+    local index = table.find(names, currentThemeName) or 1
+    UI.SetTheme(names[index % #names + 1])
+end
+
+function UI.SetTheme(name)
+    local palette = THEMES[name] or THEMES.Honey
+    currentThemeName = name
+    T = palette
+    -- Repaint instant (đơn giản, chắc chắn): dựng lại màu các phần tĩnh.
+    pcall(function()
+        window.BackgroundColor3 = T.Background
+        titleBar.BackgroundColor3 = T.Panel
+        titleBar.SquarePatch.BackgroundColor3 = T.Panel
+        titleLabel.TextColor3 = T.Accent
+        tabBar.BackgroundColor3 = T.Panel
+        shadow.BackgroundColor3 = Color3.new(0, 0, 0)
+        for name, button in pairs(UI._tabs) do
+            local active = UI._pages[name].Visible
+            button.BackgroundColor3 = active and T.Accent or T.PanelLight
+            button.TextColor3 = active and T.Background or T.TextDim
+        end
+        statusCard.BackgroundColor3 = T.Panel
+        statusLabel.TextColor3 = T.Text
+        gearLine.TextColor3 = T.AccentSoft
+        for key, cell in pairs(statCells) do
+            if typeof(cell) == "Instance" and cell:IsA("TextLabel") then
+                cell.TextColor3 = T.Text
+            end
+        end
+    end)
+    UI.Notify("Theme", "Switched to " .. currentThemeName, 2, "info")
+    UI._saveSoon()
+end
+
+function UI.Destroy()
+    pcall(function() rootGui:Destroy() end)
+    if ENV.BSSKaitunUI == UI then ENV.BSSKaitunUI = nil end
+end
+
+-- =============================================================================
+-- Boot
+-- =============================================================================
+-- 1) Config từ main (nếu đặt trước) rồi file lưu đè lên các khóa đã lưu.
+if type(ENV.BSS_KAITUN_CONFIG) == "table" then
+    for key, value in pairs(ENV.BSS_KAITUN_CONFIG) do UI.Values[key] = value end
+end
+local saved = loadSaved()
+if saved then
+    if type(saved.Values) == "table" then
+        for key, value in pairs(saved.Values) do UI.Values[key] = value end
+    end
+    if type(saved.X) == "number" and type(saved.Y) == "number" then
+        local maxX = math.max(80, rootGui.AbsoluteSize.X - 80)
+        local maxY = math.max(40, rootGui.AbsoluteSize.Y - 40)
+        local x = math.clamp(saved.X, -WINDOW_SIZE.X.Offset + 80, maxX)
+        local y = math.clamp(saved.Y, 0, maxY)
+        window.Position = UDim2.fromOffset(x, y)
+        shadow.Position = UDim2.fromOffset(x - 5, y - 6)
+    end
+    if type(saved.PillX) == "number" and type(saved.PillY) == "number" then
+        local px = math.clamp(saved.PillX, 8, math.max(8, rootGui.AbsoluteSize.X - 8))
+        local py = math.clamp(saved.PillY, 8, math.max(8, rootGui.AbsoluteSize.Y - 8))
+        togglePill.Position = UDim2.new(1, -px, 1, -py)
+    end
+    if saved.Theme and THEMES[saved.Theme] then
+        currentThemeName = saved.Theme
+        T = THEMES[saved.Theme]
+    end
+end
+
+-- Collapse (sau khi restore vị trí, áp trạng thái lưu).
+themeButton.MouseButton1Click:Connect(function() UI.CycleTheme() end)
+collapseButton.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    setText(collapseButton, collapsed and "+" or "—")
+    TweenService:Create(bodyHolder, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {
+        Size = collapsed and UDim2.new(1, 0, 0, 0) or UDim2.new(1, 0, 1, -40),
+    }):Play()
+    TweenService:Create(window, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {
+        Size = collapsed and UDim2.fromOffset(WINDOW_SIZE.X.Offset, 40) or WINDOW_SIZE,
+    }):Play()
+    TweenService:Create(shadow, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {
+        Size = collapsed and UDim2.fromOffset(WINDOW_SIZE.X.Offset + 10, 46)
+            or WINDOW_SIZE + UDim2.fromOffset(10, 12),
+    }):Play()
+    UI._saveSoon()
+end)
+
+-- Animation mở cửa sổ lần đầu: trượt từ phải + fade shadow.
+if not (saved and saved.Collapsed) then
+    local finalX = window.Position
+    window.Position = UDim2.new(finalX.X.Scale, finalX.X.Offset + 60, finalX.Y.Scale, finalX.Y.Offset)
+    shadow.BackgroundTransparency = 1
+    TweenService:Create(window, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        Position = finalX,
+    }):Play()
+    TweenService:Create(shadow, TweenInfo.new(0.45), {BackgroundTransparency = 0.82}):Play()
+else
+    collapsed = true
+    setText(collapseButton, "+")
+    bodyHolder.Size = UDim2.new(1, 0, 0, 0)
+    window.Size = UDim2.fromOffset(WINDOW_SIZE.X.Offset, 40)
+    shadow.Size = UDim2.fromOffset(WINDOW_SIZE.X.Offset + 10, 46)
+end
+
+-- Auto hive data: đọc comb thật mỗi 2.5s ngay khi UI load (main vẫn có thể
+-- đè bằng SetHiveGrid/SetHive riêng nếu muốn).
+UI.AutoHive()
+
+ENV.BSSKaitunUI = UI
+ENV.__BSSKaitunUI_Cleanup = function()
+    pcall(function() rootGui:Destroy() end)
+    if ENV.BSSKaitunUI == UI then ENV.BSSKaitunUI = nil end
+    ENV.__BSSKaitunUI_Cleanup = nil
+end
+
+return UI
