@@ -166,6 +166,12 @@ local DEFAULT_CONFIG = {
     SmartFieldWalkTimeout = 12,
     SmartFieldPathfind = true,
     FieldPathfindCooldown = 6,
+    -- STUMP FIELD NAV: FlowerZones["Stump Field"] la hinh chu nhat 110.5x113.3
+    -- nhung mat di duoc la DINH GOC CAY hinh tron - goc tay-bac va dai canh bac
+    -- cua zone nam NGOAI stump (san thap hon 20+ stud). Do vung di duoc bang
+    -- raycast that cua place roi di chuyen bang A* tren luoi do.
+    StumpFieldNav = true,
+    StumpNavCellSize = 5,
     -- Atlas-style corner avoidance: no hopping - when the walk gets near one
     -- of the field's 4 corners, glide back toward the field center instead.
     FieldCornerAvoid = true,
@@ -285,6 +291,11 @@ local DEFAULT_CONFIG = {
     SpecialEffectPriorityInterval = 20,
     SpecialEffectMaxDistance = 180,
     AvoidMob = true,
+    -- STUMP SNAIL: boss song hang GIO trong Stump Field. Stance mode thay no
+    -- -> park + bounce lien tuc (90s cap roi lap lai) = khong farm duoc.
+    -- true = bo qua Snail khi farm/ne duong; quest + bonus route van thay no
+    -- vi doc thang workspace.Monsters.
+    IgnoreStumpSnail = true,
     MobScanRadius = 55,
     MobJumpInterval = 0.12,
     AvoidMobDamageThreshold = 0.5,
@@ -383,46 +394,60 @@ local DEFAULT_CONFIG = {
             PackageTypes = {"CrimsonBee", "Crimson Bee", "Crimson"}},
     },
     TeleRewardDwellSeconds = 2,
+    -- Every world reward AND every normal pollen token is a Part named "C" with
+    -- the same Size and FrontDecal/BackDecal (verified against the token template
+    -- ReplicatedStorage.Collectibles.C), so proximity alone cannot tell them
+    -- apart. Real rewards sit 0.00-2.37 studs from these coordinates; 4 is tight
+    -- enough to reject a token drifting past, loose enough for the Y offset.
+    TeleRewardRadius = 4,
+    -- Texture = decal asset id of the reward, read from the live place. A spot
+    -- only teleports when a collectible with THAT texture is within the radius.
+    -- A spot without a Texture is never teleported to (its reward is gone).
     TeleRewardSpots = {
-        {Label = "Diamond Egg", CFrame = CFrame.new(42, 149, -531)},
-        {Label = "Star Jelly", CFrame = CFrame.new(-413.77, 17.17, 467.18)},
-        {Label = "Gold Egg", CFrame = CFrame.new(83.94, 68.01, -142.12)},
-        {Label = "Star Jelly", CFrame = CFrame.new(-435.52, 93.26, 48.78)},
-        {Label = "Star Jelly", CFrame = CFrame.new(-480.57, 69.39, -0.42)},
-        {Label = "Ticket", CFrame = CFrame.new(5.215, 174.664, -96.96)},
-        {Label = "Enzymes", CFrame = CFrame.new(-105.185, 71.711, 557.967)},
-        {Label = "Enzymes", CFrame = CFrame.new(-115.21, 71.747, 558.186)},
-        {Label = "Enzymes", CFrame = CFrame.new(-124.223, 71.747, 558.221)},
-        {Label = "Jelly", CFrame = CFrame.new(87.597, 310.219, -294.334)},
-        {Label = "Star Jelly", CFrame = CFrame.new(524.506, 151.902, -411.876)},
-        {Label = "Glue", CFrame = CFrame.new(369.314, 84.816, -237.077)},
-        {Label = "Jelly", CFrame = CFrame.new(110.861, 63.718, -59.578)},
-        {Label = "Jelly", CFrame = CFrame.new(218.618, 35.427, -29.126)},
-        {Label = "Jelly", CFrame = CFrame.new(263.946, 57.138, 108.369)},
-        {Label = "Jelly", CFrame = CFrame.new(314.312, 61.638, 213.964)},
-        {Label = "Jelly", CFrame = CFrame.new(34.864, 57.965, 190.511)},
-        {Label = "Jelly", CFrame = CFrame.new(-64.232, 37.717, 113.388)},
-        {Label = "Jelly", CFrame = CFrame.new(146.351, 37.496, 266.086)},
+        {Label = "Diamond Egg", CFrame = CFrame.new(42, 149, -531), Texture = "1471850677"},
+        {Label = "Star Jelly", CFrame = CFrame.new(-413.77, 17.17, 467.18), Texture = "2319943273"},
+        {Label = "Gold Egg", CFrame = CFrame.new(83.94, 68.01, -142.12), Texture = "1471849394"},
+        {Label = "Star Jelly", CFrame = CFrame.new(-435.52, 93.26, 48.78), Texture = "2319943273"},
+        {Label = "Star Jelly", CFrame = CFrame.new(-480.57, 69.39, -0.42), Texture = "2319943273"},
+        {Label = "Ticket", CFrame = CFrame.new(5.215, 174.664, -96.96), Texture = "1674871631"},
+        {Label = "Enzymes", CFrame = CFrame.new(-105.185, 71.711, 557.967), Texture = "2584584968"},
+        {Label = "Enzymes", CFrame = CFrame.new(-115.21, 71.747, 558.186), Texture = "3080740120"},
+        {Label = "Ticket", CFrame = CFrame.new(-124.223, 71.747, 558.221), Texture = "1674871631"},
+        {Label = "Jelly", CFrame = CFrame.new(87.597, 310.219, -294.334), Texture = "1471882621"},
+        {Label = "Star Jelly", CFrame = CFrame.new(524.506, 151.902, -411.876), Texture = "2319943273"},
+        {Label = "Glue", CFrame = CFrame.new(369.314, 84.816, -237.077), Texture = "2504978518"},
+        {Label = "Jelly", CFrame = CFrame.new(110.861, 63.718, -59.578), Texture = "1471882621"},
+        {Label = "Jelly", CFrame = CFrame.new(218.618, 35.427, -29.126), Texture = "1471882621"},
+        {Label = "Jelly", CFrame = CFrame.new(263.946, 57.138, 108.369), Texture = "1471882621"},
+        {Label = "Jelly", CFrame = CFrame.new(314.312, 61.638, 213.964), Texture = "1471882621"},
+        {Label = "Jelly", CFrame = CFrame.new(34.864, 57.965, 190.511), Texture = "1471882621"},
+        {Label = "Jelly", CFrame = CFrame.new(-64.232, 37.717, 113.388), Texture = "1471882621"},
+        {Label = "Jelly", CFrame = CFrame.new(146.351, 37.496, 266.086), Texture = "1471882621"},
+        -- No reward within 39.7 studs in the live place: seasonal/removed.
         {Label = "Bear Cookie", CFrame = CFrame.new(47.836, 52.594, 398.93)},
-        {Label = "Enzymes", CFrame = CFrame.new(226.929, 25252.527, -716.011)},
-        {Label = "Glitter", CFrame = CFrame.new(301.8563537597656, 25283.02734375, -807.7046508789062)},
-        {Label = "Star Jelly", CFrame = CFrame.new(271.973, 25294.129, -871.085)},
-        {Label = "Jelly", CFrame = CFrame.new(-189.317, 64.263, 367.295)},
-        {Label = "Enzymes", CFrame = CFrame.new(3.3575220108032227, 304.2304992675781, -266.304931640625)},
+        {Label = "Enzymes", CFrame = CFrame.new(226.929, 25252.527, -716.011), Texture = "2584584968"},
+        {Label = "Glitter", CFrame = CFrame.new(301.8563537597656, 25283.02734375, -807.7046508789062), Texture = "2542899798"},
+        {Label = "Star Jelly", CFrame = CFrame.new(271.973, 25294.129, -871.085), Texture = "2319943273"},
+        {Label = "Jelly", CFrame = CFrame.new(-189.317, 64.263, 367.295), Texture = "1471882621"},
+        {Label = "Enzymes", CFrame = CFrame.new(3.3575220108032227, 304.2304992675781, -266.304931640625), Texture = "2584584968"},
+        -- No reward within 62.9 studs in the live place.
         {Label = "Bloom Sake", CFrame = CFrame.new(329.359, 193.14, -234.35)},
-        {Label = "Glitter", CFrame = CFrame.new(-336.5309143066406, 132.36778259277344, -384.9282531738281)},
-        {Label = "Jelly", CFrame = CFrame.new(-357.5382080078125, 129.8998565673828, -227.21456909179688)},
-        {Label = "Ticket", CFrame = CFrame.new(-232.84506225585938, 184.9242706298828, -249.955322265625)},
+        {Label = "Glitter", CFrame = CFrame.new(-336.5309143066406, 132.36778259277344, -384.9282531738281), Texture = "2542899798"},
+        {Label = "Jelly", CFrame = CFrame.new(-357.5382080078125, 129.8998565673828, -227.21456909179688), Texture = "1471882621"},
+        {Label = "Ticket", CFrame = CFrame.new(-232.84506225585938, 184.9242706298828, -249.955322265625), Texture = "1674871631"},
+        -- No reward within 104.6 studs in the live place.
         {Label = "Bear Cookie", CFrame = CFrame.new(-465.8412780761719, 109.4454116821289, -175.78443908691406)},
-        {Label = "Ticket", CFrame = CFrame.new(98.66006469726562, 35.20281219482422, 355.489013671875)},
-        {Label = "Ticket", CFrame = CFrame.new(-374.18780517578125, 19.293209075927734, 494.7056884767185)},
-        {Label = "Ticket", CFrame = CFrame.new(14.022793769836426, 4.5928144454956055, 68.14900207519531)},
-        {Label = "Ticket", CFrame = CFrame.new(-54.35238265991211, 19.424358367919922, -62.27788543701172)},
-        {Label = "Ticket", CFrame = CFrame.new(-380.6947021484375, 54.6801872253418, 206.6320037841797)},
-        {Label = "Ticket", CFrame = CFrame.new(131.64907836914062, 117.50926208496094, -63.04363250732422)},
-        {Label = "Ticket", CFrame = CFrame.new(338.76171875, 130.92079162597656, -233.84364318847656)},
+        {Label = "Ticket", CFrame = CFrame.new(98.66006469726562, 35.20281219482422, 355.489013671875), Texture = "1674871631"},
+        {Label = "Ticket", CFrame = CFrame.new(-374.18780517578125, 19.293209075927734, 494.7056884767185), Texture = "1674871631"},
+        {Label = "Ticket", CFrame = CFrame.new(14.022793769836426, 4.5928144454956055, 68.14900207519531), Texture = "1674871631"},
+        {Label = "Ticket", CFrame = CFrame.new(-54.35238265991211, 19.424358367919922, -62.27788543701172), Texture = "1674871631"},
+        {Label = "Ticket", CFrame = CFrame.new(-380.6947021484375, 54.6801872253418, 206.6320037841797), Texture = "1674871631"},
+        {Label = "Ticket", CFrame = CFrame.new(131.64907836914062, 117.50926208496094, -63.04363250732422), Texture = "1674871631"},
+        {Label = "Ticket", CFrame = CFrame.new(338.76171875, 130.92079162597656, -233.84364318847656), Texture = "1674871631"},
+        -- No reward within 18.2 studs in the live place.
         {Label = "Pine Tree", CFrame = CFrame.new(23.648874282836914, 17.36900520324707, 390.58270263671875)},
-        {Label = "Gumdrop", CFrame = CFrame.new(32.6508674621582, 13.400006294250488, 405.8634033203125)},
+        {Label = "Gumdrop", CFrame = CFrame.new(32.6508674621582, 13.400006294250488, 405.8634033203125), Texture = "1838129169"},
+        -- No reward within 33.9 studs in the live place.
         {Label = "Pine Tree", CFrame = CFrame.new(43.54356384277344, 13.86900520324707, 373.79779052734375)},
     },
     BlueHQRequiredDiscoveries = 4,
@@ -1648,6 +1673,13 @@ end
 -- token detours.
 function computeFieldPath(rootPosition, position, startField)
     local margin = math.max(0, tonumber(Config.TokenPathMargin) or 4)
+    -- Stump Field first: the threat detour below only dodges MOBS, never
+    -- geometry, so it cannot route around the stump rim (the bot just walks
+    -- off the edge). The measured-grid A* handles that; nil = straight is fine.
+    if startField then
+        local stumpPath = Runtime.StumpNav.Path(startField, rootPosition, position)
+        if stumpPath then return stumpPath end
+    end
     local threat = type(Runtime.SegmentThreat) == "function"
         and Runtime.SegmentThreat(rootPosition, position, margin) or nil
     if not threat then
@@ -1692,6 +1724,9 @@ function computeFieldPath(rootPosition, position, startField)
     for _, grow in ipairs({0, 6, 12}) do
         for _, sideSign in ipairs({farSide, -farSide}) do
             local midPoint = mid + perp * (sideSign * (baseOffset + grow))
+            -- Stump rim: the zone rectangle is not the walkable bed, so an arc
+            -- that stays "inside the field" can still hang over the edge.
+            midPoint = Runtime.StumpNav.Clamp(startField, midPoint) or midPoint
             if not startField
                 or flowerFieldAtPosition(
                     Vector3.new(midPoint.X, rootPosition.Y, midPoint.Z), 0) == startField then
@@ -1885,7 +1920,8 @@ function tweenTo(target, speed, owner, forceWalk, preferGlide)
         if Config.SmartFieldPathfind and walkingInsideField
             and os.clock() >= (Runtime.LastFieldPathfindAt or 0)
                 + math.max(2, tonumber(Config.FieldPathfindCooldown) or 6)
-            and straightPassesStuckSpot(root.Position, position) then
+            and (straightPassesStuckSpot(root.Position, position)
+                or Runtime.StumpNav.Blocked(startField, root.Position, position)) then
             Runtime.LastFieldPathfindAt = os.clock()
             setStatus("Smart move", "Known obstacle ahead - pathfinding early")
             walkFieldPath(humanoid, root, position, generation)
@@ -2853,12 +2889,11 @@ end
 -- to trigger the touch pickup. No tweening, no flying up. Meteor stays top priority.
 --
 -- AUTO-DETECTION: the Collectibles folder spawns ON DEMAND (absent until the
--- first pickup exists - verified in-game), so each spot re-scans it instead of
--- using one upfront snapshot. A spot is only visited when a live collectible
--- actually sits within 8 studs of its coordinates: seasonal rewards removed
--- after Beesmas cost nothing (no tele, no dwell). Teleports to the instance's
--- real position and deduplicates shared instances; if the folder never appears
--- the sweep falls back to the legacy blind pass.
+-- first pickup exists - verified in-game), so each spot re-resolves and re-scans
+-- it. A spot is only visited when a live collectible sits within TeleRewardRadius
+-- studs AND its decal texture matches the spot's verified reward id: seasonal
+-- rewards removed after Beesmas cost nothing (no tele, no dwell), and a normal
+-- token drifting past is never mistaken for one. No folder = no teleport, ever.
 function Runtime.CollectWorldRewards()
     if not Config.AutoTeleRewards or Runtime.TeleRewardsDone then return false end
     local spots = Config.TeleRewardSpots or {}
@@ -2887,6 +2922,14 @@ function Runtime.CollectWorldRewards()
         end)
     end
 
+    -- Reward identity: a normal token and a world reward are the same Part "C"
+    -- with the same Size and FrontDecal/BackDecal, so only the decal texture
+    -- tells a real reward from a pollen token drifting past the coordinates.
+    local function collectibleTexture(object)
+        local decal = object:FindFirstChild("FrontDecal") or object:FindFirstChild("BackDecal")
+        return decal and tostring(decal.Texture):match("(%d+)") or nil
+    end
+    local radius = math.max(1, tonumber(Config.TeleRewardRadius) or 4)
     -- Short grace window: the folder spawns once the first reward replicates.
     local collectiblesFolder = workspace:FindFirstChild("Collectibles")
     local graceDeadline = os.clock() + 3
@@ -2911,36 +2954,55 @@ function Runtime.CollectWorldRewards()
         if ledger[key] then continue end -- this account already took it
         local _, _, root = getCharacter(8)
         if not root then continue end
-        local targetCFrame = spot.CFrame
-        if collectiblesFolder then
-            -- Nearest live collectible within 8 studs of the known coordinates.
-            local best, bestPosition, bestDistance
-            for _, object in ipairs(collectiblesFolder:GetChildren()) do
-                if not visitedInstances[object] then
-                    local position = objectPosition(object)
-                    if position then
-                        local distance = (position - spot.CFrame.Position).Magnitude
-                        if distance <= 8 and (not bestDistance or distance < bestDistance) then
+        -- Re-resolve per spot: the folder can appear mid-sweep. A nil folder
+        -- used to fall through to a BLIND teleport to spot.CFrame, which is how
+        -- the bot visited long-dead reward coordinates.
+        collectiblesFolder = workspace:FindFirstChild("Collectibles")
+        if not collectiblesFolder then
+            skipped += 1
+            continue -- left unmarked: retry next session instead of guessing
+        end
+        local children = collectiblesFolder:GetChildren()
+        if #children > 0 then Runtime.TeleSawCollectibles = true end
+        if not spot.Texture then
+            -- No verified reward texture for this coordinate -> never teleport.
+            -- Proximity alone cannot tell a reward from a normal token parked on
+            -- the same spot (identical Part "C", Size and decal structure).
+            -- Left unmarked so a restored seasonal reward can be picked up once
+            -- its texture id is added to the config.
+            skipped += 1
+            continue
+        end
+        -- Nearest live collectible within the radius AND carrying this spot's
+        -- reward texture.
+        local best, bestPosition, bestDistance
+        for _, object in ipairs(children) do
+            if not visitedInstances[object] then
+                local position = objectPosition(object)
+                if position then
+                    local distance = (position - spot.CFrame.Position).Magnitude
+                    if distance <= radius and (not bestDistance or distance < bestDistance) then
+                        if collectibleTexture(object) == tostring(spot.Texture) then
                             best, bestPosition, bestDistance = object, position, distance
                         end
                     end
                 end
             end
-            if not best then
-                skipped += 1
-                -- Empty-mark CHI persist khi Collectibles da tung co noi dung
-                -- trong session (reward chua replicate -> cham do co the la
-                -- token thuong gan do, hoac reward dang tren duong): neu khong
-                -- thi cham do duoc retry o session sau thay vi mat vinh vien.
-                if Runtime.TeleSawCollectibles then
-                    ledger[key] = true
-                    saveTeleRewardLedger(ledger)
-                end
-                continue -- reward removed (e.g. Beesmas ended) - zero time spent
-            end
-            visitedInstances[best] = true
-            targetCFrame = CFrame.new(bestPosition)
         end
+        if not best then
+            skipped += 1
+            -- Empty-mark CHI persist khi Collectibles da tung co noi dung
+            -- trong session (reward chua replicate -> cham do co the la
+            -- token thuong gan do, hoac reward dang tren duong): neu khong
+            -- thi cham do duoc retry o session sau thay vi mat vinh vien.
+            if Runtime.TeleSawCollectibles then
+                ledger[key] = true
+                saveTeleRewardLedger(ledger)
+            end
+            continue -- reward removed (e.g. Beesmas ended) - zero time spent
+        end
+        visitedInstances[best] = true
+        local targetCFrame = CFrame.new(bestPosition)
         setStatus("Tele reward", string.format("%d/%d %s", index, #spots, tostring(spot.Label or "reward")))
         pin(root, targetCFrame)
         -- Stand on the reward point, nudging up/down to trigger the touch pickup.
@@ -3664,18 +3726,325 @@ local function fieldPoint(field)
     if boundsCFrame and boundsSize then
         local x = (math.random() - 0.5) * math.max(2, boundsSize.X * 0.72)
         local z = (math.random() - 0.5) * math.max(2, boundsSize.Z * 0.72)
-        return (boundsCFrame * CFrame.new(x, boundsSize.Y / 2 + 3, z)).Position
+        local point = (boundsCFrame * CFrame.new(x, boundsSize.Y / 2 + 3, z)).Position
+        return Runtime.StumpNav.Clamp(field, point) or point
     end
     local position = objectPosition(field)
     if not position then return nil end
-    return position + Vector3.new(math.random(-12, 12), 3, math.random(-12, 12))
+    local point = position + Vector3.new(math.random(-12, 12), 3, math.random(-12, 12))
+    return Runtime.StumpNav.Clamp(field, point) or point
+end
+
+-- STUMP FIELD NAV -------------------------------------------------------------
+-- Do luong that cua place (raycast, khong hard-code toa do): zone Stump Field
+-- la hinh chu nhat 110.5 x 113.3, nhung mat di duoc la DINH GOC CAY hinh tron.
+-- 18/529 o luoi 5-stud nam NGOAI stump (san thap hon 20+ stud), tap trung o
+-- goc tay-bac va dai canh bac. Coverage grid chu nhat cu trai deu khap zone
+-- nen cu chon diem roi khoi stump; computeFieldPath cu chi ne MOB chu khong
+-- ne geometry, nen watchdog "stuck -> pathfind" khong giai quyet duoc gi.
+-- Module nay do vung di duoc bang raycast that roi di chuyen bang A* + rut
+-- gon duong (string pulling). Moi ham deu degrade ve no-op khi khong phai
+-- Stump Field hoac luoi chua build duoc.
+Runtime.StumpNav = {}
+do
+    local nav = Runtime.StumpNav
+    local grid = nil
+    local NEIGHBOURS = {
+        {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+        {1, 1}, {1, -1}, {-1, 1}, {-1, -1},
+    }
+    -- Cardinal probes only: a diagonal probe would mark a cell blocked just
+    -- because a wall sits beside it, shrinking the walkable map for nothing.
+    local PROBES = {
+        Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0),
+        Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+    }
+
+    local function cellSize()
+        return math.clamp(tonumber(Config.StumpNavCellSize) or 5, 3, 12)
+    end
+
+    local function build(field)
+        local cf, size = fieldBoundsOf(field)
+        if not cf or not size then return nil end
+        local step = cellSize()
+        local cols = math.max(2, math.ceil(size.X / step))
+        local rows = math.max(2, math.ceil(size.Z / step))
+        local exclude = {}
+        for _, name in ipairs({"FlowerZones", "Collectibles", "Bees", "NPCBees",
+            "Monsters", "Territories", "MonsterSpawners"}) do
+            local folder = workspace:FindFirstChild(name)
+            if folder then table.insert(exclude, folder) end
+        end
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = exclude
+        params.RespectCanCollide = true
+        params.IgnoreWater = true
+        local down = Vector3.new(0, -120, 0)
+        -- Reference surface = the floor under the zone CENTRE. The rim reads
+        -- 20+ studs lower, so a tight band around the centre rejects it.
+        local centreHit = workspace:Raycast(cf.Position + Vector3.new(0, 60, 0), down, params)
+        local refY = centreHit and centreHit.Position.Y or (cf.Position.Y + size.Y * 0.5)
+        local free, cells, list = {}, {}, {}
+        local count = 0
+        for col = 1, cols do
+            free[col], cells[col] = {}, {}
+            for row = 1, rows do
+                local world = (cf * CFrame.new(
+                    (col - 0.5) * step - size.X * 0.5, 0,
+                    (row - 0.5) * step - size.Z * 0.5)).Position
+                local hit = workspace:Raycast(world + Vector3.new(0, 60, 0), down, params)
+                if hit and math.abs(hit.Position.Y - refY) <= 2.5 then
+                    local eye = Vector3.new(world.X, hit.Position.Y + 3, world.Z)
+                    local clear = true
+                    for _, probe in ipairs(PROBES) do
+                        if workspace:Raycast(eye, probe * (step * 0.5 + 2.5), params) then
+                            clear = false
+                            break
+                        end
+                    end
+                    if clear then
+                        free[col][row] = true
+                        cells[col][row] = world
+                        list[#list + 1] = {col, row}
+                        count += 1
+                    end
+                end
+            end
+        end
+        -- A failed/partial sweep (streaming, place not loaded) must not be
+        -- cached as "the field is tiny": leave grid nil and retry next call.
+        if count < math.max(8, cols * rows * 0.2) then return nil end
+        return {
+            Field = field, CFrame = cf, Size = size, Step = step,
+            Cols = cols, Rows = rows, Free = free, Cells = cells, List = list,
+            RefY = refY, Params = params, Down = down,
+        }
+    end
+
+    -- A cell is classified by its CENTRE, but the stump rim is curved: a point
+    -- jittered 2 studs towards the edge of a rim cell can still fall off.
+    -- Re-read the real floor before handing a point to the mover.
+    local function surfaceOk(g, position)
+        local hit = workspace:Raycast(
+            Vector3.new(position.X, g.RefY + 60, position.Z), g.Down, g.Params)
+        return hit ~= nil and math.abs(hit.Position.Y - g.RefY) <= 2.5
+    end
+
+    function nav.Grid(field)
+        if not Config.StumpFieldNav or not field or field.Name ~= "Stump Field" then
+            return nil
+        end
+        if grid and grid.Field == field and grid.Step == cellSize() then return grid end
+        local ok, built = pcall(build, field)
+        grid = ok and built or nil
+        return grid
+    end
+
+    local function cellOf(g, position)
+        local point = g.CFrame:PointToObjectSpace(position)
+        local col = math.floor((point.X + g.Size.X * 0.5) / g.Step) + 1
+        local row = math.floor((point.Z + g.Size.Z * 0.5) / g.Step) + 1
+        if col < 1 or col > g.Cols or row < 1 or row > g.Rows then return nil end
+        return col, row
+    end
+
+    local function nearestCell(g, position)
+        local col, row = cellOf(g, position)
+        if col and g.Free[col][row] then return col, row end
+        local bestCol, bestRow, bestDistance
+        for _, cell in ipairs(g.List) do
+            local world = g.Cells[cell[1]][cell[2]]
+            local distance = (world.X - position.X) ^ 2 + (world.Z - position.Z) ^ 2
+            if not bestDistance or distance < bestDistance then
+                bestCol, bestRow, bestDistance = cell[1], cell[2], distance
+            end
+        end
+        return bestCol, bestRow
+    end
+
+    function nav.IsFree(field, position)
+        local g = nav.Grid(field)
+        if not g or not position then return false end
+        local col, row = cellOf(g, position)
+        return col ~= nil and g.Free[col][row] == true
+    end
+
+    -- Pull an off-stump target back onto the stump. Returns the input unchanged
+    -- when it is already walkable, nil when nav is inactive.
+    function nav.Clamp(field, position)
+        local g = nav.Grid(field)
+        if not g or not position then return nil end
+        local col, row = cellOf(g, position)
+        if col and g.Free[col][row] then return position end
+        local nearCol, nearRow = nearestCell(g, position)
+        if not nearCol then return nil end
+        local world = g.Cells[nearCol][nearRow]
+        return Vector3.new(world.X, position.Y, world.Z)
+    end
+
+    function nav.SegmentClear(field, from, to)
+        local g = nav.Grid(field)
+        if not g or not from or not to then return true end
+        local flatFrom = Vector3.new(from.X, 0, from.Z)
+        local flatTo = Vector3.new(to.X, 0, to.Z)
+        local steps = math.max(1, math.ceil((flatTo - flatFrom).Magnitude / (g.Step * 0.5)))
+        for index = 0, steps do
+            local col, row = cellOf(g, flatFrom:Lerp(flatTo, index / steps))
+            if not col or not g.Free[col][row] then return false end
+        end
+        return true
+    end
+
+    function nav.Blocked(field, from, to)
+        if not nav.Grid(field) then return false end
+        return not nav.SegmentClear(field, from, to)
+    end
+
+    -- A* over the measured walkable cells, then string-pulled into a few long
+    -- legs. Same contract as computeFieldPath: nil = walk straight, otherwise
+    -- usable[1] is the START node and consumers walk from index 2.
+    function nav.Path(field, from, to)
+        local g = nav.Grid(field)
+        if not g or not from or not to then return nil end
+        if nav.SegmentClear(field, from, to) then return nil end
+        local startCol, startRow = nearestCell(g, from)
+        local goalCol, goalRow = nearestCell(g, to)
+        if not startCol or not goalCol then return nil end
+        local rows = g.Rows
+        local startKey = (startCol - 1) * rows + (startRow - 1)
+        local goalKey = (goalCol - 1) * rows + (goalRow - 1)
+        local gScore, cameFrom, closed = {[startKey] = 0}, {}, {}
+        local open = {{Key = startKey, Col = startCol, Row = startRow, F = 0}}
+        local found = false
+        while #open > 0 do
+            local bestIndex = 1
+            for index = 2, #open do
+                if open[index].F < open[bestIndex].F then bestIndex = index end
+            end
+            local node = table.remove(open, bestIndex)
+            if closed[node.Key] then continue end
+            closed[node.Key] = true
+            if node.Key == goalKey then found = true break end
+            for _, dir in ipairs(NEIGHBOURS) do
+                local col, row = node.Col + dir[1], node.Row + dir[2]
+                if col >= 1 and col <= g.Cols and row >= 1 and row <= rows
+                    and g.Free[col][row] then
+                    local diagonal = dir[1] ~= 0 and dir[2] ~= 0
+                    -- No corner cutting: a diagonal needs BOTH orthogonal
+                    -- neighbours free or the leg squeezes through a wall corner.
+                    if not diagonal
+                        or (g.Free[col][node.Row] and g.Free[node.Col][row]) then
+                        local key = (col - 1) * rows + (row - 1)
+                        if not closed[key] then
+                            local cost = gScore[node.Key] + (diagonal and 1.4142 or 1)
+                            if not gScore[key] or cost < gScore[key] then
+                                gScore[key] = cost
+                                cameFrom[key] = node.Key
+                                local dx, dy = math.abs(col - goalCol), math.abs(row - goalRow)
+                                table.insert(open, {
+                                    Key = key, Col = col, Row = row,
+                                    F = cost + math.max(dx, dy) + 0.4142 * math.min(dx, dy),
+                                })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if not found then return nil end
+        local height = math.max(from.Y, to.Y)
+        local raw = {Vector3.new(from.X, height, from.Z)}
+        local key = goalKey
+        local chain = {}
+        while key do
+            chain[#chain + 1] = key
+            key = cameFrom[key]
+        end
+        for index = #chain, 1, -1 do
+            local nodeKey = chain[index]
+            local world = g.Cells[math.floor(nodeKey / rows) + 1][nodeKey % rows + 1]
+            raw[#raw + 1] = Vector3.new(world.X, height, world.Z)
+        end
+        -- A token can sit over the rim: end at the last walkable cell instead
+        -- of an unreachable point the humanoid would stall against forever.
+        if nav.IsFree(field, to) and surfaceOk(g, to) then
+            raw[#raw + 1] = Vector3.new(to.X, height, to.Z)
+        end
+        local usable = {{Position = raw[1]}}
+        local anchor = 1
+        while anchor < #raw do
+            local farthest = anchor + 1
+            for index = #raw, anchor + 2, -1 do
+                if nav.SegmentClear(field, raw[anchor], raw[index]) then
+                    farthest = index
+                    break
+                end
+            end
+            usable[#usable + 1] = {Position = raw[farthest]}
+            anchor = farthest
+        end
+        -- Off-stump goal whose nearest walkable cell is the one we already stand
+        -- on: the "path" is a zero-length no-op. nil lets the caller skip the
+        -- target instead of treating it as routed and walking off the rim.
+        local last = usable[#usable].Position
+        if (Vector3.new(last.X, 0, last.Z)
+            - Vector3.new(from.X, 0, from.Z)).Magnitude < 1 then
+            return nil
+        end
+        return usable
+    end
+
+    -- Coverage sweep over MEASURED walkable cells only (same shuffled-queue
+    -- contract as farmCoveragePoint, so the whole stump still gets swept).
+    function nav.Point(field, root)
+        local g = nav.Grid(field)
+        if not g then return nil end
+        local queue = Runtime.StumpNavQueue
+        if not queue or queue.Grid ~= g or #queue.Order == 0 then
+            queue = {Grid = g, Order = {}}
+            for index = 1, #g.List do queue.Order[index] = index end
+            for index = #queue.Order, 2, -1 do
+                local swap = math.random(index)
+                queue.Order[index], queue.Order[swap] = queue.Order[swap], queue.Order[index]
+            end
+            Runtime.StumpNavQueue = queue
+        end
+        local margin = math.max(8, tonumber(Config.MobThreatRadius) or 16) + 4
+        local lift = g.Size.Y * 0.5 + 3
+        local fallback, fallbackAt
+        for offset = 1, math.min(#queue.Order, 4) do
+            local cell = g.List[queue.Order[offset]]
+            local centre = g.Cells[cell[1]][cell[2]]
+            -- Jitter stays INSIDE the cell (0.4 * step < half a cell), so a
+            -- free cell can never jitter into a rim cell.
+            local point = centre + Vector3.new(
+                (math.random() - 0.5) * g.Step * 0.8, lift,
+                (math.random() - 0.5) * g.Step * 0.8)
+            if not surfaceOk(g, point) then
+                point = centre + Vector3.new(0, lift, 0)
+            end
+            if not Config.FarmAvoidMobs or not root
+                or Runtime.SegmentThreat(root.Position, point, margin) == nil then
+                table.remove(queue.Order, offset)
+                return point
+            end
+            if not fallback then fallback, fallbackAt = point, offset end
+        end
+        if fallbackAt then table.remove(queue.Order, fallbackAt) end
+        return fallback
+    end
 end
 
 -- COVERAGE GRID: fields are flat obstacle-free beds, so "pathfinding" is not
 -- the problem - POINT SELECTION is. Divide the field bounds into a cell grid,
 -- visit cells in shuffled order (jittered inside each cell), reshuffle when
 -- done: guaranteed full-field sweep, clustering impossible, no per-field data.
+-- Stump Field is the exception (see Runtime.StumpNav above): its bed is round.
 local function farmCoveragePoint(field, root)
+    local stumpPoint = Runtime.StumpNav.Point(field, root)
+    if stumpPoint then return stumpPoint end
     local boundsCFrame, boundsSize = fieldBoundsOf(field)
     if not boundsCFrame or not boundsSize then return fieldPoint(field) end
     Runtime.FarmGrids = Runtime.FarmGrids or {}
@@ -3844,6 +4213,16 @@ local function threatPlanRadius(object)
     return 6
 end
 
+-- Farm-side mob ignore list. Global, not local: top-level local registers are
+-- capped at 200 (see header). Quest/bonus routing reads workspace.Monsters
+-- directly, so an ignored mob is still fightable for quests.
+function mobIgnoredForFarm(object)
+    if not object or not Config.IgnoreStumpSnail then return false end
+    -- Inline normalize (same rule as Runtime.NormalizeMobType, which is
+    -- assigned later in the chunk): "Stump Snail" / "StumpSnail" -> stumpsnail.
+    return (string.lower(tostring(object.Name)):gsub("[^%w]", "")) == "stumpsnail"
+end
+
 local function collectThreats(field)
     local threats = {}
     local mobRadius = math.max(8, tonumber(Config.MobThreatRadius) or 16)
@@ -3851,7 +4230,7 @@ local function collectThreats(field)
     if monsters then
         for _, mob in ipairs(monsters:GetChildren()) do
             local mobHumanoid = mob:FindFirstChildOfClass("Humanoid")
-            if mobHumanoid and mobHumanoid.Health > 0 then
+            if mobHumanoid and mobHumanoid.Health > 0 and not mobIgnoredForFarm(mob) then
                 local position = objectPosition(mob)
                 if position then
                     table.insert(threats, {Position = position, Radius = mobRadius, Kind = "Mob"})
@@ -3978,7 +4357,9 @@ function Runtime.DetourWaypoints(from, to, margin)
             end
         end
     end
-    if Runtime.DetourCache[key] == nil then detourCacheCount += 1 end
+    if Runtime.DetourCache[key] == nil then
+        Runtime.DetourCacheCount = (Runtime.DetourCacheCount or 0) + 1
+    end
     Runtime.DetourCache[key] = {At = now, Waypoints = waypoints, Length = length or 0}
     return waypoints, waypoints and length or nil
 end
@@ -5045,6 +5426,22 @@ local function questProgressIncomplete(progress)
     return first < 1
 end
 
+-- Turn-in gate: EVERY task must have a progress entry that reads complete.
+-- Iterating Progress instead of Tasks silently skipped tasks whose entry had
+-- not replicated yet (Progress is sparse right after accepting), so a quest
+-- that was merely ACCEPTED looked "all done" and the bot walked to the bear to
+-- claim it. Same rule incompleteQuestObjectives uses, so farming and turning in
+-- can no longer disagree about whether a quest is finished.
+-- Global, not local: top-level local registers are capped at 200 (see header).
+function questAllTasksComplete(quest)
+    local tasks = quest.Info and quest.Info.Tasks
+    if type(tasks) ~= "table" or #tasks == 0 then return false end
+    for index in ipairs(tasks) do
+        if questProgressIncomplete(quest.Progress[index] or {}) then return false end
+    end
+    return true
+end
+
 local function incompleteQuestObjectives(refresh)
     local stats = getStats(refresh)
     local objectives = {}
@@ -5524,10 +5921,7 @@ local function maintainBearQuests()
             if quest.NPC == npcName then
                 hasQuest = true
                 previousQuest = previousQuest or quest.Name
-                if next(quest.Progress) == nil and #(quest.Info.Tasks or {}) > 0 then allDone = false end
-                for _, progress in pairs(quest.Progress) do
-                    if questProgressIncomplete(progress) then allDone = false break end
-                end
+                if not questAllTasksComplete(quest) then allDone = false end
             end
         end
         -- Diamond Egg stop rule: never interact with Black Bear again once the
@@ -6713,6 +7107,7 @@ local function nearbyLiveMobs(field)
         local humanoid = object:FindFirstChildOfClass("Humanoid")
         local position = objectPosition(object)
         if humanoid and humanoid.Health > 0 and position
+            and not mobIgnoredForFarm(object)
             and (root.Position - position).Magnitude <= Config.MobScanRadius
             and (not field or fieldContainsPosition(field, position, 15)) then
             table.insert(list, {Instance = object, Position = position})
@@ -8442,10 +8837,7 @@ function MaterialSystem.FarmSource(action, entry)
             for _, quest in ipairs(activeBearQuests(true)) do
                 if quest.NPC == materialNPC then
                     hasMaterialQuest = true
-                    if next(quest.Progress) == nil and #(quest.Info.Tasks or {}) > 0 then materialQuestDone = false end
-                    for _, progress in pairs(quest.Progress) do
-                        if questProgressIncomplete(progress) then materialQuestDone = false break end
-                    end
+                    if not questAllTasksComplete(quest) then materialQuestDone = false end
                 end
             end
             if (not hasMaterialQuest or materialQuestDone) and interactQuestNPC(materialNPC) then return true end
@@ -9224,7 +9616,7 @@ local function applyLowGraphics(enabled)
     -- reads, not 41k writes.
     local function fastRehideNode(node)
         -- Kind map tu FastHidden: bo IsA per node (41k IsA moi pass = GC/CPU
-        -- churn) va skip node chua tung mark (models...).
+        -- churn). Node chua mark thi hide mot lan roi danh dau "skip".
         local kind = Runtime.FastHidden[node]
         if not kind then
             -- Catch-all: nodes added DURING the boot sweep (before DescendantAdded
@@ -9297,9 +9689,10 @@ local function applyLowGraphics(enabled)
     local optimizeQueue, optimizeHead, optimizeTail = {}, 1, 0
     local function enqueueOptimize(object)
         if not object then return end
-        -- #optimizeQueue is useless here: drained slots are nil'd, so appending
-        -- at #queue+1 lands BELOW optimizeHead and the object is never processed
-        -- (new flowers/tokens stayed visible). Track the tail explicitly.
+        -- #optimizeQueue is a border search over a hole-y array (drained slots
+        -- are nil'd): appending at #queue+1 lands below optimizeHead (skipped)
+        -- or on a pending slot (overwritten). Measured: 175 of 360 queued
+        -- objects lost under a continuous flood. Track the tail explicitly.
         optimizeTail += 1
         optimizeQueue[optimizeTail] = object
     end
