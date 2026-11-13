@@ -12,15 +12,6 @@
     watchdog sets Runtime.FpsLow (2 low 5s-windows to enter, 2 good to
     leave) - re-hide interval x2 and scanner cadence floored at 0.5s while
     low. Both default ON via FixLagQueueBatch / FixLagAdaptive.
-    DEAD-CODE SWEEP: static scan of all 328 function definitions found 8 with
-    zero references anywhere (incl. loader/ui.lua, no string/dynamic dispatch):
-    Runtime.TeleRewardsClaimed, Runtime.MarkTeleRewardsDone, hasAnyBee,
-    isCharacterDescendant, Runtime.FindBestToken, Runtime.GetQuestObjectives,
-    Runtime.ScanMob, Runtime.GetMaterialDeficits - all deleted, plus the
-    now-orphaned nearbyLiveMob (its only caller was ScanMob), plus 2 unused
-    service locals (UserInputService, HttpService). 95 functions are called
-    exactly once (live scheduler steps) and were kept; apparent duplicates
-    named scan/normalize/mark are scoped locals inside different functions.
     Place: Bee Swarm Simulator (1537690962)
 
     Main flow:
@@ -379,15 +370,16 @@ local DEFAULT_CONFIG = {
     EventBeeCheckInterval = 0.5,
     EventBeeStatsRefreshInterval = 2,
     EventBeeRetryCooldown = 12,
-    -- PackageTypes verified from Workspace.Shops.TicketShop.Items; extras cover strict executors.
+    -- Shop/Item names verified against Workspace.Shops.TicketShop.Items in the
+    -- place model; PackageTypes carry the real ItemType (TabbyBee etc).
     EventBeeSequence = {
-        {Shop = "Ticket Tent", Item = "Tabby Bee Egg", Category = "Eggs", Type = "Tabby", TicketCost = 500,
+        {Shop = "TicketShop", Item = "Tabby Bee", Category = "Eggs", Type = "Tabby", TicketCost = 500,
             PackageTypes = {"TabbyBee", "Tabby Bee", "Tabby"}},
-        {Shop = "Ticket Tent", Item = "Photon Bee Egg", Category = "Eggs", Type = "Photon", TicketCost = 500,
+        {Shop = "TicketShop", Item = "Photon Bee", Category = "Eggs", Type = "Photon", TicketCost = 500,
             PackageTypes = {"PhotonBee", "Photon Bee", "Photon"}},
-        {Shop = "Ticket Tent", Item = "Cobalt Bee Egg", Category = "Eggs", Type = "Cobalt", TicketCost = 250,
+        {Shop = "TicketShop", Item = "Cobalt Bee", Category = "Eggs", Type = "Cobalt", TicketCost = 250,
             PackageTypes = {"CobaltBee", "Cobalt Bee", "Cobalt"}},
-        {Shop = "Ticket Tent", Item = "Crimson Bee Egg", Category = "Eggs", Type = "Crimson", TicketCost = 250,
+        {Shop = "TicketShop", Item = "Crimson Bee", Category = "Eggs", Type = "Crimson", TicketCost = 250,
             PackageTypes = {"CrimsonBee", "Crimson Bee", "Crimson"}},
     },
     TeleRewardDwellSeconds = 2,
@@ -555,7 +547,7 @@ local DEFAULT_CONFIG = {
         }},
         {TargetBees = 45, Items = {
             {Shop = "Petal Shop", Item = "Petal Belt", Category = "Accessory", Type = "Petal Belt", HoneyCost = 15000000000, RequiresMaterials = true, Optional = true},
-            {Shop = "Coconut Cave", Item = "Coconut Canister", Category = "Accessory", Type = "Coconut Canister", HoneyCost = 25000000000, RequiresMaterials = true, Optional = true},
+            {Shop = "CoconutShop", Item = "Coconut Canister", Category = "Accessory", Type = "Coconut Canister", HoneyCost = 25000000000, RequiresMaterials = true, Optional = true},
         }},
     },
     SprinklerSequence = {
@@ -758,8 +750,10 @@ end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
 local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
 local LogService = game:GetService("LogService")
 
 local Player = Players.LocalPlayer
@@ -2324,7 +2318,12 @@ end
 function livePlayerHas(entry)
     -- ClientStatCache updates slowly after Purchase on some mobile executors.
     -- Character/Backpack replicate faster than stats as proof for collectors/accessories.
-    local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
+    -- ipairs stops at the first nil, so a hole here would silently skip the
+    -- Backpack whenever the character is dead/respawning. Build it dense.
+    local containers = {}
+    if Player.Character then table.insert(containers, Player.Character) end
+    local backpack = Player:FindFirstChildOfClass("Backpack")
+    if backpack then table.insert(containers, backpack) end
     for _, container in ipairs(containers) do
         if container then
             local exact = container:FindFirstChild(tostring(entry.Type), true)
@@ -2657,7 +2656,12 @@ function Runtime.ScanStarterGear()
     getCharacter(3)
     Runtime.SeedGearScanned = true
     Runtime.SeedGear = {}
-    local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
+    -- ipairs stops at the first nil, so a hole here would silently skip the
+    -- Backpack whenever the character is dead/respawning. Build it dense.
+    local containers = {}
+    if Player.Character then table.insert(containers, Player.Character) end
+    local backpack = Player:FindFirstChildOfClass("Backpack")
+    if backpack then table.insert(containers, backpack) end
     for _, container in ipairs(containers) do
         if container then
             for _, object in ipairs(container:GetChildren()) do
@@ -2821,6 +2825,28 @@ local function saveTeleRewardLedger(ledger)
     pcall(writefileFn, teleRewardFilePath(), table.concat(keys, "\n"))
 end
 
+function Runtime.TeleRewardsClaimed()
+    -- LEDGER LA NGUON TRUTH DUY NHAT: CollectWorldRewards tu check per-spot
+    -- (skip spot da lay) nen ham nay chi con dung cho truy van ben ngoai.
+    local spots = Config.TeleRewardSpots or {}
+    if #spots == 0 then return true end
+    local ledger = loadTeleRewardLedger(spots)
+    for index, spot in ipairs(spots) do
+        if not ledger[teleRewardSpotKey(spot, index)] then return false end
+    end
+    return true
+end
+
+function Runtime.MarkTeleRewardsDone()
+    -- Force-finish: mark every configured spot done.
+    local spots = Config.TeleRewardSpots or {}
+    local ledger = loadTeleRewardLedger(spots)
+    for index, spot in ipairs(spots) do
+        ledger[teleRewardSpotKey(spot, index)] = true
+    end
+    saveTeleRewardLedger(ledger)
+end
+
 -- Tele reward phase (from telebss rewards.txt): instantly teleport to each
 -- map reward point on game entry, BEFORE claiming hive/hatching. Each point: set
 -- CFrame directly onto the reward, stand still + nudge up/down via CFrame
@@ -2941,6 +2967,10 @@ function Runtime.CollectWorldRewards()
         Runtime.TeleRewardsCollected, #spots, skipped, alreadyDone, remaining))
     task.wait(0.2)
     return true
+end
+
+local function hasAnyBee()
+    return beeCount() > 0
 end
 
 local function rawEggCount(eggType)
@@ -3831,7 +3861,12 @@ local function collectThreats(field)
     end
     -- Hazards: shallow name-pattern scans only (cheap, TTL-cached).
     local patterns = Config.HazardNamePatterns or {}
-    local containers = {workspace:FindFirstChild("Effects"), field}
+    -- Dense list: workspace.Effects is often absent, and a nil first slot would
+    -- make ipairs skip the field entirely (hazard scan silently dead).
+    local containers = {}
+    local effects = workspace:FindFirstChild("Effects")
+    if effects then table.insert(containers, effects) end
+    if field then table.insert(containers, field) end
     for _, container in ipairs(containers) do
         if container then
             for _, object in ipairs(container:GetChildren()) do
@@ -3904,7 +3939,7 @@ end
 -- Detour cache keyed by rounded endpoints: repeated queries inside one sweep
 -- reuse the ComputeAsync result instead of paying for it again.
 Runtime.DetourCache = {}
-local detourCacheCount = 0
+-- Counter chuyen vao Runtime (giam top-level local register)
 
 function Runtime.DetourWaypoints(from, to, margin)
     margin = margin or 0
@@ -3914,9 +3949,9 @@ function Runtime.DetourWaypoints(from, to, margin)
     if cached and now - cached.At < (tonumber(Config.TokenDetourCacheSeconds) or 1) then
         return cached.Waypoints, cached.Length
     end
-    if detourCacheCount > 32 then
+    if (Runtime.DetourCacheCount or 0) > 32 then
         Runtime.DetourCache = {}
-        detourCacheCount = 0
+        Runtime.DetourCacheCount = 0
     end
     local waypoints, length
     local _, _, root = getCharacter(1)
@@ -4050,6 +4085,11 @@ Runtime.FlowerEffectIndex = setmetatable({}, {__mode = "k"}) -- [tile] = "Sparkl
 do
     local watched = {} -- [folderName] = {Folder = Instance, Conns = {...}}
     local populatedFlowerEffects = false
+    local function isCharacterDescendant(inst)
+        local model = inst and inst:FindFirstAncestorOfClass("Model")
+        return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
+    end
+
     local function wake()
         Runtime.LastScannerHitAt = os.clock()
     end
@@ -4324,6 +4364,11 @@ local function findBestTokenInStandingField()
         RootX = root.Position.X, RootZ = root.Position.Z,
     }
     return first and first.Token or nil, score, route
+end
+
+Runtime.FindBestToken = function()
+    local token, score = findBestTokenInStandingField()
+    return token, score, Runtime.LastTokenPlan
 end
 
 -- Pop token TIEP THEO tu route planner da tinh san (khong re-scan). Token
@@ -6676,8 +6721,29 @@ local function nearbyLiveMobs(field)
     return list
 end
 
+local function nearbyLiveMob(field)
+    local _, _, root = getCharacter(1)
+    if not root then return nil end
+    local nearest, nearestDistance
+    for _, mob in ipairs(nearbyLiveMobs(field)) do
+        local distance = (root.Position - mob.Position).Magnitude
+        if not nearestDistance or distance < nearestDistance then
+            nearest, nearestDistance = mob.Instance, distance
+        end
+    end
+    return nearest
+end
+
+Runtime.GetQuestObjectives = function(refresh)
+    return incompleteQuestObjectives(refresh == true)
+end
 Runtime.GoToNPC = interactQuestNPC
 Runtime.IsFieldUnlocked = fieldUnlocked
+Runtime.ScanMob = function()
+    local field = Runtime.CurrentField ~= "" and findField(Runtime.CurrentField) or standingField()
+    return nearbyLiveMob(field)
+end
+
 -- When hit, retreat toward the field center if it is safe from EVERY mob.
 -- Otherwise pick the candidate point with the largest minimum distance to all
 -- mobs; a point inside any mob's danger zone is rejected outright. Returns nil
@@ -8450,6 +8516,10 @@ function MaterialSystem.Work(entry)
     return false
 end
 
+Runtime.GetMaterialDeficits = function(itemType)
+    local entry = {Type = itemType, Materials = MaterialSystem.Gear[itemType] or {}}
+    return MaterialSystem.Deficits(entry, MaterialSystem.Stats(true))
+end
 Runtime.GetBlenderStatus = MaterialSystem.BlenderStatus
 
 local function meteorPosition(value)
@@ -8940,17 +9010,21 @@ local function applyLowGraphics(enabled)
                 end)
             end
         elseif object:IsA("Decal") or object:IsA("Texture") then
-            if hidden or (Config.FixLagRemoveTextures and not playerVisual) then object.Transparency = 1 end
+            if hidden then
+                -- LTM survives the regrow tween that resets Transparency to 0.
+                if object.LocalTransparencyModifier ~= 1 then object.LocalTransparencyModifier = 1 end
+                if object.Transparency ~= 1 then object.Transparency = 1 end
+            elseif Config.FixLagRemoveTextures and not playerVisual then
+                object.Transparency = 1
+            end
         elseif object:IsA("BillboardGui") or object:IsA("SurfaceGui") then
             -- Token/bee labels float on GUI layers that part Transparency
             -- never hides - disable the whole gui when its group is hidden.
             if hidden or (Config.FixLagRemoveTextures and not playerVisual) then
                 pcall(function() object.Enabled = false end)
             end
-        elseif object:IsA("PointLight") or object:IsA("SpotLight") or object:IsA("Sparkles") then
-            if hidden then pcall(function() object.Enabled = false end) end
         elseif object:IsA("ParticleEmitter") then
-            if Config.FixLagHideParticles then
+            if hidden or Config.FixLagHideParticles then
                 pcall(function()
                     object.Enabled = false
                     object.Rate = 0
@@ -8960,7 +9034,7 @@ local function applyLowGraphics(enabled)
                 keepDisabled(object)
             end
         elseif object:IsA("Trail") then
-            if Config.FixLagHideParticles then
+            if hidden or Config.FixLagHideParticles then
                 pcall(function()
                     object.Enabled = false
                     object.Lifetime = 0
@@ -8969,12 +9043,12 @@ local function applyLowGraphics(enabled)
                 keepDisabled(object)
             end
         elseif object:IsA("Beam") or object:IsA("Smoke") or object:IsA("Fire") or object:IsA("Sparkles") then
-            if Config.FixLagHideParticles then
+            if hidden or Config.FixLagHideParticles then
                 object.Enabled = false
                 keepDisabled(object)
             end
         elseif object:IsA("PointLight") or object:IsA("SpotLight") or object:IsA("SurfaceLight") then
-            if Config.FixLagDisableLights then
+            if hidden or Config.FixLagDisableLights then
                 object.Enabled = false
                 keepDisabled(object)
             end
@@ -9108,6 +9182,10 @@ local function applyLowGraphics(enabled)
             -- already zeroes sun shadow cost for every part.
             Runtime.FastHidden[node] = "part"
         elseif node:IsA("Decal") or node:IsA("Texture") then
+            -- LTM, not just Transparency: the regrow animation tweens
+            -- Transparency back to 0, which used to fade the flower texture
+            -- back in. LTM is client-only and the game never writes it.
+            if node.LocalTransparencyModifier ~= 1 then node.LocalTransparencyModifier = 1 end
             if node.Transparency ~= 1 then node.Transparency = 1 end
             Runtime.FastHidden[node] = "decal"
         elseif node:IsA("BillboardGui") or node:IsA("SurfaceGui") then
@@ -9148,11 +9226,20 @@ local function applyLowGraphics(enabled)
         -- Kind map tu FastHidden: bo IsA per node (41k IsA moi pass = GC/CPU
         -- churn) va skip node chua tung mark (models...).
         local kind = Runtime.FastHidden[node]
-        if not kind then return end
+        if not kind then
+            -- Catch-all: nodes added DURING the boot sweep (before DescendantAdded
+            -- was bound) never got hidden at all. Hide them here once, then mark
+            -- "skip" so non-visual nodes cost one hash read on later passes.
+            fastHideNode(node)
+            if not Runtime.FastHidden[node] then Runtime.FastHidden[node] = "skip" end
+            return
+        end
+        if kind == "skip" then return end
         if kind == "part" then
             if node.Transparency ~= 1 then node.Transparency = 1 end
             if node.LocalTransparencyModifier ~= 1 then node.LocalTransparencyModifier = 1 end
         elseif kind == "decal" then
+            if node.LocalTransparencyModifier ~= 1 then node.LocalTransparencyModifier = 1 end
             if node.Transparency ~= 1 then node.Transparency = 1 end
         elseif kind == "gui" then
             if not node.Enabled then return end
@@ -9162,20 +9249,36 @@ local function applyLowGraphics(enabled)
             if node.Rate ~= 0 then node.Rate = 0 end
         end
     end
-    local priorityFolders = {}
-    if Config.FixLagHideFlowers then table.insert(priorityFolders, workspace:FindFirstChild("Flowers")) end
+    local priorityFolderNames = {}
+    if Config.FixLagHideFlowers then table.insert(priorityFolderNames, "Flowers") end
     if Config.FixLagHideBees then
-        table.insert(priorityFolders, workspace:FindFirstChild("Bees"))
-        table.insert(priorityFolders, workspace:FindFirstChild("NPCBees"))
+        table.insert(priorityFolderNames, "Bees")
+        table.insert(priorityFolderNames, "NPCBees")
     end
-    if Config.FixLagHideTokens then table.insert(priorityFolders, workspace:FindFirstChild("Collectibles")) end
+    if Config.FixLagHideTokens then table.insert(priorityFolderNames, "Collectibles") end
     if Config.FixLagHideHives then
-        table.insert(priorityFolders, workspace:FindFirstChild("Honeycombs"))
-        table.insert(priorityFolders, workspace:FindFirstChild("HivePlatforms"))
+        table.insert(priorityFolderNames, "Honeycombs")
+        table.insert(priorityFolderNames, "HivePlatforms")
     end
-    for _, folder in ipairs(priorityFolders) do
-        if folder then fastHideTree(folder) end
+    -- Resolve by NAME every pass, not once at boot: a folder captured at boot
+    -- that the game later replaces (or that did not exist yet) left the re-hide
+    -- walk pointing at a dead instance, so regrown flowers stayed visible.
+    local function resolvePriorityFolders()
+        local folders = {}
+        for _, name in ipairs(priorityFolderNames) do
+            local folder = workspace:FindFirstChild(name)
+            if folder then table.insert(folders, folder) end
+        end
+        return folders
     end
+    local priorityHidden = setmetatable({}, {__mode = "k"})
+    local function hidePriorityFolder(folder)
+        if priorityHidden[folder] then return end
+        priorityHidden[folder] = true
+        fastHideTree(folder)
+    end
+    local priorityFolders = resolvePriorityFolders()
+    for _, folder in ipairs(priorityFolders) do hidePriorityFolder(folder) end
     local scanBatch = math.max(50, tonumber(Config.FixLagScanBatch) or 350)
     for index, object in ipairs(workspace:GetDescendants()) do
         -- Priority-hidden nodes (41k flower descendants...) skip the full
@@ -9191,16 +9294,20 @@ local function applyLowGraphics(enabled)
     -- optimizeObject synchronously inside every event (hundreds of
     -- ancestor walks in a single frame). Now events only enqueue, and one
     -- worker drains at most FixLagQueueBatch objects per tick.
-    local optimizeQueue, optimizeHead = {}, 1
+    local optimizeQueue, optimizeHead, optimizeTail = {}, 1, 0
     local function enqueueOptimize(object)
         if not object then return end
-        optimizeQueue[#optimizeQueue + 1] = object
+        -- #optimizeQueue is useless here: drained slots are nil'd, so appending
+        -- at #queue+1 lands BELOW optimizeHead and the object is never processed
+        -- (new flowers/tokens stayed visible). Track the tail explicitly.
+        optimizeTail += 1
+        optimizeQueue[optimizeTail] = object
     end
     task.spawn(function()
         local batch = math.max(25, tonumber(Config.FixLagQueueBatch) or 150)
         while Runtime.Running do
             local processed = 0
-            while optimizeHead <= #optimizeQueue and processed < batch do
+            while optimizeHead <= optimizeTail and processed < batch do
                 local object = optimizeQueue[optimizeHead]
                 optimizeQueue[optimizeHead] = nil
                 optimizeHead += 1
@@ -9209,8 +9316,8 @@ local function applyLowGraphics(enabled)
                     pcall(optimizeObject, object)
                 end
             end
-            if optimizeHead > 1000 and optimizeHead > #optimizeQueue then
-                optimizeQueue, optimizeHead = {}, 1
+            if optimizeHead > optimizeTail then
+                optimizeQueue, optimizeHead, optimizeTail = {}, 1, 0
             end
             task.wait(processed > 0 and 0 or 0.1)
         end
@@ -9272,8 +9379,10 @@ local function applyLowGraphics(enabled)
                 Runtime.LastSprinklerField = nil
                 Runtime.SprinklerFieldHas = nil
             end
+            priorityFolders = resolvePriorityFolders()
             for _, folder in ipairs(priorityFolders) do
-                if folder and folder.Parent then
+                if folder.Parent then
+                    hidePriorityFolder(folder)
                     fastWalk(folder, fastRehideNode, 2000)
                 end
             end
@@ -9532,7 +9641,12 @@ function Runtime.RJGatePassed(quiet)
         end
     end
     scan(getStats(false), 0)
-    local containers = {Player.Character, Player:FindFirstChildOfClass("Backpack")}
+    -- ipairs stops at the first nil, so a hole here would silently skip the
+    -- Backpack whenever the character is dead/respawning. Build it dense.
+    local containers = {}
+    if Player.Character then table.insert(containers, Player.Character) end
+    local backpack = Player:FindFirstChildOfClass("Backpack")
+    if backpack then table.insert(containers, backpack) end
     for _, container in ipairs(containers) do
         if container then
             for _, object in ipairs(container:GetDescendants()) do
@@ -9883,7 +9997,7 @@ local function buyStarTreat()
             end
         end
     end
-    package = package or {Category = "Treats", Type = "StarTreat"}
+    package = package or {Category = "Eggs", Type = "StarTreat"}
     local before = starTreatStock(forceFreshStats())
     local ok = remoteCall("ItemPackageEvent", "Purchase",
         {Category = package.Category, Type = package.Type, Amount = 1})
