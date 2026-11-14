@@ -13,7 +13,12 @@
 --   * FIRE: patch luc chay = "FireParticles" con tren tile hoa trong
 --     workspace.Flowers (atlas tracked.antfire) -> avoid tile do ban kinh 8.
 --   * Lawnmower: Door color "Really red" -> lane do; + LUON avoid lane Z=612.
+--     Lane 574/593 chi nguy hiem khi door do HOAC mower dang chay trong lane
+--     (Obstacles); mower bi remove -> lane an toan tro lai (atlas).
 --   * Tokens drop vao workspace.Collectibles - nhat trong bounds Ant Field.
+--   * Amulet: xong challenge -> RewardsPopUp.AmuletFrame (InfoOld/InfoNew la
+--     stat amulet cu/moi). Auto so sanh tung stat: new manh hon thi REPLACE,
+--     yeu hon thi KEEP (Config.AutoAmulet / AmuletKeepOld).
 --
 -- CHAY: execute file trong BSS (place 1537690962). Dung bang:
 --   getgenv().__BSS_ANT.Stop()
@@ -56,6 +61,9 @@ local Config = {
     TokenFarmDistance = 60,     -- token trong tam nay se uu tien tren duong farm
     Tick = 0.2,
     TokenMaxDistance = 90,      -- token xa hon thi bo
+    AutoAmulet = true,          -- xong challenge: tu xu ly popup Ant Amulet
+    AmuletKeepOld = false,      -- true = luon giu amulet cu (bo qua so sanh)
+    AmuletPopupTimeout = 12,    -- cho popup amulet sau khi xong challenge
 }
 do
     local overrides = ENV.BSS_ANT_CONFIG
@@ -68,6 +76,7 @@ local State = {
     Running = true,
     Status = "starting",
     Challenges = 0,
+    AmuletDecisions = {},
 }
 
 local function status(text)
@@ -188,35 +197,48 @@ local function buildAvoidList(rootPosition)
     end
     local toy = workspace:FindFirstChild("Toys") and workspace.Toys:FindFirstChild("Ant Challenge")
     if toy then
-        -- lane may cay: door mau "Really red" = lane dang chay + lane hang dinh
+        -- Lane may cay (atlas): Door1 do -> Z=574, Door2 do -> Z=593, Z=612
+        -- LUON nguy hiem. Lane 574/593 chi avoid khi door do (sap chay) HOAC
+        -- mower dang chay trong lane do; mower bien mat (Obstacles rong) ->
+        -- lane an toan tro lai, khong mat field nua.
         local walls = toy:FindFirstChild("Walls")
+        local obstacles = toy:FindFirstChild("Obstacles")
+        local activeZ = {}
         if walls then
-            local lanes = {}
             for _, wallName in ipairs({"WallLeft", "WallRight"}) do
                 local wall = walls:FindFirstChild(wallName)
                 if wall then
                     for _, door in ipairs(wall:GetChildren()) do
                         if door:IsA("BasePart") and door.BrickColor.Name == "Really red" then
-                            lanes[door.Position.Z] = true
+                            activeZ[door.Position.Z] = true
                         end
                     end
                 end
             end
-            lanes[Config.AlwaysAvoidLaneZ] = true
-            for z in pairs(lanes) do
-                table.insert(list, {Position = Vector3.new(rootPosition.X, 0, z), Radius = Config.MowerLaneRadius, Kind = "lane", Flat = true})
-            end
         end
-        -- may cay runtime (Obstacles)
-        local obstacles = toy:FindFirstChild("Obstacles")
         if obstacles then
             for _, mower in ipairs(obstacles:GetChildren()) do
                 local part = mower:IsA("BasePart") and mower
                     or mower:FindFirstChildWhichIsA("BasePart", true)
                 if part then
                     table.insert(list, {Position = part.Position, Radius = Config.MowerRadius, Kind = "mower"})
+                    -- mower dang chay -> lane cua no nguy hiem du door chua do
+                    local nearestZ, nearestDist
+                    for _, laneZ in ipairs({574, 593, 612}) do
+                        local dist = math.abs(part.Position.Z - laneZ)
+                        if not nearestDist or dist < nearestDist then
+                            nearestZ, nearestDist = laneZ, dist
+                        end
+                    end
+                    if nearestZ and nearestDist <= 12 then
+                        activeZ[nearestZ] = true
+                    end
                 end
             end
+        end
+        activeZ[Config.AlwaysAvoidLaneZ] = true
+        for z in pairs(activeZ) do
+            table.insert(list, {Position = Vector3.new(rootPosition.X, 0, z), Radius = Config.MowerLaneRadius, Kind = "lane", Flat = true})
         end
     end
     return list
@@ -333,7 +355,20 @@ local function nextCoveragePoint(rootPosition, avoid)
     return nil
 end
 
--- ESCAPE FAN: thử 7 hướng quạt quanh hướng thoát, clamp điểm vào trong
+-- Diem dich phai NGOAI moi threat (chi check duong di la chua du: buoc thoat
+-- co the dat chan vao dung con ant khac).
+local function pointIsClean(point, avoid, margin)
+    local flat = Vector3.new(point.X, 0, point.Z)
+    for _, threat in ipairs(avoid) do
+        local flatThreat = Vector3.new(threat.Position.X, 0, threat.Position.Z)
+        if (flat - flatThreat).Magnitude <= threat.Radius + (margin or 0) then
+            return false
+        end
+    end
+    return true
+end
+
+-- ESCAPE FAN: thử 8 hướng quạt quanh hướng thoát, clamp điểm vào trong
 -- field (lane sát tường không còn trượt dọc lane), CHỈ nhận hướng mà cả
 -- đoạn đi lẫn điểm đích đều ngoài MỌI threat - hết oscillate giữa đàn ant.
 local function findEscape(root, threat, avoid, step)
@@ -342,29 +377,40 @@ local function findEscape(root, threat, avoid, step)
     if away.Magnitude < 0.5 then away = Vector3.new(1, 0, 0) end
     local baseAngle = math.atan2(away.Z, away.X)
     local cf, size = antFieldZone()
-    for _, deltaDeg in ipairs({0, 40, -40, 80, -80, 120, -120, 180}) do
-        local angle = baseAngle + math.rad(deltaDeg)
-        local point = root + Vector3.new(math.cos(angle), 0, math.sin(angle)) * step
-        if cf and size then
-            local localPoint = cf:PointToObjectSpace(point)
-            localPoint = Vector3.new(
-                math.clamp(localPoint.X, -size.X * 0.5 + 4, size.X * 0.5 - 4), localPoint.Y,
-                math.clamp(localPoint.Z, -size.Z * 0.5 + 4, size.Z * 0.5 - 4))
-            point = cf:PointToWorldSpace(localPoint)
-        end
-        if not blockedByAvoid(root, point, avoid, 1) then
-            return point
-        end
-    end
-    -- Mọi hướng bị chặn: điểm xa threat nhất có thể (clamp phía đối diện).
-    if cf and size then
-        local localPoint = cf:PointToObjectSpace(root + away.Unit * Config.EvadeStep)
+    local function clampToField(point)
+        if not cf or not size then return point end
+        local localPoint = cf:PointToObjectSpace(point)
         localPoint = Vector3.new(
             math.clamp(localPoint.X, -size.X * 0.5 + 4, size.X * 0.5 - 4), localPoint.Y,
             math.clamp(localPoint.Z, -size.Z * 0.5 + 4, size.Z * 0.5 - 4))
         return cf:PointToWorldSpace(localPoint)
     end
-    return root + away.Unit * step
+    -- Root dang NAM TRONG threat (do nearestThreat moi bao danger) -> sample
+    -- dau tien cua blockedByAvoid luon dinh. Check duong di bat dau tu 4 stud
+    -- along huong thoat: doan dau la buoc thoat da commit, doan sau phai sach.
+    local function escapePathClean(from, to, margin)
+        local delta = to - from
+        local length = delta.Magnitude
+        local start = length > 4 and from + delta.Unit * 4 or from
+        return not blockedByAvoid(start, to, avoid, margin)
+    end
+    for _, deltaDeg in ipairs({0, 40, -40, 80, -80, 120, -120, 180}) do
+        local angle = baseAngle + math.rad(deltaDeg)
+        local point = clampToField(root + Vector3.new(math.cos(angle), 0, math.sin(angle)) * step)
+        if pointIsClean(point, avoid, 1) and escapePathClean(root, point, 1) then
+            return point
+        end
+    end
+    -- Mọi hướng bị chặn: điểm xa threat nhất có thể, vẫn ưu tiên điểm sạch.
+    local fallback = clampToField(root + away.Unit * step)
+    for _, deltaDeg in ipairs({0, 60, -60, 120, -120, 180}) do
+        local angle = baseAngle + math.rad(deltaDeg)
+        local point = clampToField(root + Vector3.new(math.cos(angle), 0, math.sin(angle)) * step)
+        if pointIsClean(point, avoid, 0) and escapePathClean(root, point, 0) then
+            return point
+        end
+    end
+    return fallback
 end
 
 -- =============================================================================
@@ -486,6 +532,188 @@ local function nearestToken(rootPosition)
         end
     end
     return best, bestDistance
+end
+
+-- =============================================================================
+-- ANT AMULET: keep-old/new (so sanh stat amulet cu vs moi)
+-- =============================================================================
+-- Xong challenge, game hien PlayerGui.ScreenGui.RewardsPopUp:
+--   AmuletFrame.Title.Text  = "Ant Amulet" (tier)
+--   AmuletFrame.InfoOld.Text = stat amulet DANG DEO (rong neu chua co)
+--   AmuletFrame.InfoNew.Text = stat amulet MOI
+--   YesButton/NoButton; Yes -> QuestionBox.Box.YesButton xac nhan thay.
+-- Format stat (verify tu remote that + atlas): "+48% Convert Rate",
+-- "+1% Critical Chance", "x1.5 Pollen", "-3% Capacity", "+Passive: ...".
+local function parseAmuletStats(text)
+    local stats, passives = {}, {}
+    for line in tostring(text or ""):gmatch("[^\r\n]+") do
+        line = line:gsub(",", "") -- atlas strip thousands separators
+        local passive = line:match("^%s*%+?Passive:%s*(.+)$")
+        if passive then
+            passives[passive:gsub("%s+$", "")] = true
+        else
+            -- ([x+%-]?%d+%.?%d*)(%%?) (.+) - pattern chuan cua atlas
+            local value, percent, name = line:match("([x+%-]?%d+%.?%d*)(%%?)%s+(.+)")
+            if value and name then
+                local sign = value:sub(1, 1)
+                local number = tonumber(value:match("%d+%.?%d*")) or 0
+                if sign == "-" then number = -number end
+                -- x1.5 = nhan 1.5 = +50% bonus -> chuan hoa ve bonus fraction
+                -- de so sanh cung thang do voi "+50%" (0.5).
+                if sign == "x" then number = number - 1 end
+                if percent == "%" then number = number / 100 end
+                local key = name:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+                stats[key] = (stats[key] or 0) + number
+            end
+        end
+    end
+    return stats, passives
+end
+
+-- So sanh tung stat (khong weight tu che): new thang khi KHONG stat nao kem
+-- hon va it nhat 1 stat hon; mixed/hoa -> keep old (an toan, dung yeu cau
+-- "new yeu hon thi keep"). Passive: them = better, mat = worse.
+local function compareAmulets(oldText, newText)
+    local oldStats, oldPassives = parseAmuletStats(oldText)
+    local newStats, newPassives = parseAmuletStats(newText)
+    local better, worse, notes = 0, 0, {}
+    local function note(text)
+        if #notes < 4 then table.insert(notes, text) end
+    end
+    for key, value in pairs(newStats) do
+        local oldValue = oldStats[key] or 0
+        if value > oldValue + 1e-9 then
+            better += 1
+            note(string.format("%s: %g -> %g", key, oldValue, value))
+        elseif value < oldValue - 1e-9 then
+            worse += 1
+            note(string.format("%s: %g -> %g", key, oldValue, value))
+        end
+    end
+    for key, oldValue in pairs(oldStats) do
+        if newStats[key] == nil then
+            worse += 1
+            note(string.format("%s: %g -> mat", key, oldValue))
+        end
+    end
+    for passive in pairs(newPassives) do
+        if not oldPassives[passive] then
+            better += 1
+            note("+Passive " .. passive)
+        end
+    end
+    for passive in pairs(oldPassives) do
+        if not newPassives[passive] then
+            worse += 1
+            note("-Passive " .. passive)
+        end
+    end
+    return better, worse, notes
+end
+
+local function guiVisible(object)
+    local current = object
+    while current and current ~= Player do
+        if current:IsA("GuiObject") and not current.Visible then return false end
+        current = current.Parent
+    end
+    return true
+end
+
+local function clickButton(button)
+    if not button or not button:IsA("GuiButton") or not guiVisible(button) then return false end
+    local fireSignal = rawget(ENV, "firesignal")
+    if type(fireSignal) == "function" then
+        local ok = pcall(fireSignal, button.MouseButton1Click)
+        if ok then return true end
+    end
+    return pcall(button.Activate, button)
+end
+
+local function handleAmuletPopup()
+    if not Config.AutoAmulet then return end
+    local deadline = os.clock() + Config.AmuletPopupTimeout
+    local popup
+    while os.clock() < deadline and State.Running do
+        local screenGui = Player:FindFirstChild("PlayerGui")
+            and Player.PlayerGui:FindFirstChild("ScreenGui")
+        popup = screenGui and screenGui:FindFirstChild("RewardsPopUp")
+        if popup and popup.Visible then break end
+        popup = nil
+        task.wait(0.25)
+    end
+    if not popup then
+        status("Khong thay RewardsPopUp (timeout) - bo qua amulet")
+        return
+    end
+    local frame = popup:FindFirstChild("AmuletFrame")
+    if not frame or not guiVisible(frame) then
+        status("Popup khong phai amulet - bo qua")
+        return
+    end
+    local title = frame:FindFirstChild("Title")
+    local infoOld = frame:FindFirstChild("InfoOld")
+    local infoNew = frame:FindFirstChild("InfoNew")
+    local oldText = infoOld and infoOld.Text or ""
+    local newText = infoNew and infoNew.Text or ""
+    if newText == "" then
+        status("Amulet popup khong co stat moi - bo qua")
+        return
+    end
+
+    local accept, detail
+    if Config.AmuletKeepOld then
+        accept, detail = false, "keep-old policy"
+    elseif oldText:gsub("%s", "") == "" then
+        accept, detail = true, "chua co amulet cu -> nhan moi"
+    else
+        local better, worse, notes = compareAmulets(oldText, newText)
+        accept = worse <= 0 and better > 0
+        detail = string.format("%d better / %d worse%s", better, worse,
+            #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
+    end
+    table.insert(State.AmuletDecisions, {
+        Time = os.time(),
+        Title = title and title.Text or "?",
+        Accept = accept,
+        Detail = detail,
+    })
+    status(string.format("Amulet %s: %s (%s)", accept and "REPLACE" or "KEEP",
+        title and title.Text or "?", detail))
+
+    local yesButton = popup:FindFirstChild("YesButton")
+    local noButton = popup:FindFirstChild("NoButton")
+    if not accept then
+        local clicked = false
+        local clickDeadline = os.clock() + 5
+        while os.clock() < clickDeadline and popup.Visible and State.Running do
+            if clickButton(noButton) then clicked = true break end
+            task.wait(0.3)
+        end
+        if not clicked then status("Khong click duoc NoButton") end
+        return
+    end
+    -- Accept: Yes -> QuestionBox (chi hien khi dang deo amulet) -> Yes lan 2
+    local questionDeadline = os.clock() + 3
+    while os.clock() < questionDeadline and popup.Visible and State.Running do
+        if clickButton(yesButton) then break end
+        task.wait(0.3)
+    end
+    local screenGui = Player.PlayerGui:FindFirstChild("ScreenGui")
+    local questionBox = screenGui and screenGui:FindFirstChild("QuestionBox")
+    if questionBox then
+        local boxDeadline = os.clock() + 3
+        while os.clock() < boxDeadline and State.Running do
+            if questionBox.Visible then
+                local box = questionBox:FindFirstChild("Box")
+                local confirm = box and box:FindFirstChild("YesButton")
+                if clickButton(confirm) then break end
+            elseif not popup.Visible then
+                break -- da accept xong, popup dong
+            end
+            task.wait(0.2)
+        end
+    end
 end
 
 -- =============================================================================
@@ -653,6 +881,11 @@ task.spawn(function()
                 local okLoop, errLoop = xpcall(challengeLoop, debug.traceback)
                 if not okLoop then
                     status("challengeLoop error: " .. tostring(errLoop))
+                end
+                -- Xu ly Ant Amulet popup (keep-old/new) ngay khi xong challenge
+                local okAmulet, errAmulet = xpcall(handleAmuletPopup, debug.traceback)
+                if not okAmulet then
+                    status("handleAmuletPopup error: " .. tostring(errAmulet))
                 end
                 -- hut not token con lai sau khi xong (tween nhanh)
                 local _, root = getCharacter(2)
