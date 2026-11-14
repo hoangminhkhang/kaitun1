@@ -4226,9 +4226,11 @@ end
 -- directly, so an ignored mob is still fightable for quests.
 function mobIgnoredForFarm(object)
     if not object or not Config.IgnoreStumpSnail then return false end
-    -- Inline normalize (same rule as Runtime.NormalizeMobType, which is
-    -- assigned later in the chunk): "Stump Snail" / "StumpSnail" -> stumpsnail.
-    return (string.lower(tostring(object.Name)):gsub("[^%w]", "")) == "stumpsnail"
+    -- PREFIX match: the live boss spawns as "Stump Snail (Lvl 6)" (exact
+    -- Monsters.ChildAdded name), so an equality test against "stumpsnail"
+    -- missed it -> stance mode parked the bot bouncing in Stump Field forever.
+    local normalized = string.lower(tostring(object.Name)):gsub("[^%w]", "")
+    return string.find(normalized, "stumpsnail", 1, true) == 1
 end
 
 local function collectThreats(field)
@@ -5734,7 +5736,7 @@ Runtime.FarmQuestMob = function(objective, seconds)
             else
                 humanoid:Move(Vector3.zero, false)
             end
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
         elseif sawLive or os.clock() >= spawnDeadline then
             break
         end
@@ -7143,9 +7145,9 @@ local function farmFlowerEffect()
     local moved = tweenTo(CFrame.new(position + Vector3.new(0, 2.5, 0)), Config.TokenTweenSpeed, "FlowerEffect")
     if moved then
         task.wait(0.25)
-        remoteCall("ToolCollect")
+        Runtime.DigOnce()
         task.wait(0.45)
-        remoteCall("ToolCollect")
+        Runtime.DigOnce()
         if kind == "Sparkles" and Config.AutoTokens then sweepTokens(1.2, "SparklesToken") end
     end
     Runtime.Digging = false
@@ -8104,7 +8106,7 @@ function MaterialSystem.FarmFirefly()
                 if humanoid then humanoid:MoveTo(position) end
                 task.wait(0.08)
             end
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
 
             local tokenDeadline = math.min(budgetDeadline,
                 os.clock() + math.max(1, tonumber(Config.FireflyTokenWindow) or 3))
@@ -8132,7 +8134,7 @@ function MaterialSystem.FarmFirefly()
         Runtime.Digging = true
         if tweenTo(CFrame.new(Runtime.FireflyCenter + Vector3.new(0, 2, 0)),
             Config.TokenTweenSpeed, "Firefly") then
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
             if Config.AutoTokens then sweepTokens(4, "FireflyCenter") end
             local centerDeadline = os.clock() + 3
             repeat
@@ -8333,11 +8335,11 @@ function MaterialSystem.FarmVicious()
                 task.wait(0.15)
             end
         end
-        -- ToolCollect stays rate-limited (the dig worker also fires while
+        -- Dig stays rate-limited (the dig worker also fires while
         -- Digging is held).
         if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
             Runtime.LastVicToolCollect = os.clock()
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
         end
         task.wait(0.1)
     end
@@ -8404,7 +8406,7 @@ function Runtime.FarmMondoChick()
             -- Hop-free: stand the safe offset; bees do the damage.
             humanoid:Move(Vector3.zero, false)
         end
-        remoteCall("ToolCollect")
+        Runtime.DigOnce()
         task.wait(0.2)
     end
     sweepTokens(3, "MondoDrop")
@@ -8484,7 +8486,7 @@ function Runtime.FarmBonusMob()
     if canonical == "Coconut Crab" then
         -- HEAD-RIDE variant: stand on the crab's head and follow continuously -
         -- the chained anchor-grace keeps the character from falling (Vicious
-        -- ride technique). ToolCollect stays rate-limited to the dig cadence.
+        -- ride technique). Dig stays rate-limited to the dig cadence.
         local deadline = os.clock() + math.max(30, tonumber(Config.BonusMobFightTimeout) or 120)
         while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
             and os.clock() < deadline do
@@ -8517,7 +8519,7 @@ function Runtime.FarmBonusMob()
             end
             if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
                 Runtime.LastVicToolCollect = os.clock()
-                remoteCall("ToolCollect")
+                Runtime.DigOnce()
             end
             task.wait(0.05)
         end
@@ -8554,7 +8556,7 @@ function Runtime.FarmBonusMob()
                 else
                     humanoid:Move(Vector3.zero, false)
                 end
-                remoteCall("ToolCollect")
+                Runtime.DigOnce()
                 task.wait(0.2)
             end
         end
@@ -9249,11 +9251,11 @@ local function handleMeteor()
 
     -- Match the source timing: be on the impact point from 60% of Delay+Dur
     -- until the meteor expires. Dig while waiting instead of standing idle.
-    -- ToolCollect RATE-LIMITED (Heartbeat-rate ~60Hz spam khac voi moi noi khac).
+    -- Dig RATE-LIMITED (Heartbeat-rate ~60Hz spam khac voi moi noi khac).
     while Runtime.Running and Config.Enabled and Config.AutoMeteor and os.clock() < meteor.ReadyAt do
         if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
             Runtime.LastVicToolCollect = os.clock()
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
         end
         task.wait(0.08)
     end
@@ -9262,7 +9264,7 @@ local function handleMeteor()
         if humanoid and root and (root.Position - target).Magnitude > 4 then humanoid:MoveTo(target) end
         if os.clock() >= (Runtime.LastVicToolCollect or 0) + 0.2 then
             Runtime.LastVicToolCollect = os.clock()
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
         end
         RunService.Heartbeat:Wait()
     end
@@ -10987,13 +10989,12 @@ local function entryEnabled(entry)
     return true
 end
 
--- Dig: ToolCollect only does anything while a collector is HELD. After a
--- rejoin/death the collector sits in the backpack unequipped AND
--- stats.EquippedCollector can stay stale ("Vacuum") while nothing is held -
--- trusting stats meant the equip path never re-ran and ToolCollect no-oped
--- FOREVER ("khong thay dig"). Now: verify the tool is PHYSICALLY in the
--- Character; if not, equip directly from the Backpack (instant, client-side)
--- with the remote as fallback.
+-- Collector equip: after a rejoin/death the collector sits in the backpack
+-- unequipped AND stats.EquippedCollector can stay stale ("Vacuum") while
+-- nothing is held - trusting stats meant the equip path never re-ran and dig
+-- no-oped FOREVER. Verify the tool is PHYSICALLY in the Character; if not,
+-- equip directly from the Backpack (instant, client-side) with the remote as
+-- fallback. DigOnce (below) does the actual collecting.
 function Runtime.EnsureCollectorEquipped()
     -- Later milestones hold better collectors: keep the LAST owned match.
     local best
@@ -11031,6 +11032,41 @@ function Runtime.EnsureCollectorEquipped()
     return true
 end
 
+-- Dig: the game's own collect entry point is Collectors.LocalCollect.Run -
+-- exactly what the tool's client scripts call on a swing (and what proven
+-- scripts call for auto dig). Firing ToolCollect bare does NOT collect on
+-- current BSS ("khong thay dig"), so LocalCollect is primary; the remote is
+-- only a fallback for executors that cannot require the module. The collector
+-- must still be HELD: EnsureCollectorEquipped verifies it physically.
+function Runtime.DigOnce()
+    local run = Runtime.LocalCollectRun
+    if run == nil and os.clock() >= (Runtime.LocalCollectRetryAt or 0) then
+        Runtime.LocalCollectRetryAt = os.clock() + 30
+        local collectors = ReplicatedStorage:FindFirstChild("Collectors")
+        local module = collectors and collectors:FindFirstChild("LocalCollect")
+        if module then
+            local ok, result = pcall(require, module)
+            if ok and type(result) == "table" and type(result.Run) == "function" then
+                run = result.Run
+                Runtime.LocalCollectRun = run
+                Runtime.LocalCollectFails = 0
+            end
+        end
+    end
+    if run then
+        if pcall(run) then return true end
+        -- Transient errors (respawn window) fall through to the remote for
+        -- this tick; a persistently broken module is re-required after 5 fails.
+        Runtime.LocalCollectFails = (Runtime.LocalCollectFails or 0) + 1
+        if Runtime.LocalCollectFails >= 5 then
+            Runtime.LocalCollectRun = nil
+            Runtime.LocalCollectFails = 0
+            Runtime.LocalCollectRetryAt = os.clock() + 30
+        end
+    end
+    return remoteCall("ToolCollect")
+end
+
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and Config.AutoFarm and (Runtime.Digging or Runtime.State == "Auto meteor") then
@@ -11038,7 +11074,7 @@ task.spawn(function()
                 Runtime.NextCollectorEquipCheck = os.clock() + 5
                 pcall(Runtime.EnsureCollectorEquipped)
             end
-            remoteCall("ToolCollect")
+            Runtime.DigOnce()
         end
         task.wait(math.max(0.08, Config.DigInterval))
     end
