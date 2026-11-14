@@ -5062,6 +5062,16 @@ local function farmStep(seconds, overrideField, state, detail)
         end
         local ratio = pollenRatio()
         if Config.AutoConvert and ratio >= Config.ConvertPercent then Runtime.Digging = false return true end
+        -- A quest finished mid-burst: hand control back NOW so the scheduler
+        -- walks to the bear instead of burning the rest of the farm pass.
+        if os.clock() >= (Runtime.NextQuestDoneProbe or 0) then
+            Runtime.NextQuestDoneProbe = os.clock() + 2
+            if Runtime.AnyQuestComplete() then
+                Runtime.LastQuestCheck = 0
+                Runtime.Digging = false
+                return true
+            end
+        end
         -- Mob threat active: the avoid worker owns the character (retreat/hold).
         -- Issuing farm moves now would drag the character back through the mob.
         if os.clock() < (Runtime.MobThreatUntil or 0) then
@@ -5422,16 +5432,22 @@ local function questTaskDescription(taskData, stats)    if type(taskData.Descrip
     return tostring(taskData.Type or "Quest task")
 end
 
--- Progress shape-aware: {fraction} hoac {current, goal}/{goal, current} -
--- count-shape {30,100} phai doc la chua xong (min < max), khong phai "xong"
--- vi progress[1]=30 >= 1. Dung chung 3 noi kiem tra incompleteness.
+-- Live BSS progress shape (same triple atlas reads): {fraction, current, goal}.
+-- fraction >= 1 is the game's own "Complete!" signal. The old min/max read of
+-- [1]/[2] compared the FRACTION against the CURRENT count, so a finished task
+-- {1, 25, 25} read as 1 < 25 = incomplete and no quest was ever turned in.
 local function questProgressIncomplete(progress)
-    local first = tonumber(progress and progress[1]) or 0
-    local second = progress and tonumber(progress[2]) or nil
-    if second then
-        return math.min(first, second) < math.max(first, second)
+    if type(progress) ~= "table" then return true end
+    local fraction = tonumber(progress[1])
+    local current = tonumber(progress[2])
+    local goal = tonumber(progress[3])
+    if fraction and current and goal then
+        return not (fraction >= 1 or (goal > 0 and current >= goal))
     end
-    return first < 1
+    if fraction and current then
+        return fraction < 1
+    end
+    return (fraction or 0) < 1
 end
 
 -- Turn-in gate: EVERY task must have a progress entry that reads complete.
@@ -5448,6 +5464,17 @@ function questAllTasksComplete(quest)
         if questProgressIncomplete(quest.Progress[index] or {}) then return false end
     end
     return true
+end
+
+-- Mid-burst probe for farmStep: cached quest scan only (no remote refresh), so
+-- a quest that finishes while farming materials is claimed within seconds
+-- instead of after the whole farm pass. Global: farmStep is defined earlier.
+function Runtime.AnyQuestComplete()
+    if not Config.AutoQuest then return false end
+    for _, quest in ipairs(activeBearQuests(false)) do
+        if questAllTasksComplete(quest) then return true end
+    end
+    return false
 end
 
 local function incompleteQuestObjectives(refresh)
@@ -6196,31 +6223,29 @@ function Runtime.FeedQuestTreats(objective)
     local goalText = string.match(taskText, "feed%s+([%d%,%.]+)")
     local goal = goalText and tonumber((goalText:gsub("[%,%.]", ""))) or nil
     local ratio = 0
+    local current, target
     if goal and goal >= 1 then
-        -- Progress shape is version-dependent: {current, goal} AND
-        -- {goal, current} both exist. Mid-task the current is always the
-        -- SMALLER of the two (progress never exceeds the goal), so
-        -- min/max reads the right pair regardless of order. The old
-        -- Progress[1]-only read mixed the shapes up and trickled 1-treat
-        -- feeds for a whole quest.
+        -- Live shape {fraction, current, goal}. The old min/max([1],[2]) read
+        -- treated the fraction as a count: a half-done {0.5, 12, 25} became
+        -- ratio 0.5/12 and fed ~24 instead of 13 - and a DONE {1, 25, 25} still
+        -- looked 4% done, dumping the whole craft stock into the bee.
         local progress = type(objective.Progress) == "table" and objective.Progress or {}
-        local first = tonumber(progress[1]) or 0
-        local second = tonumber(progress[2])
-        if second then
-            local current = math.min(first, second)
-            local target = math.max(first, second)
-            if target >= 1 then
-                ratio = math.clamp(current / target, 0, 0.99)
-            end
-        elseif first > 0 and first <= 1 then
+        local fraction = tonumber(progress[1]) or 0
+        current = tonumber(progress[2])
+        target = tonumber(progress[3])
+        if current and target and target >= 1 then
+            ratio = math.clamp(math.max(fraction, current / target), 0, 0.99)
+        elseif fraction > 0 and fraction <= 1 then
             -- lone fraction {0.95}: first la TI LE khong phai so luong
-            ratio = math.clamp(first, 0, 0.99)
+            ratio = math.clamp(fraction, 0, 0.99)
         else
-            ratio = math.clamp(first / goal, 0, 0.99)
+            ratio = math.clamp(fraction / goal, 0, 0.99)
         end
     end
     local remaining
-    if goal and goal >= 1 then
+    if current and target and target >= 1 then
+        remaining = math.max(1, math.ceil(target - current))
+    elseif goal and goal >= 1 then
         remaining = math.max(1, math.ceil(goal * (1 - ratio)))
     end
     Runtime.QuestFeedDeficit = Runtime.QuestFeedDeficit or {}
