@@ -753,6 +753,29 @@ MaterialSystem.Aliases = {
     Turpentine = {"Turpentine", "Turpentines"},
     Neonberry = {"Neonberry", "Neonberries"},
     Bitterberry = {"Bitterberry", "Bitterberries"},
+    -- PLANTER: key = ten catalog (ChoosePlanter truyen vao), alias = Type ID
+    -- that cua server (kho Items/Eggs dung cung namespace voi ItemPackageEvent
+    -- Purchase - xac minh tu purchase list cua atlas). Khong co alias nay thi
+    -- Amount("The Planter Of Plenty") = 0 vinh vien vi strip-space ra
+    -- "ThePlanterOfPlenty" != "PlentyPlanter"; cac loai khac phai scan live
+    -- Player.Eggs moi lan goi. Type ID giu nguyen quirks: "Blue ClayPlanter",
+    -- "Heat-TreatedPlanter". Paper/Ticket/Sticker/Festive khong mua duoc bang
+    -- honey nen khong co trong purchase list - Type ID suy doan tu quy tac
+    -- bo space (fallback live van cover neu sai).
+    ["Plastic Planter"] = {"Plastic Planter", "PlasticPlanter"},
+    ["Candy Planter"] = {"Candy Planter", "CandyPlanter"},
+    ["Blue Clay Planter"] = {"Blue Clay Planter", "Blue ClayPlanter", "BlueClayPlanter"},
+    ["Red Clay Planter"] = {"Red Clay Planter", "Red ClayPlanter", "RedClayPlanter"},
+    ["Tacky Planter"] = {"Tacky Planter", "TackyPlanter"},
+    ["Pesticide Planter"] = {"Pesticide Planter", "PesticidePlanter"},
+    ["Hydroponic Planter"] = {"Hydroponic Planter", "HydroponicPlanter"},
+    ["Petal Planter"] = {"Petal Planter", "PetalPlanter"},
+    ["Heat-Treated Planter"] = {"Heat-Treated Planter", "Heat-TreatedPlanter", "HeatTreatedPlanter"},
+    ["The Planter Of Plenty"] = {"The Planter Of Plenty", "PlentyPlanter"},
+    ["Paper Planter"] = {"Paper Planter", "PaperPlanter"},
+    ["Ticket Planter"] = {"Ticket Planter", "TicketPlanter"},
+    ["Sticker Planter"] = {"Sticker Planter", "StickerPlanter"},
+    ["Festive Planter"] = {"Festive Planter", "FestivePlanter"},
 }
 
 MaterialSystem.Priority = {
@@ -1234,6 +1257,14 @@ function MaterialSystem.Amount(material, stats)
     if best <= 0 then
         local eggsFolder = Player:FindFirstChild("Eggs")
         local value = eggsFolder and eggsFolder:FindFirstChild(material)
+        -- Alias lookup truoc khi scan: "The Planter Of Plenty" -> "PlentyPlanter"
+        -- (strip-space khong bao gio khop ten nay). O(1) moi alias.
+        if not value and eggsFolder then
+            for _, alias in ipairs(aliases) do
+                value = eggsFolder:FindFirstChild(alias)
+                if value then break end
+            end
+        end
         if not value and eggsFolder then
             -- Ten co the camel-case / khong space ("PlasticPlanter") - so
             -- khop strip-space truoc khi tuyet bo, neu khong planting chet
@@ -3031,10 +3062,6 @@ function Runtime.CollectWorldRewards()
     return true
 end
 
-local function hasAnyBee()
-    return beeCount() > 0
-end
-
 local function rawEggCount(eggType)
     local stats = getStats(false)
     return tonumber(stats and stats.Eggs and stats.Eggs[eggType]) or 0
@@ -4476,10 +4503,6 @@ Runtime.FlowerEffectIndex = setmetatable({}, {__mode = "k"}) -- [tile] = "Sparkl
 do
     local watched = {} -- [folderName] = {Folder = Instance, Conns = {...}}
     local populatedFlowerEffects = false
-    local function isCharacterDescendant(inst)
-        local model = inst and inst:FindFirstAncestorOfClass("Model")
-        return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
-    end
 
     local function wake()
         Runtime.LastScannerHitAt = os.clock()
@@ -4757,11 +4780,6 @@ local function findBestTokenInStandingField()
     return first and first.Token or nil, score, route
 end
 
-Runtime.FindBestToken = function()
-    local token, score = findBestTokenInStandingField()
-    return token, score, Runtime.LastTokenPlan
-end
-
 -- Pop token TIEP THEO tu route planner da tinh san (khong re-scan). Token
 -- mat/het cooldown/het han tu nhay qua; cache het han (3s) hoac player
 -- di xa qua 25 studs thi vo hieu - luc do sweep se plan lai dung 1 lan.
@@ -4940,8 +4958,10 @@ end
 -- TRONG field vua fire - sprinkler nguoi khac o field khac khong set instance
 -- (de no-show backoff tu xu ly, het loop yank center).
 local function watchSprinklerSpawn(field)
-    local deadline = os.clock() + 3
-    local fieldCFrame, fieldSize = field and fieldBoundsOf(field) or nil, nil
+    -- Khong dung "a, b = field and f(field) or nil, nil": ve phai luon nil
+    -- nen fieldSize khong bao gio duoc gan -> bo loc field ben duoi la dead code.
+    local fieldCFrame, fieldSize
+    if field then fieldCFrame, fieldSize = fieldBoundsOf(field) end
     local conn
     conn = workspace.DescendantAdded:Connect(function(object)
         local name = object.Name
@@ -6460,8 +6480,15 @@ function Runtime.BuyTreatsForCycle()
     local honeyAfter = liveCoreValue("Honey")
     local gained = treatsAfter - treatsBefore
     if gained > 0 then
-        local spent = honeyBefore and honeyAfter
-            and math.max(0, honeyBefore - honeyAfter) or gained * unitCost
+        -- 0 la truthy trong Lua: "delta and math.max(0,delta) or fallback"
+        -- khong bao gio fallback khi delta=0 -> budget khong bi charge.
+        -- Dung if/else ro rang; delta khong doc duoc thi uoc theo gia config.
+        local spent
+        if honeyBefore and honeyAfter and honeyBefore > honeyAfter then
+            spent = honeyBefore - honeyAfter
+        else
+            spent = gained * unitCost
+        end
         Runtime.TreatCycleBoughtHoney = boughtHoney + spent
         Runtime.PurchaseRetryAt[purchaseKey] = nil
         return gained
@@ -6470,7 +6497,6 @@ function Runtime.BuyTreatsForCycle()
     -- BREAK ngay khi khong xac nhan duoc don dau tien (denied spam vinh vien).
     local bought = 0
     for _ = 1, math.min(chunk, 10) do
-        local singleBefore = honeyBefore and liveCoreValue("Honey") or nil
         local okOne = remoteCall("ItemPackageEvent", "Purchase",
             {Category = "Eggs", Type = "Treat", Amount = 1})
         if not okOne then break end
@@ -6482,8 +6508,13 @@ function Runtime.BuyTreatsForCycle()
         bought += 1
     end
     if bought > 0 then
-        local spent = honeyBefore and liveCoreValue("Honey")
-            and math.max(0, honeyBefore - liveCoreValue("Honey")) or bought * unitCost
+        local honeyNow2 = liveCoreValue("Honey")
+        local spent
+        if honeyBefore and honeyNow2 and honeyBefore > honeyNow2 then
+            spent = honeyBefore - honeyNow2
+        else
+            spent = bought * unitCost
+        end
         Runtime.TreatCycleBoughtHoney = boughtHoney + spent
         Runtime.PurchaseRetryAt[purchaseKey] = nil
         return bought
@@ -6896,7 +6927,11 @@ function Runtime.HandleAmuletGui()
         if Runtime.IsAmuletGui(object) then
             if object:IsA("TextLabel") and MaterialSystem.GuiVisible(object) then
                 local text = tostring(object.Text)
-                if text:find("+", 1, true) and text:find("%d", 1, true) then
+                -- find("%d", 1, true) la tim chuoi literal "%d" (khong bao gio
+                -- match) -> statLabels luon rong, amulet khong bao gio duoc so sanh.
+                -- Stat AM (vd "-3% Capacity") khong co "+" - phai bat ca "-"
+                -- neu khong amulet co stat do van bi accept.
+                if (text:find("+", 1, true) or text:find("-", 1, true)) and text:find("%d") then
                     table.insert(statLabels, object)
                 elseif not titleText and #text > 3 then
                     titleText = text
@@ -7172,29 +7207,6 @@ local function nearbyLiveMobs(field)
         end
     end
     return list
-end
-
-local function nearbyLiveMob(field)
-    local _, _, root = getCharacter(1)
-    if not root then return nil end
-    local nearest, nearestDistance
-    for _, mob in ipairs(nearbyLiveMobs(field)) do
-        local distance = (root.Position - mob.Position).Magnitude
-        if not nearestDistance or distance < nearestDistance then
-            nearest, nearestDistance = mob.Instance, distance
-        end
-    end
-    return nearest
-end
-
-Runtime.GetQuestObjectives = function(refresh)
-    return incompleteQuestObjectives(refresh == true)
-end
-Runtime.GoToNPC = interactQuestNPC
-Runtime.IsFieldUnlocked = fieldUnlocked
-Runtime.ScanMob = function()
-    local field = Runtime.CurrentField ~= "" and findField(Runtime.CurrentField) or standingField()
-    return nearbyLiveMob(field)
 end
 
 -- When hit, retreat toward the field center if it is safe from EVERY mob.
@@ -8673,7 +8685,10 @@ function MaterialSystem.ChoosePlanter(stats, active)
     -- sai nguon (Player.Eggs naming?) - canh bao mot lan de khong chet im.
     if not Runtime.PlanterAmountWarned and Runtime.BootstrapComplete then
         Runtime.PlanterAmountWarned = true
-        warn("[BSS Kaitun] Planter catalog co " .. #available
+        -- available la dict (khong phai array): #available luon = 0.
+        local catalogCount = 0
+        for _ in pairs(available) do catalogCount += 1 end
+        warn("[BSS Kaitun] Planter catalog co " .. catalogCount
             .. " loai nhung khong loai nao duoc dem duoc - kiem tra Player.Eggs naming")
     end
     return nil
@@ -8816,6 +8831,9 @@ end
 function MaterialSystem.FindCondenser()
     local cached = Runtime.NectarCondenserObject
     if cached and cached.Parent then return cached end
+    -- Negative cache: khong co condenser thi moi lan goi lai quet toan bo
+    -- workspace (hang nghin instance). Chi quet lai moi 60s.
+    if not cached and os.clock() < (Runtime.NectarCondenserNextScan or 0) then return nil end
     cached = workspace:FindFirstChild("Nectar Condenser", true)
         or workspace:FindFirstChild("NectarCondenser", true)
     if not cached then
@@ -8825,6 +8843,7 @@ function MaterialSystem.FindCondenser()
         end
     end
     Runtime.NectarCondenserObject = cached
+    if not cached then Runtime.NectarCondenserNextScan = os.clock() + 60 end
     return cached
 end
 
@@ -9002,12 +9021,6 @@ function MaterialSystem.Work(entry)
     end
     return false
 end
-
-Runtime.GetMaterialDeficits = function(itemType)
-    local entry = {Type = itemType, Materials = MaterialSystem.Gear[itemType] or {}}
-    return MaterialSystem.Deficits(entry, MaterialSystem.Stats(true))
-end
-Runtime.GetBlenderStatus = MaterialSystem.BlenderStatus
 
 local function meteorPosition(value)
     if typeof(value) == "Vector3" then return value end
@@ -11086,16 +11099,19 @@ function Runtime.IsBlueBeeType(value)
     return blueBeeSet[normalized] == true
 end
 
-function Runtime.BlueDiscoveryCount(refresh)
+-- Shared discovery scanner: Blue/Mythic counts chi khac nhau o predicate.
+-- Mot implementation duy nhat thay vi 2 ban copy (normalize/mark/scan).
+-- Tra ve nil, rawDiscovered khi stats.DiscoveredBees khong phai table.
+function Runtime.ScanDiscoveredBees(refresh, isBeeType)
     local stats = getStats(refresh == true)
     local discovered = type(stats) == "table" and stats.DiscoveredBees or nil
-    if type(discovered) ~= "table" then return 0, {} end
+    if type(discovered) ~= "table" then return nil, discovered end
     local found, visited = {}, {}
     local function normalize(value)
         return string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
     end
     local function mark(value)
-        if Runtime.IsBlueBeeType(value) then found[normalize(value)] = true end
+        if isBeeType(value) then found[normalize(value)] = true end
     end
     local function scan(key, value)
         if type(key) == "string" and value ~= false and value ~= 0 then mark(key) end
@@ -11110,6 +11126,12 @@ function Runtime.BlueDiscoveryCount(refresh)
     scan(nil, discovered)
     local count = 0
     for _ in pairs(found) do count += 1 end
+    return count, found
+end
+
+function Runtime.BlueDiscoveryCount(refresh)
+    local count, found = Runtime.ScanDiscoveredBees(refresh, Runtime.IsBlueBeeType)
+    if not count then return 0, {} end
     return count, found
 end
 
@@ -11120,39 +11142,16 @@ function Runtime.IsMythicBeeType(value)
 end
 
 function Runtime.MythicDiscoveryCount(refresh)
-    local stats = getStats(refresh == true)
-    local discovered = type(stats) == "table" and stats.DiscoveredBees or nil
-    if type(discovered) ~= "table" then
-        -- FAIL CLOSED + diagnostic: 0 vinh vien = meteor gate + blue gate
-        -- deadlock khong ai hay. Warn 1 lan de recon bong shape.
-        if not Runtime.DiscoveredShapeWarned then
-            Runtime.DiscoveredShapeWarned = true
-            warn("[BSS Kaitun] stats.DiscoveredBees khong phai table ("
-                .. typeof(discovered) .. ") - discovery gates fail closed")
-        end
-        return 0, {}
+    local count, found = Runtime.ScanDiscoveredBees(refresh, Runtime.IsMythicBeeType)
+    if count then return count, found end
+    -- FAIL CLOSED + diagnostic: 0 vinh vien = meteor gate + blue gate
+    -- deadlock khong ai hay. Warn 1 lan de recon bong shape.
+    if not Runtime.DiscoveredShapeWarned then
+        Runtime.DiscoveredShapeWarned = true
+        warn("[BSS Kaitun] stats.DiscoveredBees khong phai table ("
+            .. typeof(found) .. ") - discovery gates fail closed")
     end
-    local found, visited = {}, {}
-    local function normalize(value)
-        return string.lower(tostring(value or "")):gsub("[^%w]", ""):gsub("bee$", "")
-    end
-    local function mark(value)
-        if Runtime.IsMythicBeeType(value) then found[normalize(value)] = true end
-    end
-    local function scan(key, value)
-        if type(key) == "string" and value ~= false and value ~= 0 then mark(key) end
-        if type(value) == "string" then
-            mark(value)
-        elseif type(value) == "table" and not visited[value] then
-            visited[value] = true
-            mark(value.Type or value.BeeType or value.Name)
-            for childKey, child in pairs(value) do scan(childKey, child) end
-        end
-    end
-    scan(nil, discovered)
-    local count = 0
-    for _ in pairs(found) do count += 1 end
-    return count, found
+    return 0, {}
 end
 
 function Runtime.FindSafeBasicBeeCell()
