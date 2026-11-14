@@ -3578,6 +3578,10 @@ end
 -- Cooldown values so re-executing the kaitun does not reset its one-hour timer.
 function Runtime.ClaimWealthClock()
     if not Config.AutoWealthClock or not Config.Enabled or Runtime.MeteorPriorityActive then return false end
+    -- The walk below SUPERSEDES the shared mover. Firing it mid-conversion yanks
+    -- the character off the hive, pollen freezes, and the 180s convert pass burns
+    -- out without converting - the "stuck at the clock" loop. Yield instead.
+    if Runtime.Converting then return false end
     local now = os.clock()
     if now < (Runtime.NextWealthClockCheck or 0) then return false end
 
@@ -3639,19 +3643,23 @@ function Runtime.ClaimWealthClock()
         local _, _, rootNow = getCharacter(1)
         if not rootNow
             or (rootNow.Position - clockPosition).Magnitude > 15 then
-            Runtime.NextWealthClockCheck = os.clock() + 30
+            -- Long backoff: a 30s retry re-hijacks the mover every half minute
+            -- and starves farm/convert for the whole session.
+            Runtime.NextWealthClockCheck = os.clock() + 120
             return false
         end
     end
     local ok = remoteCall("ToyEvent", "Wealth Clock")
     if ok then
+        local before = lastActivation
         task.delay(2, function()
-            -- The claim is counted ONLY when ToyTimes confirms it: a fired
-            -- remote says nothing about whether the server accepted it (the
-            -- character may have been pulled away before the distance check).
+            -- The claim is counted ONLY when ToyTimes actually ADVANCES: an old
+            -- timestamp is not proof the server accepted this fire, and treating
+            -- it as one locked the clock out for a hour on a rejected claim.
             local fresh = getStats(true)
             local toyTimes = type(fresh) == "table" and fresh.ToyTimes or nil
-            if type(toyTimes) == "table" and tonumber(toyTimes["Wealth Clock"]) then
+            local stamp = type(toyTimes) == "table" and tonumber(toyTimes["Wealth Clock"]) or nil
+            if stamp and stamp ~= before then
                 Runtime.WealthClockClaims += 1
                 Runtime.NextWealthClockCheck = os.clock() + interval
                 warn(string.format("[BSS Kaitun] Wealth Clock claimed (%d total)",
@@ -5445,7 +5453,7 @@ end
 local function incompleteQuestObjectives(refresh)
     local stats = getStats(refresh)
     local objectives = {}
-    for _, quest in ipairs(activeBearQuests(false)) do
+    for _, quest in ipairs(activeBearQuests(refresh)) do
         for index, taskData in ipairs(quest.Info.Tasks or {}) do
             local progress = quest.Progress[index] or {}
             if questProgressIncomplete(progress) then
@@ -5949,7 +5957,10 @@ local function maintainBearQuests()
                     setStatus("Waiting for Science quest", Runtime.NPCModuleError)
                 end
             end
-            return true
+            -- A FAILED interact must not claim the tick: turn-in now runs ahead
+            -- of the convert gate, so returning true here on every failure would
+            -- starve conversion for the whole session.
+            return ok
         end
     end
     return false
@@ -6175,6 +6186,9 @@ function Runtime.FeedQuestTreats(objective)
     -- Out of the right food -> deficit memory + other work until it arrives.
     local treatKey, treatLabel = questTreatInfo(objective)
     local treats = questTreatStock(treatKey, stats)
+    -- Stock minus what the material planner still needs for its recipe: feeding
+    -- the craft batch away is what made "farm pineapple -> craft" impossible.
+    local feedable = math.max(0, treats - Runtime.MaterialCraftReserve(treatKey))
     -- Goal + remaining computed UP FRONT so shortages are remembered exactly.
     local taskText = string.lower(tostring(objective and objective.Description or ""))
     -- SO CO PHAY: "Feed 1,000 Treats" - %d+ don le dung o dau phay -> goal=1
@@ -6211,15 +6225,16 @@ function Runtime.FeedQuestTreats(objective)
     end
     Runtime.QuestFeedDeficit = Runtime.QuestFeedDeficit or {}
     local taskKey = tostring(objective.Quest) .. "|" .. tostring(objective.Description)
-    if treats <= 0 then
+    if feedable <= 0 then
         markQuestTaskCooldown(objective, 45)
         if remaining then
             -- Remember EXACTLY how many are missing: the worker auto-feeds the
             -- moment this much food arrives from farming.
             Runtime.QuestFeedDeficit[taskKey] =
                 {TreatKey = treatKey, Label = treatLabel, Missing = remaining}
-            setStatusBackground("Quest feed", string.format(
-                "Missing %d %s - farming, auto-feed when it arrives", remaining, treatLabel))
+            setStatusBackground("Quest feed", treats > 0
+                and string.format("%d %s reserved for craft - feed after the recipe", treats, treatLabel)
+                or string.format("Missing %d %s - farming, auto-feed when it arrives", remaining, treatLabel))
         else
             setStatus("Quest feed", string.format("Out of %s - doing other work, retry in 45s", treatLabel))
         end
@@ -6234,10 +6249,10 @@ function Runtime.FeedQuestTreats(objective)
     -- whole stock, and a partially-fed task tops up just the remainder.
     -- Unknown goal (no "feed N" in the text): CAP the pass - the old
     -- feed-everything behaviour dumped the entire stock into one bee.
-    local batch = math.min(treats,
+    local batch = math.min(feedable,
         math.max(1, math.floor(tonumber(Config.QuestFeedMaxBlindBatch) or 10)))
     if remaining then
-        batch = math.min(treats, remaining)
+        batch = math.min(feedable, remaining)
         if batch < remaining then
             Runtime.QuestFeedDeficit[taskKey] =
                 {TreatKey = treatKey, Label = treatLabel, Missing = remaining - batch}
@@ -6262,9 +6277,12 @@ function Runtime.UseQuestRoyalJelly(objective)
     local maxUses = math.max(1, math.floor(tonumber(Config.QuestJellyBatchMax) or 5))
     while used < maxUses and Runtime.Running and not Runtime.MeteorPriorityActive do
         local stats = MaterialSystem.Stats(false) -- cached; server caps real use
-        if math.floor(MaterialSystem.Amount("RoyalJelly", stats)) <= 0 then
+        local jelly = math.floor(MaterialSystem.Amount("RoyalJelly", stats))
+        if jelly <= Runtime.MaterialCraftReserve("RoyalJelly") then
             markQuestTaskCooldown(objective, 45)
-            setStatus("Quest jelly", "Out of Royal Jelly - doing other work, retry in 45s")
+            setStatus("Quest jelly", jelly > 0
+                and "Royal Jelly reserved for craft - retry in 45s"
+                or "Out of Royal Jelly - doing other work, retry in 45s")
             break
         end
         local bee = Runtime.FindQuestTargetBee(true)
@@ -6354,6 +6372,19 @@ local function questTreatReserve(treatKey)
         end
     end
     return reserve
+end
+
+-- Craft earmark: while the material planner is farming a food for a recipe,
+-- quest feeding must not eat it. Self-expiring so a goal that stopped being
+-- worked on cannot lock the quest worker out for the rest of the session.
+function Runtime.MaterialCraftReserve(key)
+    local action = Runtime.MaterialFarmAction
+    if not action or action.Kind ~= "farm" then return 0 end
+    if os.clock() - (Runtime.MaterialFarmActionAt or 0) > 120 then return 0 end
+    local canonical = MaterialSystem.Canonical(key)
+    if MaterialSystem.Canonical(action.Material) ~= canonical then return 0 end
+    local owned = MaterialSystem.Amount(canonical, MaterialSystem.Stats(false))
+    return math.max(0, (tonumber(action.Required) or 0) - owned)
 end
 
 function Runtime.BuyTreatsForCycle()
@@ -7429,7 +7460,9 @@ local function hivePhase(hive)
     return phase and phase:IsA("ValueBase") and tostring(phase.Value) or ""
 end
 
-local function convertPollen()
+-- On Runtime, not a top-level local: the chunk is already at the Luau 200
+-- local-register ceiling (see header).
+function Runtime.ConvertPollenInner()
     if not Config.AutoConvert then return false end
     if Runtime.MeteorPriorityActive then return false end
     local hive, platform = findOwnedHive()
@@ -7479,6 +7512,32 @@ local function convertPollen()
         remoteCall("PlayerHiveCommand", "ToggleHoneyMaking")
     end
     return select(1, pollenRatio()) <= Config.ConvertFinishPercent
+end
+
+-- Conversion owns the character for up to ConvertTimeout seconds. Anything that
+-- tweens during that window (Wealth Clock, side jobs) pauses honey making, so
+-- the pass burns its whole timeout without converting a single pollen.
+local function convertPollen()
+    if os.clock() < (Runtime.ConvertHoldUntil or 0) then return false end
+    Runtime.Converting = true
+    local ok, result = pcall(Runtime.ConvertPollenInner)
+    Runtime.Converting = false
+    if not ok then
+        reportError("Convert", result)
+        result = false
+    end
+    if result then
+        Runtime.ConvertFailStreak = 0
+    else
+        Runtime.ConvertFailStreak = (Runtime.ConvertFailStreak or 0) + 1
+        if Runtime.ConvertFailStreak >= 3 then
+            -- Three dead passes in a row: stop re-tweening to a hive that will
+            -- not convert and let quests/farming run for a minute instead.
+            Runtime.ConvertHoldUntil = os.clock() + 60
+            Runtime.ConvertFailStreak = 0
+        end
+    end
+    return result
 end
 
 -- Material planner -----------------------------------------------------------
@@ -8806,6 +8865,10 @@ function MaterialSystem.FarmSource(action, entry)
     local material = MaterialSystem.Canonical(action.Material)
     Runtime.MaterialName = material
     Runtime.MaterialTarget = entry and entry.Type or ""
+    -- Earmark the batch: the quest-feed worker runs off-thread and would
+    -- otherwise eat the pineapple being farmed to craft with.
+    Runtime.MaterialFarmAction = action
+    Runtime.MaterialFarmActionAt = os.clock()
     Runtime.ProgressStage = string.format("Materials for %s", Runtime.MaterialTarget)
     setStatus("Farm material", string.format("%s %d/%d | %s",
         MaterialSystem.Display(material), action.Owned or 0, action.Required or 0, Runtime.MaterialTarget))
@@ -8823,6 +8886,9 @@ function MaterialSystem.FarmSource(action, entry)
     if field == nil then
         -- Every source field for this material is still locked: nothing useful
         -- to do here (the milestone defers the gear until a source unlocks).
+        -- Drop the earmark too - nothing is being farmed, so holding quest food
+        -- hostage for a recipe that cannot progress would deadlock the feeder.
+        Runtime.MaterialFarmAction = nil
         return false
     end
     if MaterialSystem.PlanterWork(material, field, MaterialSystem.Stats(false)) then return true end
@@ -8866,6 +8932,7 @@ function MaterialSystem.Work(entry)
     if not next(deficits) then
         Runtime.MaterialName = ""
         Runtime.MaterialTarget = ""
+        Runtime.MaterialFarmAction = nil
         Runtime.DeferredItems[entry.Type] = nil
         return true
     end
@@ -8893,6 +8960,7 @@ function MaterialSystem.Work(entry)
             + (tonumber(blender.Count) or 0) * (tonumber(pendingYield) or 1)
         local farmAction = MaterialSystem.NextAction(entry, virtualStats, true)
         if farmAction then return MaterialSystem.FarmSource(farmAction, entry) end
+        Runtime.MaterialFarmAction = nil
         -- Ingredients for the current queue are already consumed. Keep earning
         -- honey/tokens instead of standing beside the Blender.
         return farmStep(math.min(Config.MaterialFarmSeconds, 8), MaterialSystem.Field("RoyalJelly"),
@@ -10499,6 +10567,7 @@ function Runtime.RJUpgradeBasicStep()
     -- ONE shared pool with the RJ farmer and quest jelly: two independent
     -- counters drifted apart (double-spend) during the 120s gate-check window.
     local reserve = math.max(1, tonumber(Config.RJQuestReserve) or 5)
+        + Runtime.MaterialCraftReserve("RoyalJelly")
     if Runtime.RJStock <= reserve or (Runtime.RJUpgradeSyncs or 0) >= 20 then
         Runtime.RJUpgradeSyncs = 0
         getStats(true)
@@ -10633,7 +10702,8 @@ task.spawn(function()
                             -- cost): a stale cache used to keep the unlock blind
                             -- for seconds after the food actually landed.
                             local deficit = deficitMap[taskKey]
-                            if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(true)) > 0 then
+                            if questTreatStock(deficit.TreatKey, MaterialSystem.Stats(true))
+                                > Runtime.MaterialCraftReserve(deficit.TreatKey) then
                                 Runtime.QuestFeedRetryAt[taskKey] = nil
                             end
                         end
@@ -10826,6 +10896,7 @@ task.spawn(function()
     task.wait(10) -- let LocalPlanters load and bootstrap stats land first
     while Runtime.Running do
         if Config.Enabled and Config.AutoPlanters and not Runtime.PlanterBusy
+            and not Runtime.Converting
             and os.clock() >= (Runtime.PlanterScanAt or 0) then
             local ok, result = xpcall(Runtime.PlanterCycleStep, debug.traceback)
             if not ok then
@@ -10858,7 +10929,8 @@ task.spawn(function()
 end)
 
 -- Low-priority hourly rewards: Wealth Clock + free toys (Ant Pass, Blue Field
--- Booster). Never owns the mover and always yields to the Meteor supervisor.
+-- Booster). The clock DOES own the mover for its walk, so it stands down while
+-- converting; both always yield to the Meteor supervisor.
 task.spawn(function()
     while Runtime.Running do
         if Config.Enabled and not Runtime.MeteorPriorityActive then
@@ -11371,25 +11443,29 @@ local function progressionWork(reason, allowSideJobs)
         -- Bonus mobs (no quest needed): level-gated, snail-free, crab rides.
         if Config.AutoFarmBonusMobs and Runtime.BonusMobPending
             and not Runtime.PlanterBusy then
-            local okBonus, errBonus = xpcall(Runtime.FarmBonusMob, debug.traceback)
+            local okBonus, resultBonus = xpcall(Runtime.FarmBonusMob, debug.traceback)
             if not okBonus then
                 Runtime.BonusMobBusy = false
                 Runtime.Digging = false
                 Runtime.MaterialCombat = false
                 Runtime.BonusMobPending = nil
-                reportError("BonusMob", errBonus)
-            elseif okBonus then
+                reportError("BonusMob", resultBonus)
+            elseif resultBonus then
                 return
             end
         end
     end
+    -- Quest turn-in outranks conversion: a finished quest must be claimed even
+    -- with a full pollen bar, otherwise the ConvertPercent=1 gate below returns
+    -- every tick and the bear is never visited.
+    if allowSideJobs and Config.AutoQuest and maintainBearQuests() then return end
     local ratio = pollenRatio()
-    if Config.AutoConvert and ratio >= Config.ConvertPercent then
+    if Config.AutoConvert and ratio >= Config.ConvertPercent
+        and os.clock() >= (Runtime.ConvertHoldUntil or 0) then
         convertPollen()
         return
     end
     if allowSideJobs then
-        if Config.AutoQuest and maintainBearQuests() then return end
         if os.clock() - Runtime.LastSpecialEffectFarm >= Config.SpecialEffectPriorityInterval and farmFlowerEffect() then
             Runtime.LastSpecialEffectFarm = os.clock()
             return
@@ -11599,14 +11675,14 @@ task.spawn(function()
 
             if Config.AutoFarmBonusMobs and Runtime.BonusMobPending
                 and not Runtime.PlanterBusy then
-                local okBonus, errBonus = xpcall(Runtime.FarmBonusMob, debug.traceback)
+                local okBonus, resultBonus = xpcall(Runtime.FarmBonusMob, debug.traceback)
                 if not okBonus then
                     Runtime.BonusMobBusy = false
                     Runtime.Digging = false
                     Runtime.MaterialCombat = false
                     Runtime.BonusMobPending = nil
-                    reportError("BonusMob", errBonus)
-                elseif okBonus then
+                    reportError("BonusMob", resultBonus)
+                elseif resultBonus then
                     return
                 end
             end
@@ -11617,16 +11693,20 @@ task.spawn(function()
                 upgradeSprinkler()
             end
 
+            -- Turn-in BEFORE materials: a gear recipe can stay outstanding for
+            -- hours, and the old `Work(entry); return` below skipped the bear
+            -- visit for that whole time - finished quests were never claimed.
+            if Config.AutoQuest and maintainBearQuests() then return end
             if Config.AutoMaterials and beeCount() >= Config.ProgressionTargetBees then
                 local materialEntry = nextOutstandingMaterialEntry(true)
-                if materialEntry then
-                    MaterialSystem.Work(materialEntry)
-                    return
-                end
+                -- Fall through when the material pass did nothing (blender just
+                -- started, source field locked, convert on hold) instead of
+                -- returning into a hot no-op loop.
+                if materialEntry and MaterialSystem.Work(materialEntry) then return end
             end
-            if Config.AutoQuest and maintainBearQuests() then return end
             local ratio = pollenRatio()
-            if Config.AutoConvert and ratio >= Config.ConvertPercent then
+            if Config.AutoConvert and ratio >= Config.ConvertPercent
+                and os.clock() >= (Runtime.ConvertHoldUntil or 0) then
                 convertPollen()
             elseif os.clock() - Runtime.LastSpecialEffectFarm >= Config.SpecialEffectPriorityInterval and farmFlowerEffect() then
                 Runtime.LastSpecialEffectFarm = os.clock()
