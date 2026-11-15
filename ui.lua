@@ -24,6 +24,14 @@
     walks to the NPC / its interest-point Part (e.g. "VillageChief"), clicks that
     button with real input, then proceeds the converse (Proceed / Accept).
 
+    INTERIORS: some NPCs live inside buildings. Live layout is
+    workspace.IgnoreList.Int.PrivateAreas.<Island>.<Area>.Enter/Leave, each with
+    Entrance (outside door) and Destination (inside spawn) Parts; older builds use
+    workspace.PrivateAreas + workspace.PrivateAreaDoors. Tweening straight to the
+    interior coordinates is rejected (kick to lobby). The script walks to the
+    entrance (K.EnterPoints saved positions / objective marker / door), holds the
+    "Enter Area" interaction so the server teleports us in, then talks.
+
     RUNTIME DATA PATHS:
       Enemies : workspace.Playability.Enemys  (Model + Humanoid, attr OriginalName/Name)
       Drops   : workspace.Playability.DroppedTools
@@ -622,11 +630,60 @@ local function npcMatches(m, name)
     return false
 end
 
--- Area containers (workspace.PrivateAreas.<Area>) and doors (PrivateAreaDoors)
--- share names with NPCs/areas but are not talkable characters; never target them.
+-- Private areas root: live layout is IgnoreList.Int.PrivateAreas.<Island>.<Area>,
+-- older builds use workspace.PrivateAreas directly.
+local function privateAreasRoot()
+    if not Workspace then return nil end
+    local pa = Workspace:FindFirstChild("PrivateAreas")
+    if pa then return pa end
+    local ignore = Workspace:FindFirstChild("IgnoreList")
+    local int = ignore and ignore:FindFirstChild("Int")
+    return int and int:FindFirstChild("PrivateAreas") or nil
+end
+
+-- Saved Enter positions harvested from Studio (2026-11-15), one entry per area:
+-- entrance = outside door to walk to, destination = inside spawn after Enter.
+-- Stored as {x,y,z} so the table loads without Vector3.
+K.EnterPoints = {
+    WitchHouse            = { island = "Forbidden Island", entrance = {6282.3, 132.3, -5187.3},   destination = {6091.5, -569.6, -4640.6} },
+    Crypt                 = { island = "Forbidden Island", entrance = {6578.2, 93.3, -4729.3},    destination = {6036.3, -725.5, -4132.7} },
+    Barber                = { island = "Harbor Island",    entrance = {5681.5, 40.1, 3302.9},     destination = {5686.3, -776.4, 4167.2} },
+    Pawnshop              = { island = "Harbor Island",    entrance = {5658.0, 40.1, 3213.3},     destination = {5691.6, -804.7, 2808.7} },
+    Tailor                = { island = "Harbor Island",    entrance = {5677.9, 40.1, 3602.2},     destination = {6283.4, -776.5, 3170.9} },
+    Bank                  = { island = "Harbor Island",    entrance = {5967.7, 42.4, 3304.1},     destination = {5351.8, -768.8, 3440.2} },
+    HarborBoatShop        = { island = "Harbor Island",    entrance = {5849.9, 40.2, 3663.5},     destination = {6281.2, -1368.1, 3579.2} },
+    KrakensRestBoatShop   = { island = "Kraken's rest",    entrance = {15713.6, 40.1, 4322.8},    destination = {17420.7, -1484.7, 5669.6} },
+    KrakensRestBarber     = { island = "Kraken's rest",    entrance = {15881.2, 39.7, 4350.3},    destination = {15839.6, -1002.4, 4291.5} },
+    KrakensRestTailor     = { island = "Kraken's rest",    entrance = {16415.1, 159.5, 3902.9},   destination = {15212.0, -777.4, 3451.9} },
+    KrakensRestPawnshop   = { island = "Kraken's rest",    entrance = {16173.4, 107.0, 4300.1},   destination = {15383.3, -806.5, 3879.4} },
+    MayorHouse            = { island = "Circus Town",      entrance = {-7380.4, 75.9, -8988.1},   destination = {-9819.2, -510.8, -5912.5} },
+    Circus                = { island = "Circus Town",      entrance = {-7601.0, 164.3, -9347.1},  destination = {-8490.3, -628.5, -8356.3} },
+    Pyramid               = { island = "Golden Dunes",     entrance = {-7221.0, 55.0, 11909.0},   destination = {-7040.0, -1406.0, 12741.0} },
+    BlackMarket           = { island = "Golden Dunes",     entrance = {-7551.8, 55.1, 11493.8},   destination = {-7636.4, -751.1, 11356.9} },
+    SkyLift               = { island = "Rustfall",         entrance = {6637.7, 24.0, 10673.1},    destination = {6545.0, 1353.3, 10652.0} },
+    SolmarBoatShop        = { island = "Solmar Island",    entrance = {-92.3, 26.4, 400.4},       destination = {-143.8, -1250.2, -482.1} },
+    MarineBase            = { island = "Solmar Island",    entrance = {-196.6, 37.0, 680.1},      destination = {191.4, -389.4, -3106.2} },
+    ElderHouse            = { island = "Solmar Island",    entrance = {-323.0, 16.7, 320.0},      destination = {-320.4, -764.6, -33.1} },
+    OldLadyHouse          = { island = "Solmar Island",    entrance = {21.8, 25.6, 538.7},        destination = {353.7, -864.8, 19.0} },
+    RoyalForge            = { island = "Frost Island",     entrance = {-19272.6, 482.2, 158.9},   destination = {-19409.2, -1123.9, -2726.2} },
+    ThroneRoom            = { island = "Frost Island",     entrance = {-19012.2, 482.2, 186.7},   destination = {-22950.9, -1178.8, -1883.8} },
+    BlazeboundArena       = { island = "Volcano Island",   entrance = {-17620.8, -9606.1, 11355.8}, destination = {-16976.2, -11407.9, 12237.2} },
+    VolcanoInterior       = { island = "Volcano Island",   entrance = {-16992.5, 339.7, 10178.3}, destination = {-18135.0, -9547.5, 10318.7} },
+    VolcanoBossRoom       = { island = "Volcano Island",   entrance = {-18133.1, -9534.6, 11502.7}, destination = {-18973.0, -4709.5, 10300.5} },
+}
+-- WolfBossRoom / CavernRoof / CavernShell have no Enter door (reached via other
+-- areas); their Leave exits: WolfBossRoom -> (6569.2,93.3,-4729.3),
+-- CavernRoof/CavernShell -> (718.0,30.6,6495.0).
+
+-- Area containers and doors share names with NPCs/areas but are not talkable
+-- characters; never target them.
 local function isAreaContainerOrDoor(m)
-    local pa = Workspace and Workspace:FindFirstChild("PrivateAreas")
-    if pa and m.Parent == pa then return true end
+    local pa = privateAreasRoot()
+    if pa then
+        if m.Parent == pa then return true end
+        -- island layout: area containers hold Enter/Leave folders, NPCs do not
+        if m.Parent and m.Parent.Parent == pa and m:FindFirstChild("Enter") then return true end
+    end
     local pd = Workspace and Workspace:FindFirstChild("PrivateAreaDoors")
     if pd then
         local p = m
@@ -672,39 +729,62 @@ local function findInterestPoint(name)
 end
 K.FindInterestPoint = findInterestPoint
 
--- NPCs that live inside a building are under workspace.PrivateAreas.<Area>.
+-- NPCs that live inside a building are under the PrivateAreas root (flat
+-- workspace.PrivateAreas.<Area> or IgnoreList.Int.PrivateAreas.<Island>.<Area>).
 -- Tweening straight to them is rejected by the server (kick to lobby); we must
 -- enter through the area's door instead. Return the area name, or nil if the
 -- instance is in the overworld.
 local function interiorAreaName(inst)
-    local pa = Workspace and Workspace:FindFirstChild("PrivateAreas")
-    if not pa or not inst then return nil end
+    if not inst then return nil end
+    local flat = Workspace and Workspace:FindFirstChild("PrivateAreas")
+    local pa = privateAreasRoot()
+    if not pa then return nil end
     local p = inst
     while p do
         if p.Parent == pa then return p.Name end
+        -- island layout only: the area sits one level below the island folder
+        if pa ~= flat and p.Parent and p.Parent.Parent == pa then return p.Name end
         p = p.Parent
     end
     return nil
 end
 K.InteriorAreaName = interiorAreaName
 
--- The door (outside handle) for a private area, from workspace.PrivateAreaDoors.
+-- The outside door position for a private area: legacy PrivateAreaDoors folder,
+-- live <Area>.Enter.Entrance part, or the saved K.EnterPoints table as fallback.
 local function findAreaDoor(areaName)
-    local doors = Workspace and Workspace:FindFirstChild("PrivateAreaDoors")
-    if not doors then return nil end
+    if not areaName then return nil end
     local char = LocalPlayer and LocalPlayer.Character
     local pos = char and char:GetPivot().Position
     local best, bestDist
-    for _, d in ipairs(doors:GetChildren()) do
-        if not areaName or K.MatchName(d.Name, areaName) then
-            local part = d:IsA("BasePart") and d or d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart", true)
-            if part then
-                local dist = pos and (part.Position - pos).Magnitude or 0
-                if not bestDist or dist < bestDist then best, bestDist = part, dist end
+    local doors = Workspace and Workspace:FindFirstChild("PrivateAreaDoors")
+    if doors then
+        for _, d in ipairs(doors:GetChildren()) do
+            if K.MatchName(d.Name, areaName) then
+                local part = d:IsA("BasePart") and d or d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart", true)
+                if part then
+                    local dist = pos and (part.Position - pos).Magnitude or 0
+                    if not bestDist or dist < bestDist then best, bestDist = part, dist end
+                end
             end
         end
     end
-    return best
+    if best then return best end
+    local pa = privateAreasRoot()
+    if pa then
+        for _, island in ipairs(pa:GetChildren()) do
+            local area = island:FindFirstChild(areaName)
+            local enter = area and area:FindFirstChild("Enter")
+            local part = enter and enter:FindFirstChild("Entrance")
+            if part and part:IsA("BasePart") then return part end
+        end
+    end
+    local saved = K.EnterPoints[areaName]
+    if saved then
+        local e = saved.entrance
+        return { Position = Vector3.new(e[1], e[2], e[3]) }
+    end
+    return nil
 end
 K.FindAreaDoor = findAreaDoor
 
@@ -1082,13 +1162,21 @@ local function interactWithNpc(name)
     end
     local npc, point = npcCache.npc, npcCache.point
     local area = npc and interiorAreaName(npc) or nil
+    local char = LocalPlayer and LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local nroot = npc and npcPosition(npc)
+    -- Already inside the private area (the Enter teleport landed): stay and talk,
+    -- do not walk back out to the door.
+    local inside = (area and root and nroot
+        and (nroot.Position - root.Position).Magnitude < 100) or false
     local dest
-    if point then
+    if inside then
+        dest = groundSafePos(nroot.Position)
+    elseif point then
         -- the objective marker sits at the building entrance (outside)
         dest = groundSafePos(point.Position)
     elseif npc and not area then
-        local hrp = npcPosition(npc)
-        if hrp then dest = groundSafePos(hrp.Position) end
+        if nroot then dest = groundSafePos(nroot.Position) end
     elseif npc and area then
         local door = findAreaDoor(area)
         if door then dest = groundSafePos(door.Position) end
@@ -1104,12 +1192,20 @@ local function interactWithNpc(name)
     task.wait(0.3)
     -- Interior NPC: hold Enter at the door and let the server teleport us in.
     -- Tweening straight to the interior coordinates gets us kicked to lobby.
-    if area or point then
+    if not inside and (area or point) then
         for _ = 1, 3 do
             if not clickEnterArea() then break end
             task.wait(1.5)
         end
         if area then npc = findGiver(name) or npc end
+        -- Once the Enter teleport has actually landed us inside (NPC now close),
+        -- close the last gap to it. While still outside, never glide inward.
+        if area and npc then
+            local nr = npcPosition(npc)
+            if root and nr and (nr.Position - root.Position).Magnitude < 100 then
+                moveTo(CFrame.new(groundSafePos(nr.Position)))
+            end
+        end
     end
     -- interest point only: the NPC stands nearby — pick the closest prompt holder
     if not npc then
