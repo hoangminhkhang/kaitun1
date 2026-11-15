@@ -75,7 +75,7 @@ K.Config = {
     FPSBoost        = false,
 
     MoveMode        = "Tween",   -- "Tween" (glide at walk pace) or "Teleport" (instant)
-    TweenSpeed      = 16,        -- studs/sec glide speed (~WalkSpeed; server-friendly)
+    TweenSpeed      = 32,        -- studs/sec glide speed (fast; lower if server snaps back)
     TweenMaxTime    = 20,        -- cap on a single glide's duration (seconds)
     Noclip          = true,      -- phase through walls/objects while gliding (no stuck)
     FarmAnyFallback = true,      -- no quest mob nearby? farm the nearest enemy instead
@@ -734,17 +734,51 @@ K.FindInterestPoint = findInterestPoint
 -- Tweening straight to them is rejected by the server (kick to lobby); we must
 -- enter through the area's door instead. Return the area name, or nil if the
 -- instance is in the overworld.
+-- Area whose Enter.Destination is closest to pos. Interior NPCs are stored under
+-- IgnoreList.Int.NPCs (NOT inside the PrivateAreas tree), so match by position.
+local function areaNearPosition(pos)
+    local pa = privateAreasRoot()
+    if not pa or not pos then return nil end
+    local best, bestDist
+    for _, island in ipairs(pa:GetChildren()) do
+        for _, area in ipairs(island:GetChildren()) do
+            local enter = area:FindFirstChild("Enter")
+            local dst = enter and enter:FindFirstChild("Destination")
+            if dst and dst:IsA("BasePart") then
+                local d = (dst.Position - pos).Magnitude
+                if d < 200 and (not bestDist or d < bestDist) then
+                    best, bestDist = area.Name, d
+                end
+            end
+        end
+    end
+    return best
+end
+
 local function interiorAreaName(inst)
     if not inst then return nil end
     local flat = Workspace and Workspace:FindFirstChild("PrivateAreas")
     local pa = privateAreasRoot()
-    if not pa then return nil end
-    local p = inst
-    while p do
-        if p.Parent == pa then return p.Name end
-        -- island layout only: the area sits one level below the island folder
-        if pa ~= flat and p.Parent and p.Parent.Parent == pa then return p.Name end
-        p = p.Parent
+    if pa then
+        local p = inst
+        while p do
+            if p.Parent == pa then return p.Name end
+            -- island layout only: the area sits one level below the island folder
+            if pa ~= flat and p.Parent and p.Parent.Parent == pa then return p.Name end
+            p = p.Parent
+        end
+    end
+    local ignore = Workspace and Workspace:FindFirstChild("IgnoreList")
+    local intRoot = ignore and ignore:FindFirstChild("Int")
+    if intRoot then
+        local p = inst
+        while p do
+            if p == intRoot then
+                local part = inst:IsA("BasePart") and inst or npcPosition(inst)
+                return part and areaNearPosition(part.Position) or nil
+            end
+            p = p.Parent
+        end
     end
     return nil
 end
@@ -873,7 +907,7 @@ local function moveTo(cf)
     if gliding then return end
     gliding = true
 
-    local speed = K.Config.TweenSpeed or 16
+    local speed = K.Config.TweenSpeed or 32
     local stepTime = 0.05
     local duration = dist / speed
     local maxTime = K.Config.TweenMaxTime or 20
