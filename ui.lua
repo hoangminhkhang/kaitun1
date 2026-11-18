@@ -1435,7 +1435,6 @@ local COL_OFFSET = HEX_H / 2                 -- cột chẵn (1,3,5) đẩy xu�
 local GRID_COLS, GRID_ROWS = 5, 10
 local GRID_W = (GRID_COLS - 1) * COL_PITCH + HEX_W
 local GRID_H = (GRID_ROWS - 1) * ROW_PITCH + HEX_H + COL_OFFSET
-local FACE_SIZE = math.floor(HEX_W * 0.6)
 
 local function makeHex(parent, zIndex)
     local holder = create("Frame", {
@@ -1468,6 +1467,55 @@ local function layoutHex(hex, w, h, x, y, color)
     hex.Mid.Position = UDim2.fromOffset(h / 2, 0)
     hex.Mid.Size = UDim2.fromOffset(math.max(0, w - h), h)
     hex.Mid.BackgroundColor3 = color
+end
+
+-- =============================================================================
+-- MERGE BEE: mặt ong ghép KÍN ô hex (clip theo silhouette lục giác như tổ trong
+-- game). Hex = kim cương trái (45°) + chữ nhật giữa + kim cương phải (45°). Mỗi
+-- mảnh là Frame ClipsDescendants xoay theo hex, chứa CÙNG một ảnh ong xoay NGƯỢC
+-- lại (-45°) để ảnh luôn thẳng đứng và căn giữa ô hex. Ba mảnh ghép lại = ảnh ong
+-- bị cắt đúng hình lục giác. ScaleType.Fit nên không méo; phần mũi hex ngoài ảnh
+-- hở ra nền màu rarity bên dưới. Không cần biết kích thước pixel ảnh nguồn.
+-- =============================================================================
+local function makeHexFace(parent, zIndex)
+    local w, h = HEX_W, HEX_H
+    local side = h / math.sqrt(2)
+    local s2 = math.sqrt(2)
+    local C = Vector2.new(0.5, 0.5)
+    local O = Vector2.new(0, 0)
+    local images = {}
+    local function piece(fw, fh, fx, fy, frot, fanchor, ix, iy, irot, ianchor)
+        local clip = create("Frame", {
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            ClipsDescendants = true, ZIndex = zIndex,
+            AnchorPoint = fanchor, Rotation = frot,
+            Size = UDim2.fromOffset(fw, fh),
+            Position = UDim2.fromOffset(fx, fy),
+        }, parent)
+        local img = create("ImageLabel", {
+            BackgroundTransparency = 1, ZIndex = zIndex,
+            AnchorPoint = ianchor, Rotation = irot,
+            Size = UDim2.fromOffset(w, h),
+            Position = UDim2.fromOffset(ix, iy),
+            Image = "", ScaleType = Enum.ScaleType.Fit,
+        }, clip)
+        images[#images + 1] = img
+    end
+    -- Giữa: clip chữ nhật (không xoay), ảnh phủ kín ô hex, căn trái về (0,0).
+    piece(w - h, h, h / 2, 0, 0, O, -h / 2, 0, 0, O)
+    -- Trái: kim cương 45°, ảnh -45° căn giữa ô (toạ độ suy từ hình học hex).
+    piece(side, side, h / 2, h / 2, 45, C, w / (2 * s2), (2 * h - w) / (2 * s2), -45, C)
+    -- Phải: đối xứng trái.
+    piece(side, side, w - h / 2, h / 2, 45, C, (2 * h - w) / (2 * s2), w / (2 * s2), -45, C)
+    return {Images = images}
+end
+
+local function setBeeFace(face, image)
+    if type(face) ~= "table" or type(face.Images) ~= "table" then return end
+    local img = image or ""
+    for _, label in ipairs(face.Images) do
+        label.Image = img
+    end
 end
 
 -- MẶT ONG THẬT: nguồn chuẩn = BeeTypes.Thumbnails/<Tên> ( GiftedThumbnails
@@ -1580,6 +1628,40 @@ do
             }, cell)
             hiveCells[entry[1]] = valueLabel
         end
+        -- SHOW HIVE toggle: comb ẩn mặc định, bấm mới hiện tổ ong (bấm lại ẩn).
+        local hiveShown = false
+        local toggleRow = corner(create("Frame", {
+            Name = "ShowHiveToggle",
+            LayoutOrder = 15,
+            Size = UDim2.new(1, 0, 0, 42),
+            BackgroundColor3 = T.Panel,
+        }, page), R_CTRL)
+        strokeOf(toggleRow, T.Stroke, 1, 0.55)
+        create("TextLabel", {
+            Size = UDim2.new(1, -76, 1, 0),
+            Position = UDim2.fromOffset(14, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            Text = "🍯  Show Hive",
+            TextColor3 = T.Text,
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, toggleRow)
+        local hiveTrack = corner(create("TextButton", {
+            Name = "Track",
+            Size = UDim2.fromOffset(48, 26),
+            Position = UDim2.new(1, -60, 0.5, -13),
+            BackgroundColor3 = T.PanelLight,
+            Text = "",
+            AutoButtonColor = false,
+        }, toggleRow), R_PILL)
+        strokeOf(hiveTrack, T.Stroke, 1, 0.4)
+        local hiveKnob = corner(create("Frame", {
+            Name = "Knob",
+            Size = UDim2.fromOffset(20, 20),
+            Position = UDim2.fromOffset(3, 3),
+            BackgroundColor3 = T.TextDim,
+        }, hiveTrack), R_PILL)
         -- SHOW HIVE: tổ ong lục giác 50 slot giống ảnh mẫu - flat-top, cột
         -- chẵn/lẻ lệch nửa ô, màu theo rarity, GIFTED viền vàng + ✦, mặt ong
         -- thật ở giữa, level góc dưới-trái có viền đen. Page tự scroll.
@@ -1588,6 +1670,7 @@ do
             LayoutOrder = 20,
             Size = UDim2.new(1, 0, 0, 21 + GRID_H + 12),
             BackgroundColor3 = T.Panel,
+            Visible = false,
         }, page), R_CARD)
         strokeOf(gridFrame, T.Stroke, 1, 0.6)
         vGradient(gridFrame, 0, 0.12)
@@ -1640,16 +1723,7 @@ do
             local fill = makeHex(cell, 2)
             layoutHex(border, HEX_W, HEX_H, 0, 0, T.Background)
             layoutHex(fill, HEX_W - 4, HEX_H - 4, 2, 2, T.PanelLight)
-            local faceIcon = create("ImageLabel", {
-                Name = "Face",
-                AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.new(0.5, 0, 0.5, -1),
-                Size = UDim2.fromOffset(FACE_SIZE, FACE_SIZE),
-                BackgroundTransparency = 1,
-                Image = "",
-                ScaleType = Enum.ScaleType.Fit,
-                ZIndex = 3,
-            }, cell)
+            local face = makeHexFace(cell, 3)
             local levelText = create("TextLabel", {
                 Name = "Level",
                 Size = UDim2.fromOffset(36, 16),
@@ -1680,9 +1754,24 @@ do
             }, cell)
             hiveCells.GridSlot[slot] = {
                 Frame = cell, Border = border, Fill = fill,
-                Level = levelText, Face = faceIcon, Star = star,
+                Level = levelText, Face = face, Star = star,
             }
         end
+        -- Nối dây Show Hive: bật/tắt comb, nảy knob, đổi màu track theo trạng thái.
+        hiveCells.GridFrame = gridFrame
+        local function renderHiveToggle()
+            hiveTrack.BackgroundColor3 = hiveShown and T.Accent or T.PanelLight
+            hiveKnob.BackgroundColor3 = hiveShown and T.Background or T.TextDim
+            TweenService:Create(hiveKnob, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
+                Position = hiveShown and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3),
+            }):Play()
+        end
+        hiveTrack.MouseButton1Click:Connect(function()
+            hiveShown = not hiveShown
+            gridFrame.Visible = hiveShown
+            renderHiveToggle()
+        end)
+        renderHiveToggle()
     end
 end
 
@@ -1945,7 +2034,7 @@ function UI.SetHiveGrid(entries, existingSlots)
             cell.Frame.Visible = false
             layoutHex(cell.Border, HEX_W, HEX_H, 0, 0, darkBorder)
             layoutHex(cell.Fill, HEX_W - 4, HEX_H - 4, 2, 2, emptyFill)
-            cell.Face.Image = ""
+            setBeeFace(cell.Face, "")
             cell.Level.Text = ""
             cell.Star.Visible = false
         end)
@@ -1987,7 +2076,7 @@ function UI.SetHiveGrid(entries, existingSlots)
                     cell.Frame.Visible = true
                     layoutHex(cell.Border, HEX_W, HEX_H, 0, 0, borderC)
                     layoutHex(cell.Fill, HEX_W - 2 * b, HEX_H - 2 * b, b, b, fillC)
-                    cell.Face.Image = face or ""
+                    setBeeFace(cell.Face, face)
                     cell.Level.Text = tostring(tonumber(entry.Level) or "")
                     cell.Star.Visible = gifted
                 end)
