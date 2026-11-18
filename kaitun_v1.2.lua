@@ -124,15 +124,17 @@ local USER_DEFAULTS = {
     AutoBuyHiveSlots = true,
     AutoBuyBasicEggs = true,
     AutoBuyEventBees = true,
+    AutoClaimViciousBee = true,
     AutoHatchEventBees = true,
     AutoTeleRewards = true,
     AutoUnlockBlueHQ = true,
     AutoBuySprinklers = true,
+    AutoBuyPlanters = true,
     AutoPlaceSprinkler = true,
     FarmField = "Sunflower Field",
     RedeemCodes = true,
 -- (AmuletKeepOld da khai bao o tren - ban dup da xoa)
-    StarTreatOrder = {"Tabby", "Photon", "Cobalt", "Crimson"},
+    StarTreatOrder = {"Vicious", "Tabby", "Photon", "Cobalt", "Crimson"},
     RJShopHoneyBudget = 5000000000,
     RJTargetGiftedTypes = 15,
     TreatBudgetPercent = 10,
@@ -271,6 +273,27 @@ local DEFAULT_CONFIG = {
     AutoFarmBonusMobs = false,
     BonusMobFightTimeout = 120,
     BonusMobMaxDistance = 80,
+    -- Boss scheduler: cooldown-aware Coconut Crab / King Beetle / Tunnel Bear /
+    -- Stump Snail kills (snail = chip pass, its HP persists across sessions).
+    -- Level gate: mob level must be <= hive average (same rule as bonus mobs).
+    AutoBossScheduler = true,
+    BossCheckInterval = 30,
+    BossFightTimeout = 300,
+    BossSnailChipSeconds = 180,
+    BossLootRadius = 150,
+    BossLootSweepSeconds = 20,
+    -- Honeystorm toy: fire when its server cooldown is up, then farm Clover
+    -- Field + sweep tokens while the storm rains honey tokens.
+    AutoHoneystorm = true,
+    HoneystormSweepSeconds = 35,
+    -- Puffshroom chase: highest level then nearest; on burst, trail to an
+    -- equal-or-higher rarity puff; shared 300s budget per chase.
+    AutoFarmPuffshrooms = true,
+    PuffshroomMaxSeconds = 300,
+    -- Memory Match: toy-triggered minigame solver (GUI-only, never moves the
+    -- character). Lowest urgency - runs in the toy worker, yields to farm.
+    AutoMemoryMatch = true,
+    MemoryMatchMaxAttempts = 20,
     -- Blue Field Booster: only tap when this many blue bee TYPES are in the hive.
     BlueBoosterMinDiscoveries = 3,
     -- Re-scan the stats payload for active field boosts this often (picks up
@@ -392,6 +415,11 @@ local DEFAULT_CONFIG = {
             PackageTypes = {"CobaltBee", "Cobalt Bee", "Cobalt"}},
         {Shop = "TicketShop", Item = "Crimson Bee", Category = "Eggs", Type = "Crimson", TicketCost = 250,
             PackageTypes = {"CrimsonBee", "Crimson Bee", "Crimson"}},
+        -- Vicious khong ban o shop: claim bang 250 stinger tai workspace.Toys
+        -- ["Vicious Bee Claimer"] (atlas claimer flow). Mua xong egg vao
+        -- Player.Eggs.ViciousBee -> HatchNextEventBee hatch nhu event bee khac.
+        {Shop = "Toys", Item = "Vicious Bee", Category = "Eggs", Type = "Vicious", StingerCost = 250,
+            Claimer = "Vicious Bee Claimer", PackageTypes = {"ViciousBee", "Vicious Bee", "Vicious"}},
     },
     TeleRewardDwellSeconds = 2,
     -- Every world reward AND every normal pollen token is a Part named "C" with
@@ -537,7 +565,6 @@ local DEFAULT_CONFIG = {
             {Shop = "ProShop", Item = "Pulsar", Category = "Collector", Type = "Pulsar", HoneyCost = 125000},
             {Shop = "ProShop", Item = "Mega-Jug", Category = "Accessory", Type = "Mega-Jug", HoneyCost = 50000},
             {Shop = "ProShop", Item = "Compressor", Category = "Accessory", Type = "Compressor", HoneyCost = 160000},
-            {Shop = "ProShop", Item = "Elite Barrel", Category = "Accessory", Type = "Elite Barrel", HoneyCost = 650000},
         }},
         {TargetBees = 20, EggRushAfter = true, Items = {
             {Shop = "ProShop", Item = "Port-O-Hive", Category = "Accessory", Type = "Port-O-Hive", HoneyCost = 1250000},
@@ -564,6 +591,7 @@ local DEFAULT_CONFIG = {
         }},
         {TargetBees = 35, Items = {
             {Shop = "Mountaintop", Item = "Porcelain Port-O-Hive", Category = "Accessory", Type = "Porcelain Port-O-Hive", HoneyCost = 250000000, RequiresMaterials = true},
+            {Shop = "BlueHQ", Item = "Bubble Mask", Category = "Accessory", Type = "Bubble Mask", HoneyCost = 100000000, RequiresMaterials = true, SupersededBy = {"Diamond Mask"}},
         }},
         {TargetBees = 40, Items = {
             {Shop = "MasterRoomShop", Item = "Cobalt Guard", Category = "Accessory", Type = "Cobalt Guard", HoneyCost = 200000000, RequiresMaterials = true},
@@ -582,6 +610,21 @@ local DEFAULT_CONFIG = {
         {Shop = "BadgeBearersGuild", Item = "Diamond Drenchers", Category = "Sprinkler", Type = "Diamond Drenchers"},
         {Shop = "BadgeBearersGuild", Item = "The Supreme Saturator", Category = "Sprinkler", Type = "The Supreme Saturator"},
     },
+    -- Planter mua mot lan dung vinh vien (Eggs namespace). Shop lay theo atlas
+    -- route: Dapper cho phan lon, Hydroponic o BlueHQ, Petal/Plenty o Petal Shop.
+    -- Item = Type ID vi workspace.Shops.*.Items dat ten camel-case (PlasticPlanter).
+    PlanterSequence = {
+        {Shop = "DapperPlanterShop", Item = "PlasticPlanter", Category = "Eggs", Type = "PlasticPlanter"},
+        {Shop = "DapperPlanterShop", Item = "CandyPlanter", Category = "Eggs", Type = "CandyPlanter"},
+        {Shop = "DapperPlanterShop", Item = "Blue ClayPlanter", Category = "Eggs", Type = "Blue ClayPlanter"},
+        {Shop = "DapperPlanterShop", Item = "Red ClayPlanter", Category = "Eggs", Type = "Red ClayPlanter"},
+        {Shop = "DapperPlanterShop", Item = "TackyPlanter", Category = "Eggs", Type = "TackyPlanter"},
+        {Shop = "DapperPlanterShop", Item = "PesticidePlanter", Category = "Eggs", Type = "PesticidePlanter"},
+        {Shop = "BlueHQ", Item = "HydroponicPlanter", Category = "Eggs", Type = "HydroponicPlanter"},
+        {Shop = "Petal Shop", Item = "PetalPlanter", Category = "Eggs", Type = "PetalPlanter"},
+        {Shop = "DapperPlanterShop", Item = "Heat-TreatedPlanter", Category = "Eggs", Type = "Heat-TreatedPlanter"},
+        {Shop = "Petal Shop", Item = "PlentyPlanter", Category = "Eggs", Type = "PlentyPlanter"},
+    },
     BasicEgg = {Shop = "EggDispenser", Item = "BasicEgg", Category = "Eggs", Type = "Basic", Amount = 1},
     RetryDelay = 2,
     RemoteTimeout = 5,
@@ -595,7 +638,7 @@ local DEFAULT_CONFIG = {
     StarterDataRetryCooldown = 1,
     DeferredRetryInterval = 30,
     ConvertTimeout = 180,
-    MeteorStayTime = 9,
+    MeteorTokenSweepTime = 25,
     MeteorFieldGraceTime = 1.25,
     MeteorImpactLeadFraction = 0.6,
     MeteorFallbackLifetime = 5,
@@ -2246,6 +2289,7 @@ function cancelMovement()
     Runtime.MovementOwner = nil
     Runtime.LastMoveTarget = nil
     Runtime.Digging = false
+    Runtime.ViciousClaimBusy = false
     Runtime.QuestFarming = false
     Runtime.AvoidingMob = false
     Runtime.MaterialCombat = false
@@ -3447,7 +3491,8 @@ end
 
 function Runtime.BuyNextEventBee()
     if not Config.AutoBuyEventBees or not Config.Enabled or Runtime.EventBeeBusy
-        or Runtime.MeteorPriorityActive then return false end
+        or Runtime.MeteorPriorityActive or Runtime.BossBusy
+        or Runtime.HoneystormBusy or Runtime.PuffshroomBusy then return false end
     local now = os.clock()
     if now - Runtime.LastEventBeeCheck < math.max(0.2, tonumber(Config.EventBeeCheckInterval) or 0.5) then
         return false
@@ -3456,6 +3501,9 @@ function Runtime.BuyNextEventBee()
     local entry, tickets, stats = Runtime.NextEventBee(true)
     Runtime.EventBeePending = entry or false
     if not entry then return false end
+    -- Claimer bees (Vicious) are not shop packages: firing Purchase here would
+    -- be rejected and burn the retry cooldown. Runtime.ClaimViciousBee owns them.
+    if entry.Claimer then return false end
 
     local required = math.max(0, math.floor(tonumber(entry.TicketCost) or 0))
     -- Strict order: below 500 for Tabby/Photon keep the tickets; do not skip ahead
@@ -3535,6 +3583,113 @@ function Runtime.HatchNextEventBee()
     return false
 end
 
+-- Vicious Bee: khong mua bang ticket/honey - claim bang 250 stinger tai
+-- workspace.Toys["Vicious Bee Claimer"] (atlas claimer flow). Claim xong egg
+-- ViciousBee nam trong Player.Eggs -> HatchNextEventBee hatch o pass ke tiep.
+-- Claimer-ready gate: atlas reads Activatables.Toys.ButtonText(player, toy)
+-- -> text,status and skips when status == "Red" (claimer on cooldown).
+-- Fallback when the module is unavailable: red/cooldown text replicated
+-- under the toy. Nothing readable -> proceed (egg-only proof below is safe).
+local function claimerReady(toy)
+    local activatables = ReplicatedStorage:FindFirstChild("Activatables")
+    local toysModule = activatables and activatables:FindFirstChild("Toys")
+    if toysModule then
+        local okModule, module = pcall(require, toysModule)
+        if okModule and type(module) == "table" and type(module.ButtonText) == "function" then
+            local okText, text, status = pcall(module.ButtonText, Players.LocalPlayer, toy)
+            if okText and text ~= nil then return status ~= "Red", tostring(text) end
+        end
+    end
+    for _, desc in ipairs(toy:GetDescendants()) do
+        if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+            local color = desc.TextColor3
+            local text = tostring(desc.Text or "")
+            if (color.R > 0.6 and color.G < 0.45) or text:find("%d+:%d+") then
+                return false, text
+            end
+        end
+    end
+    return true, nil
+end
+
+function Runtime.ClaimViciousBee()
+    if not Config.AutoClaimViciousBee or not Config.Enabled or Runtime.MeteorPriorityActive then
+        return false
+    end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy or Runtime.Digging
+        or Runtime.ViciousClaimBusy or Runtime.BossBusy or Runtime.HoneystormBusy
+        or Runtime.PuffshroomBusy or Runtime.MovementOwner ~= nil then
+        return false
+    end
+    local now = os.clock()
+    if now < (Runtime.ViciousClaimRetryAt or 0) then return false end
+    local stats = MaterialSystem.Stats(false)
+    local entry
+    for _, candidate in ipairs(Config.EventBeeSequence or {}) do
+        if candidate.Claimer and not Runtime.EventBeeOwned(candidate, stats) then
+            entry = candidate
+            break
+        end
+    end
+    if not entry then return false end
+    local cost = math.max(1, tonumber(entry.StingerCost) or 250)
+    local stingers = MaterialSystem.Amount("Stinger", stats)
+    if stingers < cost then return false end
+    local toys = workspace:FindFirstChild("Toys")
+    local toy = toys and toys:FindFirstChild(entry.Claimer)
+    if not toy then
+        Runtime.ViciousClaimRetryAt = now + 600
+        if not Runtime.ViciousClaimWarned then
+            Runtime.ViciousClaimWarned = true
+            warn("[BSS Kaitun] " .. entry.Claimer .. " khong ton tai trong workspace.Toys - park 10 phut")
+        end
+        return false
+    end
+    local ready, readyText = claimerReady(toy)
+    if not ready then
+        Runtime.ViciousClaimRetryAt = now + 60
+        setStatus("Claim Vicious Bee", "claimer busy: " .. tostring(readyText or "Red"))
+        return false
+    end
+    Runtime.ViciousClaimRetryAt = now + 30
+    Runtime.ViciousClaimBusy = true
+    setStatus("Claim Vicious Bee", string.format("%d/%d stingers", stingers, cost))
+    local platform = toy:FindFirstChild("Platform")
+    local position = objectPosition(platform or toy)
+    if not position or not tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "ViciousClaim") then
+        Runtime.ViciousClaimBusy = false
+        return false
+    end
+    if Runtime.MeteorPriorityActive then
+        Runtime.ViciousClaimBusy = false
+        return false
+    end
+    local prompt = toy:FindFirstChildWhichIsA("ProximityPrompt", true)
+    local firePrompt = rawget(ENV, "fireproximityprompt")
+    if prompt and type(firePrompt) == "function" then pcall(firePrompt, prompt) end
+    local ok = remoteCall("ToyEvent", entry.Claimer)
+    task.wait(0.8)
+    local refreshed = MaterialSystem.Stats(true)
+    -- Egg-only proof: a raw stinger delta false-positives when anything else
+    -- spends stingers concurrently (quest feed, crafts).
+    local acquired = Runtime.EventBeeOwned(entry, refreshed)
+    if acquired then
+        Runtime.EventBeePurchased[entry.Type] = true
+        Runtime.EventBeesPurchased += 1
+        Runtime.ViciousClaimRetryAt = nil
+        Runtime.ViciousClaimBusy = false
+        setStatus("Claimed Vicious Bee", entry.Item .. " egg received - hatching next")
+        task.defer(function() MaterialSystem.Stats(true) end)
+        return true
+    end
+    -- Egg chua replicate (stats lag): re-fire som co the claim lan 2 mat 250
+    -- stinger nua. Park dai cho stats settle (giong event bee unconfirmed).
+    Runtime.ViciousClaimRetryAt = os.clock() + 120
+    Runtime.ViciousClaimBusy = false
+    setStatus("Waiting for Vicious Bee", ok and "unconfirmed - 120s settle" or "server rejected")
+    return false
+end
+
 local HIVE_SLOT = {Shop = "Mountaintop", Item = "Hive Slot", Category = "HiveSlot", Type = "Hive Slot", Amount = 1}
 
 local function buyHiveSlot()
@@ -3608,7 +3763,12 @@ function Runtime.ClaimWealthClock()
     -- The walk below SUPERSEDES the shared mover. Firing it mid-conversion yanks
     -- the character off the hive, pollen freezes, and the 180s convert pass burns
     -- out without converting - the "stuck at the clock" loop. Yield instead.
-    if Runtime.Converting then return false end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy
+        or Runtime.Digging or Runtime.QuestFarming or Runtime.ViciousClaimBusy
+        or Runtime.BossBusy or Runtime.HoneystormBusy or Runtime.PuffshroomBusy
+        or Runtime.MovementOwner ~= nil then
+        return false
+    end
     local now = os.clock()
     if now < (Runtime.NextWealthClockCheck or 0) then return false end
 
@@ -4827,6 +4987,7 @@ local function collectToken(token, owner)
         or string.find(lowerOwner, "vicious", 1, true)
         or string.find(lowerOwner, "mondo", 1, true)
         or string.find(lowerOwner, "questmob", 1, true)
+        or string.find(lowerOwner, "bossdrop", 1, true)
     local detour
     if Config.TokenPathfind ~= false and not exempt then
         local _, _, guardRoot = getCharacter(1)
@@ -4899,6 +5060,50 @@ local function sweepTokens(duration, owner)
         if not token then break end
         attempts += 1
         if collectToken(token, owner or "TokenSweep") then collected += 1 end
+    end
+    return collected
+end
+
+-- Area loot vacuum (boss drops / mondo scatter / puffshroom bursts): unlike
+-- sweepTokens this is NOT bound to the standing field - it walks to each
+-- token's field first so collectToken's field-surface gate passes. Owner
+-- naming matters: "MondoDrop"/"BossDrop" etc. ride the threat-exempt list.
+function Runtime.SweepAreaLoot(origin, radius, seconds, owner)
+    if not Config.AutoTokens or not origin then return 0 end
+    local deadline = os.clock() + math.max(0, seconds or 15)
+    local collected, attempts = 0, 0
+    local movementOwner = owner or "AreaLoot"
+    local maxPer = tonumber(Config.TokenMaxPerSweep) or 60
+    while Runtime.Running and Config.Enabled and os.clock() < deadline
+        and not Runtime.MeteorPriorityActive
+        and collected < maxPer and attempts < maxPer * 2 do
+        local collectibles = workspace:FindFirstChild("Collectibles")
+        if not collectibles then break end
+        local best, bestDist = nil, nil
+        for _, token in ipairs(collectibles:GetChildren()) do
+            if tokenAllowed(token) then
+                local position = objectPosition(token)
+                if position then
+                    local dist = (position - origin).Magnitude
+                    if dist <= radius and (not bestDist or dist < bestDist) then
+                        best, bestDist = token, dist
+                    end
+                end
+            end
+        end
+        if not best then break end
+        attempts += 1
+        local position = objectPosition(best)
+        local field = position and flowerFieldAtPosition(position, 8) or nil
+        local standing = standingField()
+        if position and field and (not standing or standing.Name ~= field.Name) then
+            if not tweenTo(CFrame.new(position + Vector3.new(0, 1.5, 0)), Config.TokenTweenSpeed, movementOwner) then
+                Runtime.TokenCooldowns[best] = os.clock() + (tonumber(Config.TokenAttemptCooldown) or 1)
+                continue
+            end
+            task.wait(0.15)
+        end
+        if collectToken(best, movementOwner) then collected += 1 end
     end
     return collected
 end
@@ -5582,10 +5787,11 @@ Runtime.MobRoutes = {
     ["King Beetle"] = {Fields = {"Clover Field"}, Spawners = {"King Beetle Cave"}, Cooldown = 86400},
     ["Tunnel Bear"] = {Fields = {}, Spawners = {"TunnelBear"}, Cooldown = 172800, AllowNoField = true},
     ["Stump Snail"] = {Fields = {"Stump Field"}, Spawners = {"StumpSnail"}, Cooldown = 345600},
-    -- Coconut Crab (hourly on Coconut Field): fought HEAD-RIDE style by the
-    -- bonus-mob worker (same technique as the Vicious ride). Stump Snail above
-    -- stays quest-only: an hours-long fight wastes the whole scheduler.
-    ["Coconut Crab"] = {Fields = {"Coconut Field"}, Spawners = {"CoconutCrab"}, Cooldown = 3600},
+    -- Coconut Crab (36h cooldown on Coconut Field): fought HEAD-RIDE style by
+    -- the bonus-mob worker / boss scheduler (same technique as the Vicious ride).
+    -- Stump Snail above stays quest-only for the bonus worker: an hours-long
+    -- fight wastes it; the scheduler runs a bounded chip pass instead.
+    ["Coconut Crab"] = {Fields = {"Coconut Field"}, Spawners = {"CoconutCrab"}, Cooldown = 129600},
 }
 
 Runtime.NormalizeMobType = function(value)
@@ -5674,7 +5880,7 @@ Runtime.QuestMobSpawnerReady = function(spawner, route, stats)
     local monsterTimes = type(stats) == "table" and stats.MonsterTimes or nil
     local lastKill = type(monsterTimes) == "table" and tonumber(monsterTimes[spawner.Name]) or nil
     if not lastKill then return timerLabel == nil or not timerLabel.Visible, 0 end
-    local remaining = cooldown + math.max(0, tonumber(Config.QuestMobSpawnGrace) or 15) - (os.time() - lastKill)
+    local remaining = cooldown + math.max(0, tonumber(Config.QuestMobSpawnGrace) or 15) - (MaterialSystem.Clock() - lastKill)
     return remaining <= 0, math.max(0, remaining)
 end
 
@@ -5747,6 +5953,7 @@ Runtime.FarmQuestMob = function(objective, seconds)
             sawLive = true
             local position = objectPosition(live)
             local _, humanoid, root = getCharacter(1)
+            if not humanoid or not root then break end
             if position and humanoid and root and (root.Position - position).Magnitude > Config.MobScanRadius then
                 tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "QuestMob")
             elseif position and root and (root.Position - position).Magnitude < 6 then
@@ -5884,8 +6091,23 @@ local function incrementNPCDialogue()
     local visible, npcGui = npcDialogueVisible()
     local overlay = visible and npcGui:FindFirstChild("ButtonOverlay", true)
     if overlay and overlay:IsA("GuiButton") and overlay.Visible then
-        if firesignal then return pcall(firesignal, overlay.MouseButton1Click) end
-        return pcall(function() overlay:Activate() end)
+        -- GuiButton khong co Activate: dung ActivateButton (firesignal + VIM).
+        return MaterialSystem.ActivateButton(overlay)
+    end
+    return false
+end
+
+-- Pane LUA CHON (OptionFrame): IncrementDialogue KHONG di tiep qua pane nay -
+-- phai bam nut option (atlas skipDialog bam Option1 cho bear quest). Thieu
+-- buoc nay thi dialog dung o pane accept va spin het QuestInteractTimeout.
+local function pressNPCOption(npcGui)
+    local optionFrame = npcGui and npcGui:FindFirstChild("OptionFrame")
+    if not optionFrame or not optionFrame.Visible then return false end
+    for _, optionName in ipairs({"Option1", "Option2", "Option3"}) do
+        local button = optionFrame:FindFirstChild(optionName)
+        if button and button:IsA("GuiButton") and button.Visible then
+            return MaterialSystem.ActivateButton(button)
+        end
     end
     return false
 end
@@ -5939,25 +6161,28 @@ local function interactQuestNPC(name)
     if not opened then return false end
 
     -- Dialogue sweep: panes transition with brief invisible gaps and BSS
-    -- animates pane text. A 60Hz advance spam double-skips panes, and breaking
-    -- on the FIRST invisible tick exits right after the reward pane - before
-    -- the ACCEPT pane appears (the "turn-in but never re-accepts" bug). So:
-    -- advance at a human cadence, and only treat the GUI as closed after it
-    -- stays hidden past a grace window.
+    -- animates pane text. Advance at 20Hz (0.2s/tick cu cham gap 4 lan; 60Hz
+    -- spam moi double-skip pane), pane option thi BAM NUT thay vi increment.
+    -- Only treat the GUI as closed after it stays hidden past a grace window
+    -- (atlas thoat ngay nhung no mo lai dialog neu quest van pending; o day
+    -- grace 0.6s du phu gap giua cac pane).
     local deadline = os.clock() + Config.QuestInteractTimeout
     local hiddenSince = nil
     while Runtime.Running and not Runtime.MeteorPriorityActive and os.clock() < deadline do
-        if npcDialogueVisible() then
+        local visible, npcGui = npcDialogueVisible()
+        if visible then
             hiddenSince = nil
-            incrementNPCDialogue()
-            task.wait(0.2)
+            if not pressNPCOption(npcGui) then
+                incrementNPCDialogue()
+            end
+            task.wait(0.05)
         else
             if not hiddenSince then hiddenSince = os.clock() end
-            if os.clock() - hiddenSince > 1.2 then break end
+            if os.clock() - hiddenSince > 0.6 then break end
             task.wait(0.05)
         end
     end
-    task.wait(0.5)
+    task.wait(0.25)
     getStats(true)
     Runtime.NPCModuleError = ""
     return true
@@ -6226,6 +6451,9 @@ end
 
 function Runtime.FeedQuestTreats(objective)
     if not Config.AutoQuestFeedTasks or Runtime.MeteorPriorityActive then return false end
+    -- Treat leveler dang dump batch: hai remote ConstructHiveCellFromEgg
+    -- dong thoi se dot treat vuot qua reserve cua quest.
+    if Runtime.TreatBusy then return false end
     -- Cached stats only: this runs off-thread while the farm moves; the server
     -- caps the consumption to the real stock, so a stale read is harmless.
     local stats = MaterialSystem.Stats(false)
@@ -6310,9 +6538,11 @@ function Runtime.FeedQuestTreats(objective)
     Runtime.CurrentQuest = objective.Quest
     setStatus("Quest feed", string.format("Feed %d %s | %s (%d,%d)",
         batch, treatLabel, bee.Type, bee.X, bee.Y))
+    Runtime.QuestFeedBusy = true
     local ok, remoteRemaining, success, honeycomb, discoveredBees, eggUses = remoteCall(
         "ConstructHiveCellFromEgg", bee.X, bee.Y, treatKey, batch)
     applyHatchResponse(treatKey, remoteRemaining, success, honeycomb, discoveredBees, eggUses)
+    Runtime.QuestFeedBusy = false
     task.wait(0.4)
     task.defer(function() MaterialSystem.Stats(true) end)
     return ok
@@ -6523,7 +6753,7 @@ function Runtime.BuyTreatsForCycle()
 end
 
 function Runtime.TreatLowestBee()
-    if Runtime.TreatBusy or Runtime.MeteorPriorityActive then return false end
+    if Runtime.TreatBusy or Runtime.QuestFeedBusy or Runtime.MeteorPriorityActive then return false end
     Runtime.UpdateHoneyRate()
     Runtime.TreatCycleRollover()
 
@@ -7310,6 +7540,7 @@ end
 task.spawn(function()
     while Runtime.Running do
         local threatening = false
+        local mobNear = false
         if Config.AvoidMob and Runtime.Digging and not Runtime.MeteorPriorityActive
             and not Runtime.MaterialCombat and Runtime.CurrentField ~= "" then
             local field = findField(Runtime.CurrentField)
@@ -7336,7 +7567,7 @@ task.spawn(function()
             -- 30). At the old 55-stud scan radius the character hopped with no
             -- mob anywhere near it (video feedback) - pure noise.
             local jumpRadius = math.max(threatRadius + 4, tonumber(Config.MobJumpRadius) or 30)
-            local mobNear, nearestDistance = false, nil
+            local nearestDistance = nil
             if root then
                 for _, mob in ipairs(mobs) do
                     local distance = (root.Position - mob.Position).Magnitude
@@ -7612,6 +7843,10 @@ end
 -- the pass burns its whole timeout without converting a single pollen.
 local function convertPollen()
     if os.clock() < (Runtime.ConvertHoldUntil or 0) then return false end
+    -- Planter harvest/claim dang giu mover: keo character khoi hive luc nay
+    -- dot chay pass convert (timeout 180s + fail streak hold).
+    if Runtime.PlanterBusy or Runtime.ViciousClaimBusy or Runtime.BossBusy
+        or Runtime.HoneystormBusy or Runtime.PuffshroomBusy then return false end
     Runtime.Converting = true
     local ok, result = pcall(Runtime.ConvertPollenInner)
     Runtime.Converting = false
@@ -8257,6 +8492,13 @@ task.spawn(function()
         if enabled and Config.AutoFarmMondoChick and type(Runtime.FindMondoChick) == "function" then
             Runtime.MondoChickPending = Runtime.FindMondoChick() ~= nil
         end
+        if enabled and Config.AutoFarmPuffshrooms and not Runtime.PuffshroomBusy
+            and type(Runtime.FindPuffshroom) == "function" then
+            local okPuff, puff = pcall(Runtime.FindPuffshroom)
+            Runtime.PuffshroomPending = (okPuff and puff) and puff.Model or false
+        elseif not Runtime.PuffshroomBusy then
+            Runtime.PuffshroomPending = false
+        end
         if enabled and Config.AutoFarmViciousAlways and Config.AutoFarmVicious
             and type(MaterialSystem.FindVicious) == "function" then
             Runtime.ViciousPending = MaterialSystem.FindVicious() ~= nil
@@ -8275,7 +8517,7 @@ task.spawn(function()
         -- worker khac nen backoff chi danh cho luc that su trong.
         if Runtime.SproutPending or Runtime.FireflyPending
             or Runtime.MondoChickPending or Runtime.ViciousPending
-            or Runtime.BonusMobPending then
+            or Runtime.BonusMobPending or Runtime.PuffshroomPending then
             Runtime.LastScannerHitAt = os.clock()
         end
         local baseCadence = math.max(0.15, math.min(
@@ -8460,12 +8702,14 @@ function Runtime.FarmMondoChick()
     Runtime.Digging = true
     setStatus("Mondo Chick", "Fighting Mondo Chick | Mountain Top Field")
     local deadline = os.clock() + math.max(30, tonumber(Config.MondoChickFightTimeout) or 120)
+    local lastChickPos = nil
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive and os.clock() < deadline do
         chick = Runtime.FindMondoChick()
         if not chick then break end
         local position = objectPosition(chick)
         local _, humanoid, root = getCharacter(1)
         if not position or not humanoid or not root then break end
+        lastChickPos = position
         if (root.Position - position).Magnitude > 24 then
             tweenTo(CFrame.new(position + Vector3.new(0, 2, 8)), Config.TweenSpeed, "MondoChick")
         else
@@ -8476,6 +8720,11 @@ function Runtime.FarmMondoChick()
         task.wait(0.2)
     end
     sweepTokens(3, "MondoDrop")
+    -- Vacuum scatter: chick loot drops across Mountain Top, not just the
+    -- standing field - area sweep from the last known chick position.
+    if lastChickPos then
+        Runtime.SweepAreaLoot(lastChickPos, 120, 15, "MondoDrop")
+    end
     Runtime.Digging = false
     Runtime.MondoChickPending = false
     -- Dead or expired: wait 60s before rescanning to avoid retry spam.
@@ -8535,13 +8784,14 @@ function Runtime.ScanBonusMob()
     Runtime.BonusMobPending = nil
 end
 
-function Runtime.FarmBonusMob()
-    local pending = Runtime.BonusMobPending
-    if not pending or not Config.AutoFarmBonusMobs
+function Runtime.FarmBonusMob(jobOverride)
+    local pending = jobOverride or Runtime.BonusMobPending
+    if not pending or (not jobOverride and not Config.AutoFarmBonusMobs)
         or Runtime.MeteorPriorityActive or Runtime.PlanterBusy or Runtime.ViciousBusy then
-        Runtime.BonusMobPending = nil
+        if not jobOverride then Runtime.BonusMobPending = nil end
         return false
     end
+    local fightTimeout = tonumber(pending.FightTimeout) or tonumber(Config.BonusMobFightTimeout) or 120
     Runtime.BonusMobBusy = true
     Runtime.Digging = true
     local canonical = pending.Name
@@ -8553,7 +8803,7 @@ function Runtime.FarmBonusMob()
         -- HEAD-RIDE variant: stand on the crab's head and follow continuously -
         -- the chained anchor-grace keeps the character from falling (Vicious
         -- ride technique). Dig stays rate-limited to the dig cadence.
-        local deadline = os.clock() + math.max(30, tonumber(Config.BonusMobFightTimeout) or 120)
+        local deadline = os.clock() + math.max(30, fightTimeout)
         while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
             and os.clock() < deadline do
             local mob = Runtime.FindLiveQuestMob(canonical)
@@ -8597,7 +8847,7 @@ function Runtime.FarmBonusMob()
         if destination then
             tweenTo(CFrame.new(destination + Vector3.new(0, 3, 0)), Config.TweenSpeed, "BonusMob")
         end
-        local deadline = os.clock() + math.max(6, tonumber(Config.BonusMobFightTimeout) or 120)
+        local deadline = os.clock() + math.max(6, fightTimeout)
         local spawnDeadline = os.clock() + math.max(2, tonumber(Config.QuestMobSpawnWait) or 12)
         while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
             and os.clock() < deadline do
@@ -8637,6 +8887,555 @@ function Runtime.FarmBonusMob()
     Runtime.BonusMobRetryAt[canonical] = os.clock() + math.max(60, tonumber(route.Cooldown) or 300)
     task.defer(function() getStats(true) end)
     return true
+end
+
+-- Boss scheduler: cooldown-aware kills of the four world bosses, independent
+-- of quests. Reuses the bonus-mob combat (crab head-ride) with a per-boss
+-- timeout; snail gets a bounded chip pass (its HP persists across sessions).
+-- Level gate = bonusMobLevelAllowed (mob level <= hive average) checked on the
+-- LIVE mob, plus a pre-check so a too-strong live boss is never walked to.
+Runtime.BossRetryAt = Runtime.BossRetryAt or {}
+local BOSS_ORDER = {"Coconut Crab", "King Beetle", "Tunnel Bear", "Stump Snail"}
+function Runtime.BossSchedulerStep()
+    if not Config.AutoBossScheduler or not Config.Enabled or Runtime.MeteorPriorityActive then
+        return false
+    end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy or Runtime.BonusMobBusy
+        or Runtime.BossBusy or Runtime.Digging or Runtime.QuestFarming or Runtime.ViciousClaimBusy
+        or Runtime.MovementOwner ~= nil then
+        return false
+    end
+    local now = os.clock()
+    if now < (Runtime.BossCheckAt or 0) then return false end
+    Runtime.BossCheckAt = now + math.max(10, tonumber(Config.BossCheckInterval) or 30)
+    if Config.AutoConvert and select(1, pollenRatio()) >= Config.ConvertPercent then return false end
+    local stats = getStats(false)
+    if type(stats) ~= "table" then return false end
+    local spawners = workspace:FindFirstChild("MonsterSpawners")
+    for _, name in ipairs(BOSS_ORDER) do
+        if now >= (Runtime.BossRetryAt[name] or 0) then
+            local route = Runtime.MobRoutes[name]
+            if route then
+                local job
+                local live = Runtime.FindLiveQuestMob(name)
+                if live then
+                    if bonusMobLevelAllowed(live) then
+                        local field = Runtime.NearestMobField(objectPosition(live), route)
+                        if field or route.AllowNoField then
+                            job = {Name = name, Route = route, Live = live, Field = field}
+                        end
+                    else
+                        setStatus("Boss scheduler", string.format("Skip %s: level above hive average", name))
+                        Runtime.BossRetryAt[name] = now + 600
+                    end
+                elseif spawners then
+                    for _, spawnerName in ipairs(route.Spawners or {}) do
+                        local spawner = spawners:FindFirstChild(spawnerName)
+                        if spawner and Runtime.QuestMobSpawnerReady(spawner, route, stats) then
+                            local field = Runtime.NearestMobField(objectPosition(spawner), route)
+                            if field or route.AllowNoField then
+                                job = {Name = name, Route = route, Spawner = spawner, Field = field}
+                                break
+                            end
+                        end
+                    end
+                end
+                if job then
+                    job.FightTimeout = name == "Stump Snail"
+                        and (tonumber(Config.BossSnailChipSeconds) or 180)
+                        or (tonumber(Config.BossFightTimeout) or 300)
+                    local origin = objectPosition(job.Live or job.Spawner)
+                        or (job.Field and fieldPoint(job.Field))
+                    Runtime.BossBusy = true
+                    setStatus("Boss scheduler", name)
+                    local ok, fought = xpcall(function() return Runtime.FarmBonusMob(job) end, debug.traceback)
+                    if not ok then
+                        Runtime.BonusMobBusy = false
+                        Runtime.Digging = false
+                        Runtime.MaterialCombat = false
+                        reportError("BossScheduler", fought)
+                    end
+                    Runtime.BossBusy = false
+                    if ok and fought then
+                        Runtime.BossRetryAt[name] = os.clock() + math.max(60, tonumber(route.Cooldown) or 300)
+                        if origin and Config.AutoTokens then
+                            Runtime.SweepAreaLoot(origin, tonumber(Config.BossLootRadius) or 150,
+                                tonumber(Config.BossLootSweepSeconds) or 20, "BossDrop")
+                        end
+                        return true
+                    end
+                    Runtime.BossRetryAt[name] = os.clock() + 600
+                    return false
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- HONEYSTORM ----------------------------------------------------------------
+-- Honeystorm is a TOY (workspace.Toys.Honeystorm), not a workspace happening:
+-- fire ToyEvent when its server cooldown is up, then farm Clover Field and
+-- sweep tokens while the storm rains honey tokens. Confirmation is ONLY a
+-- ToyTimes stamp advance (fresh stats read) - never the remote's return value.
+function Runtime.HoneystormStep()
+    if not Config.AutoHoneystorm or not Config.Enabled or Runtime.MeteorPriorityActive then
+        return false
+    end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy or Runtime.BonusMobBusy
+        or Runtime.BossBusy or Runtime.Digging or Runtime.QuestFarming or Runtime.ViciousClaimBusy
+        or Runtime.HoneystormBusy or Runtime.PuffshroomBusy or Runtime.MovementOwner ~= nil then
+        return false
+    end
+    local now = os.clock()
+    if now < (Runtime.HoneystormCheckAt or 0) then return false end
+    Runtime.HoneystormCheckAt = now + 30
+    if not Runtime.HoneystormProbeDone then
+        Runtime.HoneystormProbeDone = true
+        local happenings = workspace:FindFirstChild("Happenings")
+        warn(string.format("[BSS Kaitun] Honeystorm probe: workspace.Happenings %s"
+            .. " (external-storm object unverified - toy-driven only)",
+            happenings and "present" or "absent"))
+    end
+    local toysFolder = workspace:FindFirstChild("Toys")
+    local toy = toysFolder and toysFolder:FindFirstChild("Honeystorm")
+    if not toy then
+        Runtime.HoneystormCheckAt = now + 600
+        if not Runtime.HoneystormMissingWarned then
+            Runtime.HoneystormMissingWarned = true
+            warn("[BSS Kaitun] Toy 'Honeystorm' khong ton tai trong workspace.Toys - park 10 phut")
+        end
+        return false
+    end
+    local cooldown = 3600
+    local cooldownValue = toy:FindFirstChild("Cooldown")
+    if cooldownValue and cooldownValue:IsA("ValueBase") then
+        cooldown = math.max(60, tonumber(cooldownValue.Value) or cooldown)
+    end
+    local stats = getStats(false)
+    local toyTimes = type(stats) == "table" and stats.ToyTimes or nil
+    local lastUse = type(toyTimes) == "table" and tonumber(toyTimes.Honeystorm) or nil
+    local remaining = lastUse and math.max(0, cooldown - (MaterialSystem.Clock() - lastUse)) or 0
+    if remaining > 0 then
+        Runtime.HoneystormCheckAt = now + math.clamp(remaining, 5, 300)
+        return false
+    end
+    if not remoteCall("ToyEvent", "Honeystorm") then
+        Runtime.HoneystormCheckAt = now + 90
+        return false
+    end
+    local function stamped()
+        local fresh = getStats(true)
+        local freshTimes = type(fresh) == "table" and fresh.ToyTimes or nil
+        return type(freshTimes) == "table" and tonumber(freshTimes.Honeystorm) or nil
+    end
+    local recorded = stamped()
+    if not recorded or (lastUse and recorded <= lastUse) then
+        task.wait(2)
+        recorded = stamped()
+    end
+    if not recorded or (lastUse and recorded <= lastUse) then
+        Runtime.HoneystormCheckAt = now + 120
+        setStatus("Honeystorm", "tap unconfirmed - retrying later")
+        return false
+    end
+    Runtime.HoneystormCheckAt = os.clock() + cooldown
+    Runtime.HoneystormBusy = true
+    setStatus("Honeystorm", "Storm active | farming Clover Field")
+    local field = findField("Clover Field")
+    local deadline = os.clock() + math.max(5, tonumber(Config.HoneystormSweepSeconds) or 35)
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+        and os.clock() < deadline do
+        if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then break end
+        if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
+            Runtime.Digging = false
+            -- convertPollen gates on HoneystormBusy: drop it for our own convert.
+            Runtime.HoneystormBusy = false
+            convertPollen()
+            Runtime.HoneystormBusy = true
+        elseif field then
+            farmStep(math.max(0.5, tonumber(Config.SproutFarmSlice) or 3),
+                field, "Honeystorm", "Honeystorm | Clover Field")
+        end
+        sweepTokens(1, "HoneystormDrop")
+        task.wait(0.05)
+    end
+    Runtime.Digging = false
+    Runtime.HoneystormBusy = false
+    return true
+end
+
+-- PUFFSHROOM CHASE ----------------------------------------------------------
+-- Detection is atlas-verified: workspace.Happenings.Puffshrooms, name/rarity/
+-- level from Puffball Top.Attachment.Gui.NameRow.TextLabel, remaining time from
+-- Gui.BarRow.Bar.NumberLabel ("m:ss" or "Ns"), position from Puffball Stem.
+local PUFF_RARITY_RANK = {Common = 1, Rare = 2, Epic = 3, Legendary = 4, Mythic = 5}
+
+function Runtime.FindPuffshroom(minRarity)
+    local happenings = workspace:FindFirstChild("Happenings")
+    local folder = happenings and happenings:FindFirstChild("Puffshrooms")
+    if not folder then return nil end
+    local _, _, root = getCharacter(1)
+    local minRank = PUFF_RARITY_RANK[minRarity or "Common"] or 1
+    local crabLive, mondoLive = nil, nil
+    local best = nil
+    for _, puff in ipairs(folder:GetChildren()) do
+        local top = puff:FindFirstChild("Puffball Top")
+        local stem = puff:FindFirstChild("Puffball Stem")
+        local attachment = top and top:FindFirstChild("Attachment")
+        local gui = attachment and attachment:FindFirstChild("Gui")
+        local nameRow = gui and gui:FindFirstChild("NameRow")
+        local nameLabel = nameRow and nameRow:FindFirstChild("TextLabel")
+        if stem and nameLabel then
+            local text = tostring(nameLabel.Text or "")
+            local rarity = string.match(text, "(%a*)%s+Puffshroom") or "Common"
+            local level = tonumber(string.match(text, "Lvl (%d+)")) or 1
+            local rank = PUFF_RARITY_RANK[rarity] or 1
+            local remaining = math.huge
+            local barRow = gui:FindFirstChild("BarRow")
+            local bar = barRow and barRow:FindFirstChild("Bar")
+            local numberLabel = bar and bar:FindFirstChild("NumberLabel")
+            if numberLabel then
+                local timerText = tostring(numberLabel.Text or "")
+                local minutes, seconds = string.match(timerText, "(%d+):(%d+)")
+                if minutes then
+                    remaining = tonumber(minutes) * 60 + tonumber(seconds)
+                else
+                    remaining = tonumber(string.match(timerText, "%d+")) or math.huge
+                end
+            end
+            local position = objectPosition(stem)
+            local field = position and flowerFieldAtPosition(position, 8)
+            if rank >= minRank and remaining >= 10 and position and field then
+                -- Atlas skips: Coconut Field while the crab is alive, Mountain
+                -- Top while the Mondo Chick is alive (fight owns the field).
+                if field.Name == "Coconut Field" then
+                    if crabLive == nil then
+                        crabLive = Runtime.FindLiveQuestMob("Coconut Crab") ~= nil
+                    end
+                    if crabLive then continue end
+                elseif field.Name == "Mountain Top Field" then
+                    if mondoLive == nil then
+                        mondoLive = type(Runtime.FindMondoChick) == "function"
+                            and Runtime.FindMondoChick() ~= nil
+                    end
+                    if mondoLive then continue end
+                end
+                local distance = root and (root.Position - position).Magnitude or 0
+                if not best or level > best.Level
+                    or (level == best.Level and distance < best.Distance) then
+                    best = {Model = puff, Position = position, Field = field,
+                        Rarity = rarity, Rank = rank, Level = level, Distance = distance}
+                end
+            end
+        end
+    end
+    return best
+end
+
+function Runtime.FarmPuffshroom()
+    if not Config.AutoFarmPuffshrooms or not Config.Enabled or Runtime.MeteorPriorityActive then
+        return false
+    end
+    if Runtime.PuffshroomBusy or Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy
+        or Runtime.BossBusy or Runtime.HoneystormBusy then
+        return false
+    end
+    local job = Runtime.FindPuffshroom()
+    if not job then
+        Runtime.PuffshroomPending = false
+        return false
+    end
+    Runtime.PuffshroomBusy = true
+    Runtime.Digging = true
+    Runtime.CurrentField = job.Field and job.Field.Name or Runtime.CurrentField
+    setStatus("Puffshroom", job.Rarity .. " lv." .. job.Level .. " | " .. tostring(Runtime.CurrentField))
+    local handled = false
+    local deadline = os.clock() + math.max(30, tonumber(Config.PuffshroomMaxSeconds) or 300)
+    local lastPosition = job.Position
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+        and os.clock() < deadline do
+        if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then break end
+        local puff = job.Model
+        if not (puff.Parent ~= nil and puff:IsDescendantOf(workspace)) then
+            -- Burst: trail to an equal-or-higher rarity puff (atlas behavior),
+            -- otherwise stop and vacuum the burst loot below.
+            local nextJob = Runtime.FindPuffshroom(job.Rarity)
+            if not nextJob or nextJob.Model == puff then break end
+            job = nextJob
+            Runtime.CurrentField = job.Field and job.Field.Name or Runtime.CurrentField
+            setStatus("Puffshroom", "Trail | " .. job.Rarity .. " lv." .. job.Level)
+        end
+        lastPosition = job.Position
+        if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
+            Runtime.Digging = false
+            -- convertPollen gates on PuffshroomBusy: drop it for our own convert.
+            Runtime.PuffshroomBusy = false
+            convertPollen()
+            Runtime.PuffshroomBusy = true
+            Runtime.Digging = true
+        else
+            local _, _, root = getCharacter(1)
+            if root and (root.Position - job.Position).Magnitude > 12 then
+                tweenTo(CFrame.new(job.Position + Vector3.new(0, 2, 0)), Config.TweenSpeed, "Puffshroom")
+            end
+            if job.Field then
+                local worked = farmStep(math.max(0.5, tonumber(Config.SproutFarmSlice) or 3),
+                    job.Field, "Puffshroom",
+                    job.Rarity .. " Puffshroom lv." .. job.Level .. " | " .. job.Field.Name)
+                handled = worked or handled
+            end
+        end
+        sweepTokens(1, "PuffDrop")
+        task.wait(0.05)
+    end
+    if lastPosition and not Runtime.MeteorPriorityActive then
+        Runtime.SweepAreaLoot(lastPosition, 25, 10, "PuffDrop")
+    end
+    Runtime.Digging = false
+    Runtime.PuffshroomBusy = false
+    Runtime.PuffshroomPending = false
+    return handled
+end
+
+-- MEMORY MATCH --------------------------------------------------------------
+-- Toy-triggered minigame solver. Board/card paths are atlas-verified; the flip
+-- goes through the game's own RegisterTileSelected(matchGame, tile) with the
+-- active game pulled from MemoryMatchManager.SetActiveGame's upvalue #2.
+local MEMORY_MATCH_TOYS = {
+    {Name = "Memory Match", Bees = 10, Honey = 25000},
+    {Name = "Mega Memory Match", Bees = 15, Honey = 500000},
+    {Name = "Night Memory Match", Bees = 30, Honey = 5000000, NightOnly = true},
+    {Name = "Extreme Memory Match", Bees = 35, Honey = 25000000},
+}
+Runtime.MemoryMatchToyRetryAt = Runtime.MemoryMatchToyRetryAt or {}
+
+function Runtime.FindMemoryMatchBoard()
+    local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+    local screenGui = playerGui and playerGui:FindFirstChild("ScreenGui")
+    local layer = screenGui and screenGui:FindFirstChild("MinigameLayer")
+    if not layer or not layer.Visible then return nil end
+    for _, child in ipairs(layer:GetChildren()) do
+        local pos = child.Position
+        if not (pos and pos.Y and pos.Y.Scale == 1) then
+            local grid = child:FindFirstChild("GuiGrid")
+            local chances = child:FindFirstChild("ChancesFrame")
+            local countLabel = chances and chances:FindFirstChild("CountLabel")
+            if grid and countLabel and tostring(countLabel.Text) ~= "0" then
+                local tiles = {}
+                for _, tile in ipairs(grid:GetChildren()) do
+                    if tile:FindFirstChild("MemoryMatchGuiSlot") then
+                        table.insert(tiles, tile)
+                    end
+                end
+                if #tiles > 0 then
+                    return {Frame = child, Grid = grid, CountLabel = countLabel, Tiles = tiles}
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Unrevealed tiles show the placeholder image (3690982763) -> nil, so the
+-- solver treats them as unknown. ObjBorder.Visible = currently revealed.
+local function memoryMatchCard(tile)
+    local ok, card = pcall(function()
+        return tile.StageGrow.StagePop.StageFlip.ObjCard.ObjContent.GuiTile.StageGrow.StagePop.StageFlip.ObjCard
+    end)
+    if not ok or not card then return nil end
+    local content = card:FindFirstChild("ObjContent")
+    local image = content and content:FindFirstChild("ObjImage")
+    if not image then return nil end
+    local id = string.match(tostring(image.Image or ""), "%d+")
+    if not id or id == "3690982763" then return nil end
+    local count = 1
+    local textCount = image:FindFirstChild("TextCount")
+    if textCount then
+        count = tonumber((string.gsub(tostring(textCount.Text or ""), "x", ""))) or 1
+    end
+    local border = card:FindFirstChild("ObjBorder")
+    return {Id = id, Count = count, Revealed = border ~= nil and border.Visible == true}
+end
+
+local function memoryMatchFlipSetup()
+    local ok, result = pcall(function()
+        local managerModule = ReplicatedStorage:FindFirstChild("MemoryMatchManager")
+        local guiFolder = ReplicatedStorage:FindFirstChild("Gui")
+        local guiModule = guiFolder and guiFolder:FindFirstChild("MemoryMatch")
+        if not managerModule or not guiModule then return nil end
+        local register = require(guiModule).RegisterTileSelected
+        local setActive = require(managerModule).SetActiveGame
+        local getupvalue = (debug and debug.getupvalue) or rawget(ENV, "getupvalue")
+        if type(register) ~= "function" or type(setActive) ~= "function"
+            or type(getupvalue) ~= "function" then return nil end
+        local matchGame = getupvalue(setActive, 2)
+        if not matchGame or not matchGame.Grid then return nil end
+        return {Register = register, Game = matchGame}
+    end)
+    if ok then return result end
+    return nil
+end
+
+function Runtime.TriggerMemoryMatchToy()
+    local stats = getStats(false)
+    local serverNow = MaterialSystem.Clock()
+    local toysFolder = workspace:FindFirstChild("Toys")
+    local bees = beeCount()
+    local honey = liveCoreValue("Honey") or 0
+    local clockTime = Lighting.ClockTime
+    local isNight = clockTime >= 19 or clockTime <= 5
+    for _, entry in ipairs(MEMORY_MATCH_TOYS) do
+        if bees >= entry.Bees and honey > entry.Honey
+            and (not entry.NightOnly or isNight)
+            and os.clock() >= (Runtime.MemoryMatchToyRetryAt[entry.Name] or 0) then
+            local toy = toysFolder and toysFolder:FindFirstChild(entry.Name)
+            if not toy then
+                Runtime.MemoryMatchToyRetryAt[entry.Name] = os.clock() + 600
+            else
+                local cooldown = 600
+                local cooldownValue = toy:FindFirstChild("Cooldown")
+                if cooldownValue and cooldownValue:IsA("ValueBase") then
+                    cooldown = math.max(60, tonumber(cooldownValue.Value) or cooldown)
+                end
+                local toyTimes = type(stats) == "table" and stats.ToyTimes or nil
+                local lastUse = type(toyTimes) == "table" and tonumber(toyTimes[entry.Name]) or nil
+                local remaining = lastUse and math.max(0, cooldown - (serverNow - lastUse)) or 0
+                if remaining > 0 then
+                    Runtime.MemoryMatchToyRetryAt[entry.Name] = os.clock() + math.clamp(remaining, 5, 300)
+                else
+                    Runtime.MemoryMatchToyRetryAt[entry.Name] = os.clock() + 90
+                    if remoteCall("ToyEvent", entry.Name) then
+                        local function stamped()
+                            local fresh = getStats(true)
+                            local freshTimes = type(fresh) == "table" and fresh.ToyTimes or nil
+                            return type(freshTimes) == "table" and tonumber(freshTimes[entry.Name]) or nil
+                        end
+                        local recorded = stamped()
+                        if not recorded or (lastUse and recorded <= lastUse) then
+                            task.wait(2)
+                            recorded = stamped()
+                        end
+                        if recorded and not (lastUse and recorded <= lastUse) then
+                            Runtime.MemoryMatchToyRetryAt[entry.Name] = os.clock() + cooldown
+                            -- The board opens async after the tap: poll up to 2s.
+                            local deadline = os.clock() + 2
+                            local board = nil
+                            repeat
+                                board = Runtime.FindMemoryMatchBoard()
+                                if board then break end
+                                task.wait(0.1)
+                            until os.clock() >= deadline
+                            if board then return board end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function Runtime.SolveMemoryMatch(board)
+    local setup = memoryMatchFlipSetup()
+    if not setup then
+        Runtime.MemoryMatchCheckAt = os.clock() + 600
+        if not Runtime.MemoryMatchFlipWarned then
+            Runtime.MemoryMatchFlipWarned = true
+            warn("[BSS Kaitun] Memory Match: khong lay duoc matchGame/RegisterTileSelected - park 10 phut")
+        end
+        return false
+    end
+    Runtime.MemoryMatchBusy = true
+    setStatus("Memory Match", "Solving board")
+    local memory, matched = {}, {}
+    local attempts, flips = 0, 0
+    local maxAttempts = math.max(1, tonumber(Config.MemoryMatchMaxAttempts) or 20)
+    local function flip(index)
+        if Runtime.MeteorPriorityActive then return false end
+        local okTile, tile = pcall(setup.Game.Grid.GetTileAtIndex, setup.Game.Grid, index)
+        if not okTile or not tile then return false end
+        local okFlip = pcall(setup.Register, setup.Game, tile)
+        flips += 1
+        task.wait(0.3)
+        return okFlip
+    end
+    while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
+        and attempts < maxAttempts do
+        if tostring(board.CountLabel.Text) == "0" then break end
+        if setup.Game.Finished then break end
+        if not board.Frame.Parent or board.Frame.Visible == false then break end
+        attempts += 1
+        local unknown = {}
+        for i, tile in ipairs(board.Tiles) do
+            if not matched[i] then
+                local card = memoryMatchCard(tile)
+                if card then
+                    memory[i] = card
+                elseif not memory[i] then
+                    table.insert(unknown, i)
+                end
+            end
+        end
+        -- 1) Known pair (same image id + same count): flip both, mark matched.
+        local pairA, pairB = nil, nil
+        for i, card in pairs(memory) do
+            if not matched[i] then
+                for j, other in pairs(memory) do
+                    if j > i and not matched[j]
+                        and card.Id == other.Id and card.Count == other.Count then
+                        pairA, pairB = i, j
+                        break
+                    end
+                end
+            end
+            if pairA then break end
+        end
+        if pairA then
+            if not memory[pairA].Revealed then flip(pairA) end
+            if not memory[pairB].Revealed then flip(pairB) end
+            matched[pairA], matched[pairB] = true, true
+        elseif #unknown >= 2 then
+            -- 2) Explore two unknown tiles and record what they reveal.
+            flip(unknown[1])
+            local cardA = memoryMatchCard(board.Tiles[unknown[1]])
+            if cardA then memory[unknown[1]] = cardA end
+            flip(unknown[2])
+            local cardB = memoryMatchCard(board.Tiles[unknown[2]])
+            if cardB then memory[unknown[2]] = cardB end
+        elseif #unknown == 1 then
+            flip(unknown[1])
+            local card = memoryMatchCard(board.Tiles[unknown[1]])
+            if card then memory[unknown[1]] = card end
+        else
+            break
+        end
+    end
+    Runtime.MemoryMatchBusy = false
+    Runtime.MemoryMatchCheckAt = os.clock() + 30
+    if flips > 0 then
+        setStatus("Memory Match", string.format("Done | %d flips", flips))
+    end
+    return flips > 0
+end
+
+function Runtime.MemoryMatchStep()
+    if not Config.AutoMemoryMatch or not Config.Enabled or Runtime.MeteorPriorityActive then
+        return false
+    end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy or Runtime.BonusMobBusy
+        or Runtime.BossBusy or Runtime.HoneystormBusy or Runtime.PuffshroomBusy
+        or Runtime.Digging or Runtime.QuestFarming or Runtime.ViciousClaimBusy
+        or Runtime.MemoryMatchBusy or Runtime.MovementOwner ~= nil then
+        return false
+    end
+    local now = os.clock()
+    if now < (Runtime.MemoryMatchCheckAt or 0) then return false end
+    Runtime.MemoryMatchCheckAt = now + 30
+    -- A board already open (our tap or the player's) is solved first.
+    local board = Runtime.FindMemoryMatchBoard() or Runtime.TriggerMemoryMatchToy()
+    if not board then return false end
+    return Runtime.SolveMemoryMatch(board)
 end
 
 -- Vicious always-on: no material planner needed - whenever a live vic spawns
@@ -8760,6 +9559,10 @@ function Runtime.PlantAt(point, planterName)
     if typeof(point) ~= "Vector3" or type(planterName) ~= "string" then return false end
     local _, humanoid, root = getCharacter(2)
     if not root or not humanoid or humanoid.Health <= 0 then return false end
+    -- Blink ghi CFrame tho: glide runner dang chay se ghi de len tung frame
+    -- va keo character ve route cu -> plant sai field. Chi blink khi mover ranh.
+    if Runtime.MovementOwner ~= nil or Runtime.Glide ~= nil then return false end
+    local generation = Runtime.TweenGeneration
     local home = root.CFrame
     local wasAnchored = root.Anchored
     pcall(function()
@@ -8771,6 +9574,13 @@ function Runtime.PlantAt(point, planterName)
         root.AssemblyAngularVelocity = Vector3.zero
     end)
     task.wait(0.2) -- let the standing field replicate to the server
+    if Runtime.TweenGeneration ~= generation or Runtime.Glide ~= nil then
+        pcall(function()
+            root.CFrame = home
+            root.Anchored = wasAnchored
+        end)
+        return false
+    end
     local before = {}
     for _, data in ipairs(MaterialSystem.PlanterData()) do before[data.ActorID] = true end
     remoteCall("PlayerActivesCommand", {Name = planterName})
@@ -9358,32 +10168,23 @@ local function handleMeteor()
     removeMeteor(meteor)
     pruneQueue()
 
-    -- Meteor remains in the locked field: ignore other fields and handle same-field
-    -- impacts on the very next tick instead of tweening by global ReadyAt.
-    if firstMeteorInField(field.Name) then
-        Runtime.Digging = false
-        return finish(true)
-    end
-
-    -- No markers left in field: walk-collect tokens. If another field waits, keep only
-    -- a short grace window; with an empty queue keep the full MeteorStayTime to
-    -- gather tokens and catch late same-field events.
-    local otherFieldWaiting = #Runtime.MeteorQueue > 0
-    local stayTime = otherFieldWaiting
-        and math.max(0.25, tonumber(Config.MeteorFieldGraceTime) or 1.25)
-        or math.max(0.5, tonumber(Config.MeteorStayTime) or 9)
-    local tokenDeadline = os.clock() + stayTime
-    local otherFieldDeadline = otherFieldWaiting and tokenDeadline or nil
-    setStatus("Auto meteor", string.format("Lock field %s | walking to collect tokens", field.Name))
+    -- COLLECT HET TOKEN cua meteor nay roi moi di bat meteor khac: sweep den
+    -- khi field khong con token (khong con grace 1.25s bo roi token nhu cu).
+    -- Chi cat som khi impact tiep theo sap san sang (phai di cho kip) hoac
+    -- cham safety cap MeteorTokenSweepTime. Meteor cung field cho den ReadyAt
+    -- cua no trong luc sweep - het token thi xu ly ngay tick sau.
+    local sweepTime = math.max(1, tonumber(Config.MeteorTokenSweepTime) or 25)
+    local grace = math.max(0.25, tonumber(Config.MeteorFieldGraceTime) or 1.25)
+    local tokenDeadline = os.clock() + sweepTime
+    setStatus("Auto meteor", string.format("Lock field %s | collecting all tokens", field.Name))
+    local emptyScans = 0
     while Runtime.Running and Config.Enabled and Config.AutoMeteor and os.clock() < tokenDeadline do
         pruneQueue()
-        if firstMeteorInField(field.Name) then break end
-        -- If the queue was empty but another field gets a meteor, do not hold
-        -- the old field for 9s: pull the deadline back to the grace window to catch the next.
-        if #Runtime.MeteorQueue > 0 and not otherFieldDeadline then
-            otherFieldDeadline = os.clock()
-                + math.max(0.25, tonumber(Config.MeteorFieldGraceTime) or 1.25)
-            tokenDeadline = math.min(tokenDeadline, otherFieldDeadline)
+        local upcoming = Runtime.MeteorQueue[1]
+        if upcoming then
+            -- min() giu deadline don dieu: ReadyAt da qua thi chi con grace
+            -- ngan tu thoi diem nay, khong bi keo dai moi vong lap.
+            tokenDeadline = math.min(tokenDeadline, math.max(upcoming.ReadyAt, os.clock() + grace))
         end
         if standingField() ~= field then break end
         -- ROUTE CACHE truoc (nhu sweepTokens): full scan + DFS 12.5Hz trong
@@ -9393,9 +10194,14 @@ local function handleMeteor()
             token = findBestTokenInStandingField()
         end
         if token then
+            emptyScans = 0
             collectToken(token, "MeteorToken")
         else
-            task.wait(0.08)
+            -- Token co the no cham mot nhip sau impact: xac nhan trong vai
+            -- lan quet lien tiep roi moi ket luan da het token.
+            emptyScans += 1
+            if emptyScans >= 3 then break end
+            task.wait(0.15)
         end
     end
 
@@ -9427,10 +10233,13 @@ task.spawn(function()
                     reportError("MeteorPriority", err)
                 end
             end
-        elseif not Config.Enabled or not Config.AutoMeteor or #Runtime.MeteorQueue == 0 then
+        elseif not Runtime.MeteorHandling
+            and (not Config.Enabled or not Config.AutoMeteor or #Runtime.MeteorQueue == 0) then
             -- Enabled=false + queue non-empty phai cung clear flag: bootstrap
             -- (claimHive/redeemList/progressionWork) spin vinh vien khi paused
-            -- neu flag treo true.
+            -- neu flag treo true. Nhung KHONG clear giuc luc handleMeteor dang
+            -- sweep token (queue rong van phai giu priority de worker khac
+            -- khong cuop mover giua chung).
             Runtime.MeteorPriorityActive = false
         end
         -- CPU saver: poll fast (0.03s) only with active meteors; with an empty queue
@@ -9447,8 +10256,17 @@ local function applyLowGraphics(enabled)
     local tokenRoots = {Collectibles = true}
     local flowerRoots = {Flowers = true}
     local hiveRoots = {Honeycombs = true, HivePlatforms = true}
-    local decorationRoots = {Decorations = true, Decor = true, Decoratives = true}
-    local decorationPropNames = {pineapple = true, ["giant pineapple"] = true, ["pineapple decoration"] = true}
+    local decorationRoots = {Decorations = true, Decor = true, Decoratives = true,
+        -- Hang rao quanh hive/nha = Map.Fences (atlas anti-lag destroy chung);
+        -- HiveDeco = model trang tri quanh hive + sticker canvas.
+        Fences = true, HiveDeco = true}
+    local decorationPropNames = {pineapple = true, ["giant pineapple"] = true, ["pineapple decoration"] = true,
+        mushroom = true, mushrooms = true, bush = true, bushes = true, bamboo = true,
+        rock = true, rocks = true, sunflower = true}
+    local function decorationPropName(name)
+        local lower = string.lower(name)
+        return decorationPropNames[lower] == true or lower:find("^blue flower") ~= nil
+    end
     local weatherRoots = {Particles = true, Effects = true, Clouds = true, Weather = true}
 
     local function visualGroups(object)
@@ -9462,7 +10280,8 @@ local function applyLowGraphics(enabled)
             elseif flowerRoots[name] then flowerVisual = true
             elseif hiveRoots[name] then hiveVisual = true
             elseif decorationRoots[name] then decorationVisual = true
-            elseif weatherRoots[name] then weatherVisual = true end
+            elseif weatherRoots[name] then weatherVisual = true
+            elseif decorationPropName(name) then decorationVisual = true end
             cursor = cursor.Parent
         end
         return beeVisual, tokenVisual, flowerVisual, hiveVisual, decorationVisual, weatherVisual
@@ -9479,7 +10298,7 @@ local function applyLowGraphics(enabled)
             if parent and parent.Name == "Decorations" then insideDecorations = true end
             if cursor.Name == "Misc" and parent and parent.Name == "Decorations" then return cursor end
             if cursor.Name == "Decor" or cursor.Name == "Decoratives" then return cursor end
-            if decorationPropNames[string.lower(cursor.Name)] then namedProp = cursor end
+            if decorationPropName(cursor.Name) then namedProp = cursor end
             cursor = parent
         end
         return insideDecorations and namedProp or nil
@@ -10505,7 +11324,7 @@ end
 local function starTreatPendingCount(cells)
     cells = cells or hiveBeeCells()
     local pending = 0
-    for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
+    for _, beeName in ipairs(Config.StarTreatOrder or {"Vicious", "Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
         for _, cell in ipairs(cells) do
             if not cell.Locked and (cell.Normalized or Runtime.NormalizeEventBeeName(cell.Type)) == wanted and not cell.Gifted then
@@ -10624,7 +11443,7 @@ function Runtime.StarTreatStep()
         end
         return "wait"
     end
-    for _, beeName in ipairs(Config.StarTreatOrder or {"Tabby", "Photon", "Cobalt", "Crimson"}) do
+    for _, beeName in ipairs(Config.StarTreatOrder or {"Vicious", "Tabby", "Photon", "Cobalt", "Crimson"}) do
         local wanted = Runtime.NormalizeEventBeeName(beeName)
         for _, cell in ipairs(cells) do
             if not cell.Locked and (cell.Normalized or Runtime.NormalizeEventBeeName(cell.Type)) == wanted and not cell.Gifted then
@@ -10823,7 +11642,10 @@ task.spawn(function()
                         end
                     end
                 end, debug.traceback)
-                if not ok then reportError("QuestFeed", err) end
+                if not ok then
+                    Runtime.QuestFeedBusy = false
+                    reportError("QuestFeed", err)
+                end
             end
         end
         task.wait(5)
@@ -10915,6 +11737,10 @@ function Runtime.PlanterCycleStep()
                 if not ok then
                     -- Server likely validated proximity: walk over ONCE and
                     -- tap on site - the drops land nearby, so sweep them too.
+                    if Runtime.Converting then
+                        Runtime.PlanterBusy = false
+                        return "idle"
+                    end
                     if position then
                         tweenTo(CFrame.new(position + Vector3.new(0, 3, 0)), Config.TweenSpeed, "Planter")
                         remoteCall("PlanterModelCollect", data.ActorID)
@@ -10952,13 +11778,12 @@ function Runtime.PlanterCycleStep()
     -- the game's own FIELD_REQUIREMENTS (the plan's order is nectar priority,
     -- not bee gates). A rejected plant falls through to the NEXT candidate
     -- field instead of parking the whole plan on one head-of-line failure.
-    local usable = 0
+    local usable = #active
     local occupied = {}
     for _, data in ipairs(active) do
         local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
         local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
         if field then occupied[field.Name] = true end
-        if MaterialSystem.PlanterProgress(data) ~= nil then usable += 1 end
     end
     if usable >= 3 then return "full" end
     local attempts, failed = 0, false
@@ -10981,13 +11806,28 @@ function Runtime.PlanterCycleStep()
                     local fld = pos and flowerFieldAtPosition(pos + Vector3.new(0, 4, 0), 8) or nil
                     if fld and fld.Name == fieldName then stillFree = false break end
                 end
-                if stillFree then
+                if stillFree and not Runtime.Converting then
                     -- Blink-plant first; walk-and-fire only as fallback.
                     local planted = Runtime.PlantAt(point, planterName)
                     if not planted then
                         tweenTo(CFrame.new(point), Config.TweenSpeed, "Planter")
                         task.wait(0.35)
-                        planted = select(1, remoteCall("PlayerActivesCommand", {Name = planterName})) and true or false
+                        -- Transport-ok is NOT planted: confirm a new ActorID
+                        -- appears (same proof as PlantAt) before reporting success.
+                        local beforeIds = {}
+                        for _, data in ipairs(MaterialSystem.PlanterData()) do beforeIds[data.ActorID] = true end
+                        remoteCall("PlayerActivesCommand", {Name = planterName})
+                        local confirmDeadline = os.clock() + 1.5
+                        while os.clock() < confirmDeadline and Runtime.Running do
+                            task.wait(0.1)
+                            for _, data in ipairs(MaterialSystem.PlanterData()) do
+                                if not beforeIds[data.ActorID] then
+                                    planted = true
+                                    break
+                                end
+                            end
+                            if planted then break end
+                        end
                     end
                     Runtime.PlanterBusy = false
                     if planted then
@@ -11010,7 +11850,10 @@ task.spawn(function()
     task.wait(10) -- let LocalPlanters load and bootstrap stats land first
     while Runtime.Running do
         if Config.Enabled and Config.AutoPlanters and not Runtime.PlanterBusy
-            and not Runtime.Converting
+            and not Runtime.Converting and not Runtime.ViciousClaimBusy
+            and not Runtime.ViciousBusy and not Runtime.Digging and not Runtime.QuestFarming
+            and not Runtime.BossBusy and not Runtime.HoneystormBusy and not Runtime.PuffshroomBusy
+            and Runtime.MovementOwner == nil
             and os.clock() >= (Runtime.PlanterScanAt or 0) then
             local ok, result = xpcall(Runtime.PlanterCycleStep, debug.traceback)
             if not ok then
@@ -11060,6 +11903,14 @@ task.spawn(function()
                 if not ok then
                     Runtime.NextFreeToyCheck = os.clock() + 30
                     reportError("FreeToys", err)
+                end
+            end
+            if Config.AutoMemoryMatch then
+                local ok, err = xpcall(Runtime.MemoryMatchStep, debug.traceback)
+                if not ok then
+                    Runtime.MemoryMatchBusy = false
+                    Runtime.MemoryMatchCheckAt = os.clock() + 60
+                    reportError("MemoryMatch", err)
                 end
             end
         end
@@ -11377,6 +12228,10 @@ end
 local function upgradeSprinkler()
     if not Config.AutoBuySprinklers then return false end
     if Runtime.MeteorPriorityActive then return false end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy
+        or Runtime.Digging or Runtime.ViciousClaimBusy or Runtime.MovementOwner ~= nil then
+        return false
+    end
     if beeCount() < Config.MinSprinklerBees then return false end
     local upgraded = false
     for _, entry in ipairs(Config.SprinklerSequence) do
@@ -11426,8 +12281,78 @@ local function nextMilestone(count)
     return nil
 end
 
+-- Planter ownership must be PERMANENT: a planted reusable planter leaves
+-- Player.Eggs at 0 until harvest, so stock-only checks would re-buy it every
+-- pass. Totals.Purchases/EggsReceived + active pots prove the one-time buy.
+local function planterOwned(entry, stats)
+    if Runtime.CompletedGear[entry.Type] then return true end
+    local totals = type(stats) == "table" and stats.Totals or nil
+    local purchases = type(totals) == "table" and totals.Purchases or nil
+    local purchasedEggs = type(purchases) == "table" and purchases.Eggs or nil
+    local received = type(totals) == "table" and totals.EggsReceived or nil
+    if (type(purchasedEggs) == "table" and tonumber(purchasedEggs[entry.Type]))
+        or (type(received) == "table" and tonumber(received[entry.Type])) then
+        return true
+    end
+    if MaterialSystem.Amount(entry.Type, stats) > 0 then return true end
+    local wanted = string.lower(tostring(entry.Type)):gsub("%s", "")
+    for _, data in ipairs(MaterialSystem.PlanterData()) do
+        if string.lower(tostring(MaterialSystem.PlanterName(data))):gsub("%s", "") == wanted then
+            return true
+        end
+    end
+    return false
+end
+
+local function buyNextPlanter()
+    if not Config.AutoBuyPlanters or not Config.Enabled or Runtime.MeteorPriorityActive then
+        return false
+    end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy or Runtime.Digging
+        or Runtime.ViciousClaimBusy or Runtime.MovementOwner ~= nil then
+        return false
+    end
+    local stats = getStats(false)
+    for _, entry in ipairs(Config.PlanterSequence or {}) do
+        if planterOwned(entry, stats) then
+            Runtime.DeferredItems[entry.Type] = nil
+        else
+            if entry.Shop == "DapperPlanterShop" then
+                local gate = workspace:FindFirstChild("Gates")
+                local door = gate and gate:FindFirstChild("Dapper Shop")
+                door = door and door:FindFirstChild("Door")
+                if beeCount() < 10 or (door and door.CanCollide) then return false end
+            elseif entry.Shop == "Petal Shop" then
+                if beeCount() < 35 then return false end
+            elseif entry.Shop == "BlueHQ" then
+                if Runtime.BlueDiscoveryCount(false) < (tonumber(Config.BlueHQRequiredDiscoveries) or 4) then
+                    return false
+                end
+            end
+            local readiness = packageReadiness(entry)
+            if readiness == "ready" or readiness == "unknown" then
+                setStatus("Buying planter", entry.Item)
+                local purchased = purchaseAndEquip(entry)
+                if purchased then
+                    Runtime.DeferredItems[entry.Type] = nil
+                    return true
+                end
+                deferItem(entry, readiness)
+                return false
+            end
+            deferItem(entry, readiness)
+            return false
+        end
+    end
+    return false
+end
+
 local function retryDeferredItems()
     if Runtime.MeteorPriorityActive then return end
+    if Runtime.Converting or Runtime.PlanterBusy or Runtime.ViciousBusy
+        or Runtime.Digging or Runtime.ViciousClaimBusy or Runtime.MovementOwner ~= nil then
+        return
+    end
     if os.clock() - Runtime.LastDeferredRetry < Config.DeferredRetryInterval then return end
     Runtime.LastDeferredRetry = os.clock()
     local purchaseAttempts = 0
@@ -11556,6 +12481,8 @@ local function progressionWork(reason, allowSideJobs)
         end
         if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return end
         if Config.AutoFarmSprouts and Runtime.SproutPending and MaterialSystem.FarmSprout() then return end
+        if Config.AutoHoneystorm and Runtime.HoneystormStep() then return end
+        if Config.AutoFarmPuffshrooms and Runtime.PuffshroomPending and Runtime.FarmPuffshroom() then return end
         if Config.AutoFarmMondoChick and Runtime.MondoChickPending
             and os.clock() >= (Runtime.MondoChickRetryAt or 0)
             and Runtime.FarmMondoChick() then return end
@@ -11588,11 +12515,18 @@ local function progressionWork(reason, allowSideJobs)
                 return
             end
         end
+        if Config.AutoBossScheduler and Runtime.BossSchedulerStep() then return end
     end
     -- Quest turn-in outranks conversion: a finished quest must be claimed even
     -- with a full pollen bar, otherwise the ConvertPercent=1 gate below returns
     -- every tick and the bear is never visited.
     if allowSideJobs and Config.AutoQuest and maintainBearQuests() then return end
+    -- Pre-target the main state machine is not spawned yet, so its 30s
+    -- maintenance never runs: planter buys + Vicious claim must live here too.
+    if allowSideJobs then
+        if buyNextPlanter() then return end
+        if Runtime.ClaimViciousBee() then return end
+    end
     local ratio = pollenRatio()
     if Config.AutoConvert and ratio >= Config.ConvertPercent
         and os.clock() >= (Runtime.ConvertHoldUntil or 0) then
@@ -11791,6 +12725,8 @@ task.spawn(function()
 
             if Config.AutoFarmFireflies and Runtime.FireflyPending and MaterialSystem.FarmFirefly() then return end
             if Config.AutoFarmSprouts and Runtime.SproutPending and MaterialSystem.FarmSprout() then return end
+            if Config.AutoHoneystorm and Runtime.HoneystormStep() then return end
+            if Config.AutoFarmPuffshrooms and Runtime.PuffshroomPending and Runtime.FarmPuffshroom() then return end
             if Config.AutoFarmMondoChick and Runtime.MondoChickPending
                 and os.clock() >= (Runtime.MondoChickRetryAt or 0)
                 and Runtime.FarmMondoChick() then return end
@@ -11821,10 +12757,19 @@ task.spawn(function()
                 end
             end
 
-            if Config.AutoProgression and os.clock() - Runtime.LastProgressMaintenance >= 30 then
+            if Config.AutoBossScheduler and Runtime.BossSchedulerStep() then return end
+
+            if os.clock() - Runtime.LastProgressMaintenance >= 30 then
                 Runtime.LastProgressMaintenance = os.clock()
-                retryDeferredItems()
-                upgradeSprinkler()
+                if Config.AutoProgression then
+                    retryDeferredItems()
+                    upgradeSprinkler()
+                    buyNextPlanter()
+                end
+                -- Vicious claim owns the mover for one tween; hatch is remote-only
+                -- and must also run post-target (growHiveOneBee stops at target).
+                if Runtime.ClaimViciousBee() then return end
+                Runtime.HatchNextEventBee()
             end
 
             -- Turn-in BEFORE materials: a gear recipe can stay outstanding for
