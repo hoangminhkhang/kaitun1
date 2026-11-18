@@ -6651,38 +6651,79 @@ end
 -- replace only on a strict win - no stat worse and at least one
 -- stat better; otherwise (mixed or identical) -> keep.
 function Runtime.ParseAmuletStats(text)
-    local stats = {}
-    for value, percent, name in tostring(text or ""):gmatch("%+([%d%.]+)(%%?)%s*([^\n\r]+)") do
-        local label = name:gsub("^%s+", ""):gsub("%s+$", "")
-        local key = string.lower(label)
-        stats[key] = {Value = tonumber(value) or 0, Percent = percent == "%", Name = label}
-    end
-    return stats
-end
-
--- Compare stat by stat: returns (betterCount, worseCount, notes). A new stat the
--- old one lacks = better; an old stat missing from the new one = worse.
-function Runtime.CompareAmuletStats(newText, oldText)
-    local newStats = Runtime.ParseAmuletStats(newText)
-    local oldStats = Runtime.ParseAmuletStats(oldText)
-    local better, worse = 0, 0
-    local notes = {}
-    for key, stat in pairs(newStats) do
-        local oldValue = oldStats[key] and oldStats[key].Value or 0
-        if stat.Value > oldValue then
-            better += 1
-            table.insert(notes, string.format("+%s%s %s (old %s)", tostring(stat.Value),
-                stat.Percent and "%" or "", stat.Name, tostring(oldValue)))
-        elseif stat.Value < oldValue then
-            worse += 1
-            table.insert(notes, string.format("-%s%s %s (old %s)", tostring(stat.Value),
-                stat.Percent and "%" or "", stat.Name, tostring(oldValue)))
+    -- Pattern chuan cua atlas: bat ca "+48%", "-3%", "x1.5" va "+Passive:".
+    -- Parser "+"-only cu bo lot stat am/multiplier/passive -> amulet kem hon
+    -- van bi accept. Chuan hoa moi gia tri ve bonus fraction (x1.5 = 0.5,
+    -- +48% = 0.48) de so sanh cung thang do.
+    local plain = tostring(text or ""):gsub("<br%s*/?>", "\n"):gsub("<[^>]*>", "")
+        :gsub("&nbsp;", " ")
+    local stats, passives, complete = {}, {}, true
+    for line in plain:gmatch("[^\r\n]+") do
+        line = line:gsub(",", "")
+        local passive = line:match("^%s*%+?Passive:%s*(.+)$")
+        if passive then
+            passives[passive:gsub("%s+$", "")] = true
+        else
+            local value, percent, name = line:match("^%s*([x+%-]?%d+%.?%d*)(%%?)%s+(.+)")
+            if value and name then
+                local sign = value:sub(1, 1)
+                local number = tonumber(value:match("%d+%.?%d*")) or 0
+                if sign == "-" then number = -number end
+                if sign == "x" then number = number - 1 end
+                if percent == "%" then number = number / 100 end
+                local label = name:gsub("^%s+", ""):gsub("%s+$", "")
+                local key = string.lower(label)
+                local entry = stats[key] or {Value = 0, Name = label}
+                entry.Value += number
+                stats[key] = entry
+            elseif line:find("%S") then
+                complete = false
+            end
         end
     end
-    for key in pairs(oldStats) do
-        if not newStats[key] then worse += 1 end
+    return stats, passives, complete
+end
+
+-- Compare stat by stat: returns (betterCount, worseCount, notes, newComplete,
+-- oldComplete). A new stat the old one lacks = better; an old stat missing
+-- from the new one = worse. Passive: gained = better, lost = worse.
+function Runtime.CompareAmuletStats(newText, oldText)
+    local newStats, newPassives, newComplete = Runtime.ParseAmuletStats(newText)
+    local oldStats, oldPassives, oldComplete = Runtime.ParseAmuletStats(oldText)
+    local better, worse = 0, 0
+    local notes = {}
+    local function note(text)
+        if #notes < 4 then table.insert(notes, text) end
     end
-    return better, worse, notes
+    for key, stat in pairs(newStats) do
+        local oldValue = oldStats[key] and oldStats[key].Value or 0
+        if stat.Value > oldValue + 1e-9 then
+            better += 1
+            note(string.format("%s: %g -> %g", key, oldValue, stat.Value))
+        elseif stat.Value < oldValue - 1e-9 then
+            worse += 1
+            note(string.format("%s: %g -> %g", key, oldValue, stat.Value))
+        end
+    end
+    for key, stat in pairs(oldStats) do
+        if not newStats[key] then
+            worse += 1
+            note(string.format("%s: %g -> mat", key, stat.Value))
+        end
+    end
+    for passive in pairs(newPassives) do
+        if not oldPassives[passive] then
+            better += 1
+            note("+Passive " .. passive)
+        end
+    end
+    for passive in pairs(oldPassives) do
+        if not newPassives[passive] then
+            worse += 1
+            note("-Passive " .. passive)
+        end
+    end
+    return better, worse, notes, newComplete, oldComplete
 end
 
 -- Find the equipped same-type amulet stats inside PlayerStats. The layout is
@@ -6695,7 +6736,8 @@ function Runtime.EquippedAmuletStatsText(amuletType)
     local function scanEntry(entry)
         if type(entry) ~= "table" then return nil end
         local text = entry.Stats or entry.Text or entry.Description or entry.StatsText
-        if type(text) == "string" and text:find("+", 1, true) then
+        if type(text) == "string" and (text:find("+", 1, true)
+            or text:find("Passive:", 1, true) or text:find("%-%d") or text:find("x%d")) then
             local name = tostring(entry.Name or entry.AmuletName or "")
             local entryType = string.lower(tostring(entry.Type or entry.AmuletType or "")):gsub("[^%w]", "")
             if wanted == "" or entryType == wanted or name:lower():find(wanted, 1, true) then
@@ -6722,7 +6764,8 @@ function Runtime.EquippedAmuletStatsText(amuletType)
                 local nested = scan(child)
                 if nested then return nested end
             elseif type(child) == "string" and normalizedKey:find("amulet", 1, true)
-                and child:find("+", 1, true) then
+                and (child:find("+", 1, true) or child:find("Passive:", 1, true)
+                    or child:find("%-%d") or child:find("x%d")) then
                 return child
             end
         end
@@ -6742,7 +6785,11 @@ function Runtime.HandleAmuletOffer(...)
         if type(args[i]) == "string" then table.insert(strings, args[i]) end
     end
     for _, text in ipairs(strings) do
-        if text:find("+", 1, true) and not statsText then statsText = text end
+        -- Offer co the chi toan stat am/multiplier/passive (khong co "+").
+        if (text:find("+", 1, true) or text:find("Passive:", 1, true)
+            or text:find("%-%d") or text:find("x%d")) and not statsText then
+            statsText = text
+        end
     end
     for _, text in ipairs(strings) do
         if text ~= statsText then
@@ -6827,10 +6874,17 @@ function Runtime.HandleAmuletOffer(...)
             accept = false
             detail = "keep-old policy"
         else
-            local better, worse, notes = Runtime.CompareAmuletStats(statsText, currentText)
-            accept = worse <= 0 and better > 0
-            detail = string.format("%d stat(s) better, %d worse%s", better, worse,
-                #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
+            local better, worse, notes, newComplete, oldComplete =
+                Runtime.CompareAmuletStats(statsText, currentText)
+            if not newComplete or not oldComplete then
+                -- Khong doc du toan bo stat -> khong dam bao replace an toan.
+                accept = false
+                detail = "stat text khong doc du - giu cu"
+            else
+                accept = worse <= 0 and better > 0
+                detail = string.format("%d stat(s) better, %d worse%s", better, worse,
+                    #notes > 0 and (" | " .. table.concat(notes, ", ")) or "")
+            end
         end
     end
     setStatus("Amulet", string.format("%s %s | %s",
@@ -8799,9 +8853,13 @@ function MaterialSystem.PlanterWork(material, field, stats)
 end
 
 function MaterialSystem.GuiVisible(object)
+    -- Object mo coi (Parent nil) = da bi destroy -> khong visible. Vong lap cu
+    -- thoat khi current nil va tra TRUE cho object da remove.
+    if not object or not object.Parent then return false end
     local current = object
     while current and current ~= Player do
         if current:IsA("GuiObject") and not current.Visible then return false end
+        if current:IsA("ScreenGui") and not current.Enabled then return false end
         current = current.Parent
     end
     return true
@@ -8809,12 +8867,28 @@ end
 
 function MaterialSystem.ActivateButton(button)
     if not button or not button:IsA("GuiButton") or not MaterialSystem.GuiVisible(button) then return false end
-    local fireSignal = rawget(ENV, "firesignal")
+    local fireSignal = rawget(ENV, "firesignal") or firesignal
     if type(fireSignal) == "function" then
         local ok = pcall(fireSignal, button.MouseButton1Click)
         if ok then return true end
+        ok = pcall(fireSignal, button.Activated)
+        if ok then return true end
     end
-    return pcall(button.Activate, button)
+    -- GuiButton KHONG co method Activate (pcall(button.Activate, button) cu
+    -- throw error ngoai pcall vi index truoc). Fallback that su: click ao tai
+    -- tam button, cong GuiInset tru khi ScreenGui.IgnoreGuiInset.
+    return pcall(function()
+        local screen = button:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.zero
+        if screen and not screen.IgnoreGuiInset then
+            inset = game:GetService("GuiService"):GetGuiInset()
+        end
+        local center = button.AbsolutePosition + button.AbsoluteSize * 0.5 + inset
+        local input = game:GetService("VirtualInputManager")
+        input:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
+        task.wait(0.05)
+        input:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
+    end)
 end
 
 function MaterialSystem.IsNectarMenu(object)
