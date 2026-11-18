@@ -1,1914 +1,2409 @@
---[[
-    Vox Seas — Kaitun / Auto-Farm script
-    ====================================
-    Game: Vox Seas (Roblox, formerly Blox Seas) — Elysium framework.
-    Built from the decompiled RobloxProject (Volt bytecode export). All remote
-    names, data paths and quest/enemy schemas below were derived from that dump.
+-- =============================================================================
+-- BSS KAITUN UI  (ui.lua)  --  product build: polished, persistent, zero deps
+-- =============================================================================
+-- CONTRACT TÍCH HỢP (main script) - giữ nguyên từ bản trước:
+--   local UI = loadstring(readfile("ui.lua"))()
+--   UI.SetStatus(stateText, detailText)
+--   UI.SetStats{HoneyPerHour=.., Uptime=.., Bees=.., Honey=.., Capacity=.., ...}
+--   UI.SetGear("Pulsar | 42%")
+--   UI.SetPlanters{{Name="Paper Planter", Field="Clover", Percent=0.64}}
+--   UI.DefineControls{{Tab="Farm", Key="AutoFarm", Kind="Toggle", Label="Auto Farm"}, ...}
+--     Kind: Toggle | Slider | Section | Button | Textbox/Input | Dropdown | Keybind
+--     Dropdown: Options={...}, Default=..   Keybind: Default="E"   Textbox: Numeric=true
+--   UI.OnChange(key, fn) / UI.SetValues(Config) / UI.Toggle(false)
+--   UI.Notify(title, message, seconds, "info"|"good"|"warn")   -- toast (auto vào Log)
+--   UI.Log(message, "info"|"good"|"warn"|"dim")                -- log panel Status
+--   UI.CycleTheme() / UI.SetTheme("Honey"|"Midnight")          -- đổi theme TOÀN CÂY
+--
+-- BUYER EXPERIENCE:
+--  * Bo tròn toàn bộ (window 14px, card 10px, control 8px) + shadow mềm
+--  * Gradient title bar + accent, hover trên mọi row/tab, knob toggle nảy
+--    (Back easing), slider có núm tròn phóng to khi chạm
+--  * Toast notification xếp chồng góc phải, tự biến mất
+--  * 2 theme: Honey (mặc định) / Midnight - đổi bằng nút 🎨, repaint TOÀN CÂY
+--    (mọi card/stroke/control/hex/toast/pill/scrollbar ăn màu ngay)
+--  * Sparkline honey/h (40 cột) + Log panel ngay tab Status
+--  * TỰ LƯU: vị trí cửa sổ, trạng thái collapse, theme + toàn bộ Values ra
+--    bss_kaitun_ui.json (writefile nếu executor hỗ trợ) - mở lại giữ nguyên
+--  * Animation: cửa sổ trượt vào khi load, đổi tab có slide nhẹ
+--
+-- IDEAS còn lại (chưa làm):
+--  [1] Minimap: chấm field + player + mob (Frame-based)
+--  [2] Planter countdown mm:ss khi có dữ liệu giờ
+--  [3] Boost tracker: field boost đang chạy + giây còn lại
+--  [4] Nút "Panic" dừng mọi mover cạnh cửa sổ
+-- =============================================================================
 
-    DERIVED API (client -> server). Remotes live in ReplicatedStorage.NetworkInstances,
-    nested under RemoteEvents / RemoteFunctions / UnreliableRemoteEvents (current build).
-    Wire format is remote:FireServer(action, ...) / remote:InvokeServer(action, ...).
-      Quests            : FireServer("Repeat", questName) | "Accept" | "Track" | "Abandon"
-      StatisticsData    : FireServer("UpgradeStats", statsTable) | "SaveStats" | "ResetStats"
-      CombatTools       : FireServer("DefaultCombo", {Combo,CallTime,DelayTime,CurrentCombo})
-      Elysium_Casting   : FireServer(request)  -- skills (Token/Kind/Key/Caster/State/Data)
-      Elysium_DataStore : InvokeServer("FetchData") -> PlayerData  (RemoteFunction!)
-      Busoshoku         : FireServer("Toggle")   -- haki (older builds: Abilitys/Toggle)
-      StartGame         : FireServer()           -- spawn player from the start menu
-      Fruits            : InvokeServer("Eat", ...)
-      ToolsData         : FireServer("Store"|"Drop", ...)
-      ShopSystem        : FireServer("Purchase", ...)
+local getgenvFn = getgenv or function() return _G end
+local ENV = getgenvFn()
 
-    NPC INTERACTION: not ProximityPrompt — the game shows a custom Talk button
-    (PlayerGui InteractionHUD.InteractionButton, Label text "Talk"). The script
-    walks to the NPC / its interest-point Part (e.g. "VillageChief"), clicks that
-    button with real input, then proceeds the converse (Proceed / Accept).
+if ENV.__BSSKaitunUI_Cleanup and type(ENV.__BSSKaitunUI_Cleanup) == "function" then
+    pcall(ENV.__BSSKaitunUI_Cleanup)
+end
 
-    INTERIORS: some NPCs live inside buildings. Live layout is
-    workspace.IgnoreList.Int.PrivateAreas.<Island>.<Area>.Enter/Leave, each with
-    Entrance (outside door) and Destination (inside spawn) Parts; older builds use
-    workspace.PrivateAreas + workspace.PrivateAreaDoors. Tweening straight to the
-    interior coordinates is rejected (kick to lobby). The script walks to the
-    entrance (K.EnterPoints saved positions / objective marker / door), holds the
-    "Enter Area" interaction so the server teleports us in, then talks.
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 
-    RUNTIME DATA PATHS:
-      Enemies : workspace.Playability.Enemys  (Model + Humanoid, attr OriginalName/Name)
-      Drops   : workspace.Playability.DroppedTools
-      NPCs    : quest giver Models named "<Island> Quest Giver"
-      Quests  : require(ReplicatedStorage.Shared.MainModules.ProgressUtils.QuestsInfo)
-      Enemies : require(ReplicatedStorage.Shared.MainModules.EnemysUtils.EnemysInfo)
-      Tools   : require(ReplicatedStorage.Shared.MainModules.Tools.ToolsInfo)
-      Player  : DataStore Statistics{Level,MaxLevel,XP,AvailablePoints}, Monetization{Gold,Fragment}
-      Stats   : Strength, Endurance, Sword, Gun, DevilFruit
+local Player = Players.LocalPlayer
+local writefileFn = rawget(ENV, "writefile") or (writefile and writefile)
+local readfileFn = rawget(ENV, "readfile") or (readfile and readfile)
+local SAVE_NAME = "bss_kaitun_ui.json"
 
-    The decision core (quest selection, stat distribution, enemy scoring, drop
-    matching) is written as pure functions on table K so it can be unit-tested
-    outside Roblox. The script auto-runs only inside Roblox and returns K otherwise.
-
-    FollowGameQuest: reads the game's live objective from the quest tracker HUD
-    and does it first — Talk/Warn/Return/Deliver -> walk to the NPC and proceed
-    the converse; Defeat/Kill -> farm that mob; Collect/Catch -> pick up drops.
-    With no tracker objective it falls back to level-based grinding quests.
-]]
-
-local K = {}
-
---==========================================================================
--- CONFIG
---==========================================================================
-K.Config = {
-    AutoFarm        = true,   -- master farm loop (quest + kill)
-    AutoQuest       = true,   -- accept / repeat grinding quests
-    AutoStats       = true,   -- spend available stat points
-    AutoHaki        = true,   -- keep Busoshoku (Aura) active
-    AutoEquip       = true,   -- equip best farming weapon
-    AutoCollect     = true,   -- pick up dropped tools/items
-    FastAttack      = true,   -- accelerated attacks
-    UseRemoteAttack = false,  -- fire CombatTools.DefaultCombo directly (else simulate input)
-    UseSkills       = false,  -- also cast fruit/sword skills via Elysium_Casting
-    BossFarm        = false,  -- prefer boss quests / farm bosses for set drops
-    ItemFarm        = false,  -- target enemies that drop TargetItem
-    TargetItem      = "",     -- item name to farm when ItemFarm = true
-    AntiAFK         = true,
-    AutoRejoin      = false,  -- rejoin on death loop / stuck
-    FPSBoost        = false,
-
-    MoveMode        = "Tween",   -- "Tween" (glide at walk pace) or "Teleport" (instant)
-    TweenSpeed      = 32,        -- studs/sec glide speed (fast; lower if server snaps back)
-    TweenMaxTime    = 20,        -- cap on a single glide's duration (seconds)
-    Noclip          = true,      -- phase through walls/objects while gliding (no stuck)
-    FarmAnyFallback = true,      -- no quest mob nearby? farm the nearest enemy instead
-    HakiRemote      = "Busoshoku", -- current build uses a dedicated Busoshoku remote
-    HakiAction      = "Toggle",
-    AutoStartGame   = true,      -- auto-click the game's START GAME menu so a player spawns
-    FollowGameQuest = true,      -- follow the game's live objective (talk/kill/collect) first
-    AutoConverse    = true,      -- click through intro / NPC converse response options
-
-    AttackDelay     = 0.12,   -- seconds between attacks (input mode)
-    ComboDelay      = 0.08,   -- DelayTime sent with remote combo attack
-    AttackRemote    = "CombatTools",  -- best-effort direct combo remote (unverified)
-    AttackAction    = "DefaultCombo", -- action name for direct combo remote
-    FarmDistance    = 6,      -- teleport offset from enemy
-    MaxFarmRange    = 4000,   -- ignore enemies farther than this
-    QuestRefresh    = 1.0,    -- seconds between quest/state checks
-    CollectRange    = 60,     -- max distance to chase a drop
-    StatWeights     = { Strength = 0, Endurance = 0.4, Sword = 0, Gun = 0.6, DevilFruit = 0 },
-    WeaponPreference = { "Gun", "Sword", "Style", "Fruit" }, -- PvE: guns first
-    PreferredIsland = "",     -- force a specific island quest ("" = auto by level)
-    LogLevel        = 1,      -- 0 silent, 1 info, 2 debug
+-- =============================================================================
+-- Themes
+-- =============================================================================
+local THEMES = {
+    Honey = {
+        Accent = Color3.fromRGB(255, 176, 32),
+        AccentDim = Color3.fromRGB(196, 132, 25),
+        AccentSoft = Color3.fromRGB(255, 208, 120),
+        Background = Color3.fromRGB(24, 24, 28),
+        Panel = Color3.fromRGB(32, 32, 38),
+        PanelHover = Color3.fromRGB(44, 44, 52),
+        PanelLight = Color3.fromRGB(48, 48, 57),
+        Stroke = Color3.fromRGB(70, 70, 82),
+        Text = Color3.fromRGB(240, 240, 240),
+        TextDim = Color3.fromRGB(165, 165, 175),
+        Good = Color3.fromRGB(96, 205, 125),
+        Bad = Color3.fromRGB(235, 95, 95),
+    },
+    Midnight = {
+        Accent = Color3.fromRGB(96, 165, 250),
+        AccentDim = Color3.fromRGB(70, 125, 200),
+        AccentSoft = Color3.fromRGB(150, 190, 250),
+        Background = Color3.fromRGB(16, 18, 26),
+        Panel = Color3.fromRGB(22, 25, 35),
+        PanelHover = Color3.fromRGB(32, 36, 50),
+        PanelLight = Color3.fromRGB(36, 41, 56),
+        Stroke = Color3.fromRGB(55, 62, 84),
+        Text = Color3.fromRGB(235, 240, 250),
+        TextDim = Color3.fromRGB(150, 158, 178),
+        Good = Color3.fromRGB(96, 205, 125),
+        Bad = Color3.fromRGB(235, 95, 95),
+    },
 }
+local currentThemeName = "Honey"
+local T = THEMES.Honey
 
---==========================================================================
--- PURE LOGIC CORE (no Roblox dependencies — unit-testable)
---==========================================================================
+local WINDOW_SIZE = UDim2.fromOffset(500, 360)
+local R_WINDOW, R_CARD, R_CTRL, R_PILL = 14, 10, 8, 999
 
-local function trim(s)
-    return (tostring(s):gsub("^%s+", ""):gsub("%s+$", ""))
-end
-K.Trim = trim
-
--- Normalize an enemy/quest name for tolerant matching.
-function K.NormalizeName(s)
-    if s == nil then return "" end
-    s = tostring(s):lower()
-    s = s:gsub("[^%w ]", " ")
-    s = s:gsub("%s+", " ")
-    return trim(s)
-end
-
--- True when two enemy identifiers refer to the same mob (tolerant).
-function K.MatchName(a, b)
-    local na, nb = K.NormalizeName(a), K.NormalizeName(b)
-    if na == "" or nb == "" then return false end
-    if na == nb then return true end
-    -- one contains the other as a whole-word-ish substring
-    if na:find(nb, 1, true) or nb:find(na, 1, true) then return true end
-    -- space-insensitive: "village chief" == "VillageChief" (interest-point names)
-    local ca, cb = na:gsub(" ", ""), nb:gsub(" ", "")
-    if ca == cb or ca:find(cb, 1, true) or cb:find(ca, 1, true) then return true end
-    return false
-end
-
--- Parse a quest-tracker objective line into {action, target, raw}.
--- Verbs come from the game's QuestsInfo UIText: Talk to / Warn / Return to /
--- Deliver ... to / Defeat / Kill / Collect / Catch / Find / Investigate.
-function K.ParseObjective(text)
-    if type(text) ~= "string" then return nil end
-    local raw = trim(text)
-    local t = K.NormalizeName(raw)
-    if t == "" then return nil end
-    local action, rest
-    if t:find("^talk to ") or t:find("^speak to ") or t:find("^talk with ") then
-        action, rest = "talk", t:gsub("^%a+ %a+ ", "")
-    elseif t:find("^warn ") then
-        action, rest = "talk", t:sub(6)
-    elseif t:find("^return to ") then
-        action, rest = "talk", t:sub(11)
-    elseif t:find("^deliver ") then
-        action, rest = "talk", t:match(" to the (.+)$") or t:match(" to (.+)$") or ""
-    elseif t:find("^defeat ") or t:find("^kill ") or t:find("^slay ") then
-        action, rest = "kill", t:match("^%a+ (.+)$")
-    elseif t:find("^collect ") or t:find("^catch ") or t:find("^gather ") then
-        action, rest = "collect", t:match("^%a+ (.+)$")
-    elseif t:find("^pick up ") then
-        action, rest = "collect", t:sub(9)
-    elseif t:find("^find ") or t:find("^investigate ") or t:find("^locate ") then
-        action, rest = "find", t:match("^%a+ (.+)$")
-    else
-        return nil
+-- =============================================================================
+-- Helpers
+-- =============================================================================
+local function create(className, props, parent)
+    local object = Instance.new(className)
+    for key, value in pairs(props or {}) do
+        if key ~= "Parent" then object[key] = value end
     end
-    rest = trim(rest or "")
-    rest = rest:gsub("^%d+ ", "")   -- "defeat 5 pirates" -> "pirates"
-    rest = rest:gsub("^the ", "")   -- "the village chief" -> "village chief"
-    rest = rest:gsub(" %d+ %d+$", ""):gsub(" %d+$", "") -- drop "(0/5)" progress
-    rest = trim(rest)
-    if rest == "" then return nil end
-    return { action = action, target = rest, raw = raw }
+    object.Parent = parent
+    return object
 end
 
--- Collect the set of enemy goal names from a quest definition.
--- Handles raw defs (Goal / SubQuests) and assembled defs (Objectives).
-function K.QuestGoals(quest)
-    local goals, seen = {}, {}
-    local function add(g)
-        if g == nil then return end
-        g = trim(g)
-        if g == "" then return end
-        local key = K.NormalizeName(g)
-        if not seen[key] then
-            seen[key] = true
-            goals[#goals + 1] = g
+local function corner(object, radius)
+    create("UICorner", {CornerRadius = UDim.new(0, radius or R_CTRL)}, object)
+    return object
+end
+
+local function strokeOf(object, color, thickness, transparency)
+    create("UIStroke", {
+        Color = color or T.Stroke, Thickness = thickness or 1,
+        Transparency = transparency or 0,
+    }, object)
+    return object
+end
+
+local function vGradient(object, topAlpha, bottomAlpha)
+    create("UIGradient", {
+        Rotation = 90,
+        Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(1, 1, 1)),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, topAlpha or 0),
+            NumberSequenceKeypoint.new(1, bottomAlpha or 0.25),
+        }),
+    }, object)
+    return object
+end
+
+local function pad(object, all)
+    create("UIPadding", {
+        PaddingTop = UDim.new(0, all), PaddingBottom = UDim.new(0, all),
+        PaddingLeft = UDim.new(0, all), PaddingRight = UDim.new(0, all),
+    }, object)
+    return object
+end
+
+local function setText(object, text)
+    pcall(function() object.Text = text end)
+    return object
+end
+
+-- =============================================================================
+-- Game image resolver: lấy texture CỦA CHÍNH GAME (client đã load sẵn, không
+-- cần download gì) gán vào ImageLabel.Image qua chuỗi rbxassetid từ
+-- Decal.Texture. Nguồn chính: ReplicatedStorage.EggTypes.<...>Icon (icon
+-- planter/egg/tròng game). Tên lộn xộn ("Plastic Planter" -> "PlasticPlanterIcon",
+-- "The Planter Of Plenty" -> "PlentyPlanterIcon") nên so khớp BẰNG CHUẨN HÓA:
+-- bỏ mọi ký tự không phải chữ-số, thử full-name rồi từ-cuối + "plantericon".
+-- =============================================================================
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local function normalizeImageName(text)
+    return string.lower(tostring(text or "")):gsub("[^%w]", "")
+end
+
+local function textureOf(instance)
+    if not instance then return nil end
+    if instance:IsA("Decal") or instance:IsA("Texture") then
+        return instance.Texture ~= "" and instance.Texture or nil
+    end
+    if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+        return instance.Image ~= "" and instance.Image or nil
+    end
+    local inner = instance:FindFirstChildWhichIsA("Decal", true)
+        or instance:FindFirstChildWhichIsA("Texture", true)
+        or instance:FindFirstChildWhichIsA("ImageLabel", true)
+    return textureOf(inner)
+end
+
+local function resolveGameImage(itemName)
+    if type(itemName) ~= "string" or itemName == "" then return nil end
+    local eggTypes = ReplicatedStorage:FindFirstChild("EggTypes")
+    if not eggTypes then return nil end
+    local wantedFull = normalizeImageName(itemName) .. "icon"
+    local words = {}
+    for word in itemName:gmatch("%S+") do table.insert(words, normalizeImageName(word)) end
+    local wantedLast = words[#words] and (words[#words] .. "plantericon") or nil
+    local best
+    for _, child in ipairs(eggTypes:GetChildren()) do
+        local normalized = normalizeImageName(child.Name)
+        if normalized == wantedFull
+            or (wantedLast and normalized == wantedLast) then
+            best = child
+            if normalized == wantedFull then break end
         end
     end
-    if type(quest) ~= "table" then return goals end
-    add(quest.Goal)
-    if type(quest.SubQuests) == "table" then
-        for _, sq in pairs(quest.SubQuests) do
-            if type(sq) == "table" then
-                add(sq.Goal); add(sq.Name)
-                if type(sq.Objectives) == "table" then
-                    for _, o in pairs(sq.Objectives) do
-                        if type(o) == "table" then add(o.Goal) end
+    if not best then
+        -- Fallback thoải mái hơn: icon chứa nguyên tên chuẩn hóa.
+        local stripped = normalizeImageName(itemName)
+        for _, child in ipairs(eggTypes:GetChildren()) do
+            local normalized = normalizeImageName(child.Name)
+            if normalized:sub(1, #stripped) == stripped then
+                best = child
+                break
+            end
+        end
+    end
+    return textureOf(best)
+end
+
+-- Texture nền honeycomb (nếu game có sẵn ảnh pattern) - tiled, rất mờ, làm
+-- nền chìm cho panel hive. Không tìm thấy thì bỏ qua (panel vẫn có gradient).
+local hivePatternCache
+local function resolveHivePattern()
+    if hivePatternCache ~= nil then return hivePatternCache end
+    hivePatternCache = false
+    local roots = {
+        ReplicatedStorage:FindFirstChild("Assets"),
+        ReplicatedStorage:FindFirstChild("UI"),
+        ReplicatedStorage:FindFirstChild("Images"),
+        ReplicatedStorage,
+    }
+    for _, root in ipairs(roots) do
+        if root then
+            for _, child in ipairs(root:GetChildren()) do
+                local n = normalizeImageName(child.Name)
+                if n:find("honeycomb", 1, true) or n:find("hexpattern", 1, true)
+                    or n:find("combpattern", 1, true) then
+                    local tex = textureOf(child)
+                    if tex then
+                        hivePatternCache = tex
+                        return tex
                     end
                 end
             end
         end
     end
-    if type(quest.Objectives) == "table" then
-        for _, o in pairs(quest.Objectives) do
-            if type(o) == "table" then add(o.Goal) end
-        end
-    end
-    return goals
+    return false
 end
 
--- Flatten the QuestsInfo table (keyed by folder path) into a quest list.
-function K.BuildQuestList(questsInfo)
-    local list = {}
-    if type(questsInfo) ~= "table" then return list end
-    for key, q in pairs(questsInfo) do
-        if type(q) == "table" and (q.Name or q.Goal or q.Objectives) then
-            local goals = K.QuestGoals(q)
-            local island = tostring(key):match("Grinding[\\/](.+)[\\/]") or q.Island or ""
-            list[#list + 1] = {
-                Name = q.Name or tostring(key),
-                Goals = goals,
-                Giver = q.Giver or (island ~= "" and (island .. " Quest Giver") or nil),
-                MinLevel = tonumber(q.MinLevel) or 0,
-                MaxLevel = tonumber(q.MaxLevel) or math.huge,
-                IsBoss = q.IsBoss == true,
-                Type = q.Type or "Grinding",
-                Island = island,
-                Raw = q,
+-- Hover theo ROLE (không giữ giá trị màu cũ) để đổi theme là ăn ngay.
+local function hoverify(object, baseRole, hoverRole)
+    object.MouseEnter:Connect(function()
+        TweenService:Create(object, TweenInfo.new(0.12), {BackgroundColor3 = T[hoverRole] or T.PanelHover}):Play()
+    end)
+    object.MouseLeave:Connect(function()
+        TweenService:Create(object, TweenInfo.new(0.18), {BackgroundColor3 = T[baseRole] or T.PanelLight}):Play()
+    end)
+end
+
+local function themeColor()
+    return T
+end
+
+-- =============================================================================
+-- Root ScreenGui (gethui > CoreGui > PlayerGui)
+-- =============================================================================
+local rootGui
+do
+    local candidates = {}
+    local gethuiFn = rawget(ENV, "gethui") or (gethui and gethui)
+    if type(gethuiFn) == "function" then
+        pcall(function() table.insert(candidates, gethuiFn()) end)
+    end
+    table.insert(candidates, game:GetService("CoreGui"))
+    if Player then table.insert(candidates, Player:FindFirstChildOfClass("PlayerGui")) end
+
+    rootGui = create("ScreenGui", {
+        Name = "BSSKaitunCard", ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9,
+    })
+    for _, candidate in ipairs(candidates) do
+        if candidate then
+            local ok = pcall(function() rootGui.Parent = candidate end)
+            if ok and rootGui.Parent == candidate then break end
+        end
+    end
+    if not rootGui.Parent then
+        rootGui.Parent = Player and Player:FindFirstChildOfClass("PlayerGui")
+    end
+end
+
+-- =============================================================================
+-- UI table
+-- =============================================================================
+local UI = {
+    Values = {}, _tabs = {}, _pages = {}, _callbacks = {}, _refs = {},
+    _built = {}, _themeListeners = {},
+}
+
+-- =============================================================================
+-- THEME REPAINT TOÀN CÂY: đổi theme phải ăn MỌI phần tử (card, stroke, control,
+-- hex, toast, pill, scrollbar...) chứ không chỉ vài phần tĩnh. Cách chắc chắn
+-- mà không phải bind từng create(): dựng map màu-cũ -> màu-mới theo ROLE rồi
+-- quét rootGui, hễ thuộc tính màu nào khớp màu palette cũ thì thay màu mới.
+-- Màu tự do (rarity, GOLD, trắng/đen...) không nằm trong palette nên giữ nguyên.
+-- Color3 là userdata nên KHÔNG dùng làm key table được (hash theo identity) ->
+-- key bằng chuỗi "R,G,B" làm tròn.
+-- =============================================================================
+local function colorKey(c)
+    return string.format("%d,%d,%d",
+        math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+local function repaintTheme(oldPalette, newPalette)
+    local map = {}
+    for role, oldColor in pairs(oldPalette) do
+        local newColor = newPalette[role]
+        if newColor then map[colorKey(oldColor)] = newColor end
+    end
+    local function swap(color)
+        local replacement = map[colorKey(color)]
+        return replacement or color
+    end
+    for _, obj in ipairs(rootGui:GetDescendants()) do
+        pcall(function()
+            if obj:IsA("GuiObject") then
+                obj.BackgroundColor3 = swap(obj.BackgroundColor3)
+            end
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+                obj.TextColor3 = swap(obj.TextColor3)
+            end
+            if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+                obj.ImageColor3 = swap(obj.ImageColor3)
+            end
+            if obj:IsA("ScrollingFrame") then
+                obj.ScrollBarImageColor3 = swap(obj.ScrollBarImageColor3)
+            end
+            if obj:IsA("UIStroke") then
+                obj.Color = swap(obj.Color)
+            end
+        end)
+    end
+end
+
+-- =============================================================================
+-- Window + shadow + title bar
+-- =============================================================================
+local shadow = corner(create("Frame", {
+    Name = "Shadow",
+    Size = WINDOW_SIZE + UDim2.fromOffset(10, 12),
+    Position = UDim2.new(1, -WINDOW_SIZE.X.Offset - 24, 0, 58),
+    BackgroundColor3 = Color3.new(0, 0, 0),
+    BackgroundTransparency = 0.82,
+    BorderSizePixel = 0,
+}, rootGui), 18)
+
+local window = corner(create("Frame", {
+    Name = "Window",
+    Size = WINDOW_SIZE,
+    Position = UDim2.new(1, -WINDOW_SIZE.X.Offset - 20, 0, 60),
+    BackgroundColor3 = T.Background,
+    Active = true,
+    ClipsDescendants = false,
+}, rootGui), R_WINDOW)
+strokeOf(window, T.Stroke, 1, 0.25)
+vGradient(window, 0, 0.06)
+
+local titleBar = create("Frame", {
+    Name = "TitleBar",
+    Size = UDim2.new(1, 0, 0, 40),
+    BackgroundColor3 = T.Panel,
+}, window)
+corner(titleBar, R_WINDOW)
+-- Phủ đáy titleBar để chỉ bo TRÊN (UICorner không bo được nửa góc).
+create("Frame", {
+    Name = "SquarePatch",
+    Size = UDim2.new(1, 0, 0.5, 0),
+    Position = UDim2.new(0, 0, 0.5, 0),
+    BackgroundColor3 = T.Panel,
+    BorderSizePixel = 0,
+}, titleBar)
+vGradient(titleBar, 0, 0.18)
+
+-- Chấm accent nhấp nhô trước tiêu đề.
+local statusDot = create("Frame", {
+    Name = "Dot",
+    Size = UDim2.fromOffset(8, 8),
+    Position = UDim2.fromOffset(14, 16),
+    BackgroundColor3 = T.Good,
+}, titleBar)
+corner(statusDot, R_PILL)
+
+local titleLabel = create("TextLabel", {
+    Name = "Title",
+    Size = UDim2.new(1, -170, 1, 0),
+    Position = UDim2.fromOffset(30, 0),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamBold,
+    Text = "BSS Kaitun",
+    TextColor3 = T.Accent,
+    TextSize = 16,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, titleBar)
+
+local themeButton = corner(create("TextButton", {
+    Name = "Theme",
+    Size = UDim2.fromOffset(30, 26),
+    Position = UDim2.new(1, -100, 0.5, -13),
+    BackgroundColor3 = T.PanelLight,
+    Font = Enum.Font.GothamBold,
+    Text = "🎨",
+    TextColor3 = T.Text,
+    TextSize = 13,
+}, titleBar), R_CTRL)
+hoverify(themeButton, "PanelLight", "PanelHover")
+
+local collapseButton = corner(create("TextButton", {
+    Name = "Collapse",
+    Size = UDim2.fromOffset(34, 26),
+    Position = UDim2.new(1, -60, 0.5, -13),
+    BackgroundColor3 = T.PanelLight,
+    Font = Enum.Font.GothamBold,
+    Text = "—",
+    TextColor3 = T.Text,
+    TextSize = 13,
+}, titleBar), R_CTRL)
+hoverify(collapseButton, "PanelLight", "PanelHover")
+local collapsed = false
+
+-- Drag (freeze Scale->Offset trước khi kéo + release toàn cục + clamp theo viewport)
+do
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            pcall(function()
+                window.Position = UDim2.fromOffset(
+                    window.AbsolutePosition.X - rootGui.AbsolutePosition.X,
+                    window.AbsolutePosition.Y - rootGui.AbsolutePosition.Y)
+                shadow.Position = UDim2.fromOffset(
+                    window.Position.X.Offset - 5, window.Position.Y.Offset - 6)
+            end)
+            startPos = window.Position
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then UI._saveSoon() end
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            local maxX = math.max(80, rootGui.AbsoluteSize.X - 80)
+            local maxY = math.max(40, rootGui.AbsoluteSize.Y - 40)
+            local x = math.clamp(startPos.X.Offset + delta.X,
+                -WINDOW_SIZE.X.Offset + 80, maxX)
+            local y = math.clamp(startPos.Y.Offset + delta.Y, 0, maxY)
+            window.Position = UDim2.fromOffset(x, y)
+            shadow.Position = UDim2.fromOffset(x - 5, y - 6)
+        end
+    end)
+end
+
+local bodyHolder = create("Frame", {
+    Name = "Body",
+    Size = UDim2.new(1, 0, 1, -40),
+    Position = UDim2.fromOffset(0, 40),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+}, window)
+
+-- =============================================================================
+-- Tab system (icon + label + underline active)
+-- =============================================================================
+local tabBar = create("Frame", {
+    Name = "Tabs",
+    Size = UDim2.new(1, -20, 0, 34),
+    Position = UDim2.fromOffset(10, 6),
+    BackgroundColor3 = T.Panel,
+}, bodyHolder)
+corner(tabBar, R_CARD)
+
+local pageHolder = create("Frame", {
+    Name = "Pages",
+    Size = UDim2.new(1, -20, 1, -76),
+    Position = UDim2.fromOffset(10, 48),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+}, bodyHolder)
+
+local TAB_DEFS = {
+    {Name = "Status", Icon = "📊"},
+    {Name = "Farm", Icon = "🏡"},
+    {Name = "Move", Icon = "👟"},
+    {Name = "Hive", Icon = "🍯"},
+    {Name = "Lag", Icon = "⚡"},
+    {Name = "Planter", Icon = "🪴"},
+}
+
+do
+    create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 4),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    }, tabBar)
+    pad(tabBar, 4)
+
+    for index, def in ipairs(TAB_DEFS) do
+        local button = corner(create("TextButton", {
+            Name = def.Name,
+            LayoutOrder = index,
+            Size = UDim2.new(0, 72, 1, 0),
+            BackgroundColor3 = T.PanelLight,
+            Font = Enum.Font.GothamMedium,
+            Text = def.Icon .. " " .. def.Name,
+            TextColor3 = T.TextDim,
+            TextSize = 11,
+        }, tabBar), R_CTRL)
+        local underline = corner(create("Frame", {
+            Name = "Underline",
+            Size = UDim2.new(0, 0, 0, 3),
+            Position = UDim2.new(0.5, 0, 1, -3),
+            AnchorPoint = Vector2.new(0.5, 0),
+            BackgroundColor3 = T.Accent,
+        }, button), R_PILL)
+
+        local page = create("ScrollingFrame", {
+            Name = def.Name,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 4,
+            ScrollBarImageColor3 = T.AccentDim,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Visible = index == 1,
+        }, pageHolder)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, page)
+        pad(page, 4)
+
+        button.MouseEnter:Connect(function()
+            if not page.Visible then
+                TweenService:Create(button, TweenInfo.new(0.12),
+                    {BackgroundColor3 = T.PanelHover}):Play()
+            end
+        end)
+        button.MouseLeave:Connect(function()
+            if not page.Visible then
+                TweenService:Create(button, TweenInfo.new(0.18),
+                    {BackgroundColor3 = T.PanelLight}):Play()
+            end
+        end)
+        button.MouseButton1Click:Connect(function()
+            for name, other in pairs(UI._pages) do
+                other.Visible = (name == def.Name)
+            end
+            for name, other in pairs(UI._tabs) do
+                local active = (name == def.Name)
+                other.BackgroundColor3 = active and T.Accent or T.PanelLight
+                pcall(function()
+                    other.TextColor3 = active and T.Background or T.TextDim
+                end)
+                local bar = other:FindFirstChild("Underline")
+                if bar then
+                    TweenService:Create(bar, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+                        Size = active and UDim2.new(0.6, 0, 0, 3) or UDim2.new(0, 0, 0, 3),
+                    }):Play()
+                end
+            end
+            -- Slide nhẹ khi đổi tab.
+            page.Position = UDim2.fromOffset(10, 0)
+            TweenService:Create(page, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {
+                Position = UDim2.fromOffset(0, 0),
+            }):Play()
+        end)
+        UI._tabs[def.Name] = button
+        UI._pages[def.Name] = page
+    end
+    UI._tabs.Status.BackgroundColor3 = T.Accent
+    UI._tabs.Status.TextColor3 = T.Background
+    local firstBar = UI._tabs.Status:FindFirstChild("Underline")
+    if firstBar then firstBar.Size = UDim2.new(0.6, 0, 0, 3) end
+end
+
+-- =============================================================================
+-- Components
+-- =============================================================================
+local function applyValue(key, value)
+    UI.Values[key] = value
+    UI._saveSoon()
+    local callback = UI._callbacks[key]
+    if type(callback) == "function" then
+        task.spawn(function() pcall(callback, value) end)
+    end
+end
+
+local function buildToggle(page, def, order)
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -76, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = def.Danger and T.Bad or T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local track = corner(create("TextButton", {
+        Size = UDim2.fromOffset(48, 26),
+        Position = UDim2.new(1, -60, 0.5, -13),
+        BackgroundColor3 = T.PanelLight,
+        Text = "",
+    }, row), R_PILL)
+    strokeOf(track, T.Stroke, 1, 0.4)
+    local knob = corner(create("Frame", {
+        Size = UDim2.fromOffset(20, 20),
+        Position = UDim2.fromOffset(3, 3),
+        BackgroundColor3 = T.TextDim,
+    }, track), R_PILL)
+
+    local function render(state)
+        TweenService:Create(track, TweenInfo.new(0.18), {
+            BackgroundColor3 = state and T.Accent or T.PanelLight,
+        }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Position = state and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3),
+            BackgroundColor3 = state and T.Background or T.TextDim,
+        }):Play()
+    end
+    local current = UI.Values[def.Key] and true or false
+    render(current)
+    track.MouseButton1Click:Connect(function()
+        current = not current
+        render(current)
+        applyValue(def.Key, current)
+    end)
+    UI._refs[def.Key] = {Render = function(value) render(value and true or false) end}
+    return row
+end
+
+local function buildSlider(page, def, order)
+    local min = tonumber(def.Min) or 0
+    local max = tonumber(def.Max) or 100
+    local step = math.max(0.01, tonumber(def.Step) or 1)
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 52),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -96, 0, 20),
+        Position = UDim2.fromOffset(14, 6),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local valueLabel = create("TextLabel", {
+        Size = UDim2.fromOffset(78, 20),
+        Position = UDim2.new(1, -90, 0, 6),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "-",
+        TextColor3 = T.Accent,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, row)
+    local bar = corner(create("Frame", {
+        Size = UDim2.new(1, -28, 0, 8),
+        Position = UDim2.new(0, 14, 1, -16),
+        BackgroundColor3 = T.PanelLight,
+    }, row), R_PILL)
+    local fill = corner(create("Frame", {
+        Size = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = T.Accent,
+    }, bar), R_PILL)
+    vGradient(fill, 0, 0.3)
+    local handle = corner(create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        BackgroundColor3 = T.Text,
+        ZIndex = 2,
+    }, fill), R_PILL)
+    strokeOf(handle, T.Accent, 2, 0)
+
+    local function snap(value)
+        return math.clamp(math.floor(value / step + 0.5) * step, min, max)
+    end
+    local function render(value)
+        value = snap(tonumber(value) or min)
+        local alpha = math.clamp((value - min) / math.max(0.001, max - min), 0, 1)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        setText(valueLabel, tostring(value))
+    end
+    render(tonumber(UI.Values[def.Key]) or min)
+
+    local draggingSlider = false
+    local function setFromX(x)
+        local alpha = math.clamp((x - bar.AbsolutePosition.X) / math.max(1, bar.AbsoluteSize.X), 0, 1)
+        local value = snap(min + (max - min) * alpha)
+        render(value)
+        applyValue(def.Key, value)
+    end
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSlider = true
+            TweenService:Create(handle, TweenInfo.new(0.12), {Size = UDim2.fromOffset(18, 18)}):Play()
+            setFromX(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch) and draggingSlider then
+            draggingSlider = false
+            TweenService:Create(handle, TweenInfo.new(0.15), {Size = UDim2.fromOffset(14, 14)}):Play()
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            setFromX(input.Position.X)
+        end
+    end)
+    UI._refs[def.Key] = {Render = function(value) render(tonumber(value) or min) end}
+    return row
+end
+
+-- =============================================================================
+-- Control kinds MỚI: Section / Button / Textbox / Dropdown / Keybind.
+-- Cùng pattern buildX(page, def, order) -> row, đăng ký UI._refs[Key].Render
+-- để SetValues repaint được. Màu dùng T.* nên đổi theme là ăn (repaintTheme).
+-- =============================================================================
+local dropdownPopups = {}
+
+local function buildSection(page, def, order)
+    local row = create("Frame", {
+        Name = "Section_" .. tostring(def.Label or order),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 26),
+        BackgroundTransparency = 1,
+    }, page)
+    create("TextLabel", {
+        Size = UDim2.new(1, -8, 1, 0),
+        Position = UDim2.fromOffset(4, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = string.upper(tostring(def.Label or "")),
+        TextColor3 = T.AccentDim,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    create("Frame", {
+        Size = UDim2.new(1, -8, 0, 1),
+        Position = UDim2.new(0, 4, 1, -2),
+        BackgroundColor3 = T.Stroke,
+        BackgroundTransparency = 0.4,
+        BorderSizePixel = 0,
+    }, row)
+    return row
+end
+
+local function buildButton(page, def, order)
+    local row = corner(create("TextButton", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 40),
+        BackgroundColor3 = T.Panel,
+        Font = Enum.Font.GothamMedium,
+        Text = def.Label or def.Key,
+        TextColor3 = def.Danger and T.Bad or T.Text,
+        TextSize = 14,
+        AutoButtonColor = false,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    hoverify(row, "Panel", "PanelHover")
+    row.MouseButton1Click:Connect(function()
+        TweenService:Create(row, TweenInfo.new(0.08), {BackgroundColor3 = T.AccentDim}):Play()
+        task.delay(0.12, function()
+            TweenService:Create(row, TweenInfo.new(0.16), {BackgroundColor3 = T.Panel}):Play()
+        end)
+        local callback = UI._callbacks[def.Key]
+        if type(callback) == "function" then
+            task.spawn(function() pcall(callback) end)
+        end
+    end)
+    UI._refs[def.Key] = {Render = function() end}
+    return row
+end
+
+local function buildTextbox(page, def, order)
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -150, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local box = corner(create("TextBox", {
+        Size = UDim2.new(0, 130, 0, 26),
+        Position = UDim2.new(1, -142, 0.5, -13),
+        BackgroundColor3 = T.PanelLight,
+        Font = Enum.Font.Gotham,
+        Text = tostring(UI.Values[def.Key] or def.Default or ""),
+        PlaceholderText = def.Placeholder or "...",
+        TextColor3 = T.Text,
+        PlaceholderColor3 = T.TextDim,
+        TextSize = 13,
+        ClearTextOnFocus = false,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row), R_CTRL)
+    strokeOf(box, T.Stroke, 1, 0.4)
+    pad(box, 5)
+    local function commit()
+        local value = box.Text
+        if def.Numeric then
+            value = tonumber(value) or tonumber(def.Default) or 0
+        end
+        applyValue(def.Key, value)
+    end
+    box.FocusLost:Connect(function() commit() end)
+    UI._refs[def.Key] = {Render = function(v) box.Text = tostring(v == nil and "" or v) end}
+    return row
+end
+
+local function buildDropdown(page, def, order)
+    local options = type(def.Options) == "table" and def.Options or {}
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -180, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local btn = corner(create("TextButton", {
+        Size = UDim2.new(0, 160, 0, 26),
+        Position = UDim2.new(1, -172, 0.5, -13),
+        BackgroundColor3 = T.PanelLight,
+        Text = "",
+        AutoButtonColor = false,
+    }, row), R_CTRL)
+    strokeOf(btn, T.Stroke, 1, 0.4)
+    local btnLabel = create("TextLabel", {
+        Size = UDim2.new(1, -26, 1, 0),
+        Position = UDim2.fromOffset(9, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = "-",
+        TextColor3 = T.Text,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, btn)
+    create("TextLabel", {
+        Size = UDim2.fromOffset(16, 16),
+        Position = UDim2.new(1, -20, 0.5, -8),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "▾",
+        TextColor3 = T.TextDim,
+        TextSize = 12,
+    }, btn)
+    local current = UI.Values[def.Key]
+    if current == nil then current = def.Default or options[1] end
+    local function render(v) btnLabel.Text = tostring(v == nil and "-" or v) end
+    render(current)
+
+    local popup
+    local function closePopup()
+        if popup then pcall(function() popup:Destroy() end) popup = nil end
+        dropdownPopups[def.Key] = nil
+    end
+    local function openPopup()
+        closePopup()
+        local abs = btn.AbsolutePosition
+        local size = btn.AbsoluteSize
+        local height = math.min(190, math.max(30, #options * 28 + 8))
+        popup = corner(create("Frame", {
+            Name = "DropdownPopup",
+            Size = UDim2.fromOffset(size.X, height),
+            Position = UDim2.fromOffset(abs.X - rootGui.AbsolutePosition.X,
+                abs.Y - rootGui.AbsolutePosition.Y + size.Y + 4),
+            BackgroundColor3 = T.Panel,
+            ZIndex = 60,
+            ClipsDescendants = true,
+        }, rootGui), R_CTRL)
+        strokeOf(popup, T.Accent, 1, 0.25)
+        dropdownPopups[def.Key] = closePopup
+        local scroll = create("ScrollingFrame", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = T.AccentDim,
+            CanvasSize = UDim2.fromOffset(0, #options * 28 + 8),
+            ZIndex = 61,
+        }, popup)
+        create("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, scroll)
+        pad(scroll, 4)
+        for i, opt in ipairs(options) do
+            local optBtn = corner(create("TextButton", {
+                LayoutOrder = i,
+                Size = UDim2.new(1, -8, 0, 26),
+                BackgroundColor3 = (opt == current) and T.AccentDim or T.PanelLight,
+                Font = Enum.Font.Gotham,
+                Text = tostring(opt),
+                TextColor3 = T.Text,
+                TextSize = 13,
+                AutoButtonColor = false,
+                ZIndex = 62,
+            }, scroll), R_CTRL)
+            optBtn.MouseEnter:Connect(function()
+                TweenService:Create(optBtn, TweenInfo.new(0.1), {BackgroundColor3 = T.PanelHover}):Play()
+            end)
+            optBtn.MouseLeave:Connect(function()
+                TweenService:Create(optBtn, TweenInfo.new(0.12), {
+                    BackgroundColor3 = (opt == current) and T.AccentDim or T.PanelLight,
+                }):Play()
+            end)
+            optBtn.MouseButton1Click:Connect(function()
+                current = opt
+                render(opt)
+                applyValue(def.Key, opt)
+                closePopup()
+            end)
+        end
+    end
+    btn.MouseButton1Click:Connect(function()
+        if popup then closePopup() else openPopup() end
+    end)
+    UserInputService.InputBegan:Connect(function(input)
+        if not popup or not popup.Parent or not btn.Parent then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        local p = input.Position
+        local pa, ps = popup.AbsolutePosition, popup.AbsoluteSize
+        local ba, bs = btn.AbsolutePosition, btn.AbsoluteSize
+        local inPopup = p.X >= pa.X and p.X <= pa.X + ps.X and p.Y >= pa.Y and p.Y <= pa.Y + ps.Y
+        local inBtn = p.X >= ba.X and p.X <= ba.X + bs.X and p.Y >= ba.Y and p.Y <= ba.Y + bs.Y
+        if not inPopup and not inBtn then closePopup() end
+    end)
+    UI._refs[def.Key] = {Render = function(v) current = v; render(v) end}
+    return row
+end
+
+local function buildKeybind(page, def, order)
+    local row = corner(create("Frame", {
+        Name = "Ctrl_" .. tostring(def.Key),
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(row, T.Stroke, 1, 0.55)
+    create("TextLabel", {
+        Size = UDim2.new(1, -130, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = def.Label or def.Key,
+        TextColor3 = T.Text,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local btn = corner(create("TextButton", {
+        Size = UDim2.new(0, 110, 0, 26),
+        Position = UDim2.new(1, -122, 0.5, -13),
+        BackgroundColor3 = T.PanelLight,
+        Text = "",
+        AutoButtonColor = false,
+    }, row), R_CTRL)
+    strokeOf(btn, T.Stroke, 1, 0.4)
+    local btnLabel = create("TextLabel", {
+        Size = UDim2.new(1, -12, 1, 0),
+        Position = UDim2.fromOffset(6, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "None",
+        TextColor3 = T.Text,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Center,
+    }, btn)
+    local current = UI.Values[def.Key] or def.Default or "None"
+    local listening = false
+    local capture
+    local function render(v)
+        btnLabel.Text = listening and "press key..." or tostring(v or "None")
+        btnLabel.TextColor3 = listening and T.Accent or T.Text
+    end
+    render(current)
+    btn.MouseButton1Click:Connect(function()
+        if listening then return end
+        listening = true
+        render(current)
+        capture = UserInputService.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            if capture then capture:Disconnect() capture = nil end
+            listening = false
+            if input.KeyCode == Enum.KeyCode.Escape then
+                render(current)
+                return
+            end
+            current = input.KeyCode.Name
+            render(current)
+            applyValue(def.Key, current)
+        end)
+    end)
+    UI._refs[def.Key] = {Render = function(v) current = v; render(v) end}
+    return row
+end
+
+-- =============================================================================
+-- Status page
+-- =============================================================================
+local statusLabel, statusCard, statCells, gearLine, bagFill, bagFillText, planterCells
+local renderHoneyGraph, logAppend
+local honeyHistory = {}
+do
+    local page = UI._pages.Status
+    local order = 0
+    local function nextOrder() order += 1 return order end
+
+    statusCard = corner(create("Frame", {
+        Name = "StatusCard",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CARD)
+    strokeOf(statusCard, T.AccentDim, 1, 0.6)
+    vGradient(statusCard, 0, 0.22)
+    statusLabel = create("TextLabel", {
+        Size = UDim2.new(1, -18, 1, 0),
+        Position = UDim2.fromOffset(9, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "booting...",
+        TextColor3 = T.Text,
+        TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, statusCard)
+
+    statCells = {}
+    local statKeys = {
+        {"HoneyPerHour", "HONEY / H"},
+        {"Uptime", "UPTIME"},
+        {"Bees", "BEES"},
+        {"Tokens", "TOKENS"},
+        {"Honey", "HONEY"},
+        {"Capacity", "BAG SIZE"},
+        {"SproutsFarmed", "SPROUTS"},
+        {"PlanterHarvests", "HARVESTS"},
+    }
+    for index, entry in ipairs(statKeys) do
+        local rowIndex = math.ceil(index / 2)
+        local rowFrame = statCells["Row" .. rowIndex]
+        if not rowFrame then
+            rowFrame = create("Frame", {
+                Name = "Row" .. rowIndex,
+                LayoutOrder = nextOrder(),
+                Size = UDim2.new(1, 0, 0, 42),
+                BackgroundTransparency = 1,
+            }, page)
+            create("UIListLayout", {
+                FillDirection = Enum.FillDirection.Horizontal,
+                Padding = UDim.new(0, 6),
+            }, rowFrame)
+            statCells["Row" .. rowIndex] = rowFrame
+        end
+        local cell = corner(create("Frame", {
+            Name = "Cell_" .. entry[1],
+            Size = UDim2.new(0.5, -3, 1, 0),
+            BackgroundColor3 = T.Panel,
+        }, rowFrame), R_CTRL)
+        strokeOf(cell, T.Stroke, 1, 0.6)
+        create("TextLabel", {
+            Size = UDim2.new(1, -14, 0, 13),
+            Position = UDim2.fromOffset(8, 4),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = entry[2],
+            TextColor3 = T.TextDim,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, cell)
+        local valueLabel = create("TextLabel", {
+            Size = UDim2.new(1, -14, 0, 19),
+            Position = UDim2.fromOffset(8, 17),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold,
+            Text = "-",
+            TextColor3 = T.Text,
+            TextSize = 15,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, cell)
+        statCells[entry[1]] = valueLabel
+    end
+
+    gearLine = create("TextLabel", {
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 20),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        Text = "next gear: -",
+        TextColor3 = T.AccentSoft,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, page)
+
+    local bagFrame = corner(create("Frame", {
+        Name = "Bag",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 26),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CTRL)
+    strokeOf(bagFrame, T.Stroke, 1, 0.6)
+    local bagTrack = corner(create("Frame", {
+        Size = UDim2.new(1, -8, 0, 12),
+        Position = UDim2.new(0, 4, 0.5, -6),
+        BackgroundColor3 = T.PanelLight,
+        ZIndex = 1,
+    }, bagFrame), R_PILL)
+    bagFill = corner(create("Frame", {
+        Size = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = T.Good,
+        ZIndex = 2,
+    }, bagTrack), R_PILL)
+    vGradient(bagFill, 0, 0.35)
+    bagFillText = create("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        Text = "bag -",
+        TextColor3 = T.Text,
+        TextSize = 12,
+        ZIndex = 3,
+    }, bagFrame)
+
+    local planterFrame = corner(create("Frame", {
+        Name = "Planters",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 80),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CARD)
+    strokeOf(planterFrame, T.Stroke, 1, 0.6)
+    create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 16),
+        Position = UDim2.fromOffset(9, 3),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "PLANTERS",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, planterFrame)
+    do
+        local slots = create("Frame", {
+            Size = UDim2.new(1, -14, 0, 50),
+            Position = UDim2.fromOffset(7, 22),
+            BackgroundTransparency = 1,
+        }, planterFrame)
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6),
+        }, slots)
+        planterCells = {}
+        for slot = 1, 3 do
+            local cell = corner(create("Frame", {
+                Size = UDim2.new(0.333, -4, 1, 0),
+                BackgroundColor3 = T.PanelLight,
+            }, slots), R_CTRL)
+            -- Icon THẬT của planter lấy từ EggTypes của game (rbxassetid trực
+            -- tiếp - client đã có texture, không download gì cả).
+            local iconImage = create("ImageLabel", {
+                Name = "Icon",
+                Size = UDim2.fromOffset(22, 22),
+                Position = UDim2.fromOffset(4, 3),
+                BackgroundTransparency = 1,
+                Image = "",
+                ScaleType = Enum.ScaleType.Fit,
+            }, cell)
+            local nameLabel = create("TextLabel", {
+                Size = UDim2.new(1, -32, 0, 14),
+                Position = UDim2.fromOffset(28, 4),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamMedium,
+                Text = "-",
+                TextColor3 = T.Text,
+                TextSize = 11,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            local fieldLabel = create("TextLabel", {
+                Size = UDim2.new(1, -32, 0, 12),
+                Position = UDim2.fromOffset(28, 18),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham,
+                Text = "",
+                TextColor3 = T.TextDim,
+                TextSize = 10,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            local fillTrack = corner(create("Frame", {
+                Size = UDim2.new(1, -12, 0, 7),
+                Position = UDim2.new(0, 6, 1, -13),
+                BackgroundColor3 = T.Background,
+            }, cell), R_PILL)
+            local fillBar = corner(create("Frame", {
+                Size = UDim2.new(0, 0, 1, 0),
+                BackgroundColor3 = T.Accent,
+            }, fillTrack), R_PILL)
+            planterCells[slot] = {Name = nameLabel, Field = fieldLabel, Fill = fillBar, Icon = iconImage}
+        end
+    end
+
+    -- SPARKLINE honey/h: 40 cột Frame, mẫu mới nhất bên phải + tô accent.
+    -- Dữ liệu lấy từ SetStats.HoneyPerHour (main đã đẩy sẵn mỗi nhịp).
+    local GRAPH_N = 40
+    local graphFrame = corner(create("Frame", {
+        Name = "HoneyGraph",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 78),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CARD)
+    strokeOf(graphFrame, T.Stroke, 1, 0.6)
+    create("TextLabel", {
+        Size = UDim2.new(1, -14, 0, 16),
+        Position = UDim2.fromOffset(9, 3),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "HONEY / H  ·  LAST 40",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, graphFrame)
+    local chart = create("Frame", {
+        Size = UDim2.new(1, -16, 0, 46),
+        Position = UDim2.fromOffset(8, 24),
+        BackgroundTransparency = 1,
+        ClipsDescendants = true,
+    }, graphFrame)
+    create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 1),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        VerticalAlignment = Enum.VerticalAlignment.Bottom,
+        HorizontalAlignment = Enum.HorizontalAlignment.Left,
+    }, chart)
+    local graphBars = {}
+    for i = 1, GRAPH_N do
+        graphBars[i] = corner(create("Frame", {
+            LayoutOrder = i,
+            Size = UDim2.new(1 / GRAPH_N, -1, 0, 0),
+            BackgroundColor3 = T.AccentDim,
+            BackgroundTransparency = 0.6,
+        }, chart), 2)
+    end
+    function renderHoneyGraph()
+        local maxValue = 1
+        for _, v in ipairs(honeyHistory) do
+            if v > maxValue then maxValue = v end
+        end
+        local n = #honeyHistory
+        for i = 1, GRAPH_N do
+            local bar = graphBars[i]
+            local idx = n - GRAPH_N + i
+            local v = idx >= 1 and honeyHistory[idx] or nil
+            if v then
+                local ratio = math.clamp(v / maxValue, 0.05, 1)
+                bar.Size = UDim2.new(1 / GRAPH_N, -1, ratio, 0)
+                bar.BackgroundColor3 = (idx == n) and T.Accent or T.AccentDim
+                bar.BackgroundTransparency = (idx == n) and 0 or 0.3
+            else
+                bar.Size = UDim2.new(1 / GRAPH_N, -1, 0, 0)
+                bar.BackgroundTransparency = 0.6
+            end
+        end
+    end
+
+    -- LOG PANEL: dòng console gần nhất trong UI (UI.Log). Tự cuộn xuống đáy.
+    local logFrame = corner(create("Frame", {
+        Name = "Log",
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 110),
+        BackgroundColor3 = T.Panel,
+    }, page), R_CARD)
+    strokeOf(logFrame, T.Stroke, 1, 0.6)
+    create("TextLabel", {
+        Size = UDim2.new(1, -14, 0, 16),
+        Position = UDim2.fromOffset(9, 3),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "LOG",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, logFrame)
+    local logScroll = create("ScrollingFrame", {
+        Size = UDim2.new(1, -12, 1, -22),
+        Position = UDim2.fromOffset(6, 18),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = T.AccentDim,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, logFrame)
+    create("UIListLayout", {Padding = UDim.new(0, 1), SortOrder = Enum.SortOrder.LayoutOrder}, logScroll)
+    local logLines, logOrder = {}, 0
+    function logAppend(message, kind)
+        local color = T.Text
+        if kind == "good" then color = T.Good
+        elseif kind == "warn" then color = T.Bad
+        elseif kind == "dim" then color = T.TextDim end
+        logOrder = logOrder + 1
+        local line = create("TextLabel", {
+            LayoutOrder = logOrder,
+            Size = UDim2.new(1, -4, 0, 14),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Code,
+            Text = os.date("%H:%M:%S") .. "  " .. tostring(message),
+            TextColor3 = color,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, logScroll)
+        table.insert(logLines, line)
+        if #logLines > 40 then
+            local old = table.remove(logLines, 1)
+            pcall(function() old:Destroy() end)
+        end
+        task.defer(function()
+            pcall(function()
+                logScroll.CanvasPosition = Vector2.new(0,
+                    math.max(0, logScroll.AbsoluteCanvasSize.Y - logScroll.AbsoluteSize.Y))
+            end)
+        end)
+    end
+
+    -- Footer version line.
+    create("TextLabel", {
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 14),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = "BSS Kaitun • ui v2",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTransparency = 0.35,
+    }, page)
+end
+
+-- =============================================================================
+-- =============================================================================
+-- Hive page (tab 🍯): tổng quan tổ ong - cấp độ trung bình, gifted, màu.
+-- Main đẩy dữ liệu qua UI.SetHive{...} và UI.SetHiveGrid{{Type=,Gifted=,Level=,X=,Y=}}.
+-- =============================================================================
+-- Phân loại màu ô ong (file-level để SetHiveGrid dùng được - local trong
+-- do-block dưới kia sẽ không thấy).
+local HIVE_EVENT_MARKS = {
+    bear = true, cobalt = true, crimson = true, digital = true,
+    festive = true, gummy = true, photon = true, puppy = true,
+    tabby = true, vicious = true, windy = true,
+}
+-- =============================================================================
+-- RARITY -> MÀU Ô (giống ảnh mẫu hive của game):
+--   Common trắng, Rare xanh lá, Epic xanh dương, Legendary đỏ,
+--   Mythic tím, Event cyan. Gifted = viền VÀNG + tint kim nhẹ.
+-- =============================================================================
+local GOLD = Color3.fromRGB(255, 210, 63)
+local RARITY_COLORS = {
+    Common = Color3.fromRGB(232, 230, 223),
+    Rare = Color3.fromRGB(155, 214, 90),
+    Epic = Color3.fromRGB(91, 155, 239),
+    Legendary = Color3.fromRGB(239, 106, 90),
+    Mythic = Color3.fromRGB(185, 166, 236),
+    Event = Color3.fromRGB(111, 227, 214),
+}
+local BEE_RARITY = {
+    basic = "Common",
+    bomber = "Rare", brave = "Rare", bumble = "Rare", cool = "Rare", hasty = "Rare",
+    looker = "Rare", rad = "Rare", rascal = "Rare", stubborn = "Rare",
+    baby = "Epic", carpenter = "Epic", commander = "Epic", demon = "Epic",
+    exhausted = "Epic", fire = "Epic", frosty = "Epic", honey = "Epic",
+    rage = "Epic", riley = "Epic", shy = "Epic",
+    bucko = "Legendary", diamond = "Legendary", lion = "Legendary", music = "Legendary",
+    ninja = "Legendary", shimmer = "Legendary", shocked = "Legendary",
+    buoyant = "Mythic", fuzzy = "Mythic", precise = "Mythic", spicy = "Mythic",
+    tadpole = "Mythic", vector = "Mythic",
+    bear = "Event", cobalt = "Event", crimson = "Event", digital = "Event",
+    festive = "Event", gummy = "Event", photon = "Event", puppy = "Event",
+    tabby = "Event", vicious = "Event", windy = "Event",
+}
+local function rarityOf(beeType)
+    local n = normalizeImageName(beeType)
+    local bare = n:gsub("bee$", "")
+    return BEE_RARITY[bare] or BEE_RARITY[n]
+        or (HIVE_EVENT_MARKS[n] or HIVE_EVENT_MARKS[bare]) and "Event" or "Common"
+end
+
+-- =============================================================================
+-- HEXAGON bằng Frame: flat-top = kim cương trái (45°) + chữ nhật giữa + kim
+-- cương phải. Các ô khớp cạnh nhau khi COL_PITCH = HEX_W - HEX_H/2 (tổ ong
+-- liền mạch, không hở/không chồng). Cột chẵn/lẻ lệch nhau nửa ô theo chiều dọc.
+-- =============================================================================
+local HEX_W, HEX_H = 88, 62
+local COL_PITCH = HEX_W - HEX_H / 2          -- 57: cạnh phải ô trước = cạnh trái ô sau
+local ROW_PITCH = HEX_H
+local COL_OFFSET = HEX_H / 2                 -- cột chẵn (1,3,5) đẩy xuống nửa ô
+local GRID_COLS, GRID_ROWS = 5, 10
+local GRID_W = (GRID_COLS - 1) * COL_PITCH + HEX_W
+local GRID_H = (GRID_ROWS - 1) * ROW_PITCH + HEX_H + COL_OFFSET
+local FACE_SIZE = math.floor(HEX_W * 0.6)
+
+local function makeHex(parent, zIndex)
+    local holder = create("Frame", {
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        ClipsDescendants = true, ZIndex = zIndex,
+        Size = UDim2.fromOffset(1, 1),
+    }, parent)
+    local left = create("Frame", {
+        BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5),
+        Rotation = 45, ZIndex = zIndex,
+    }, holder)
+    local right = create("Frame", {
+        BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5),
+        Rotation = 45, ZIndex = zIndex,
+    }, holder)
+    local mid = create("Frame", {BorderSizePixel = 0, ZIndex = zIndex}, holder)
+    return {Frame = holder, Left = left, Right = right, Mid = mid}
+end
+
+local function layoutHex(hex, w, h, x, y, color)
+    hex.Frame.Position = UDim2.fromOffset(x, y)
+    hex.Frame.Size = UDim2.fromOffset(w, h)
+    local side = h / math.sqrt(2)
+    hex.Left.Size = UDim2.fromOffset(side, side)
+    hex.Left.Position = UDim2.fromOffset(h / 2, h / 2)
+    hex.Left.BackgroundColor3 = color
+    hex.Right.Size = UDim2.fromOffset(side, side)
+    hex.Right.Position = UDim2.fromOffset(w - h / 2, h / 2)
+    hex.Right.BackgroundColor3 = color
+    hex.Mid.Position = UDim2.fromOffset(h / 2, 0)
+    hex.Mid.Size = UDim2.fromOffset(math.max(0, w - h), h)
+    hex.Mid.BackgroundColor3 = color
+end
+
+-- MẶT ONG THẬT: nguồn chuẩn = BeeTypes.Thumbnails/<Tên> ( GiftedThumbnails
+-- cho ong gifted - đúng bộ asset UI hive của game tự dùng). Fallback:
+-- TopDecals rồi GiftedBeeModels.FaceTexture. Cache theo loại + gifted.
+local beeFaceCache = {}
+local function beeFaceTexture(beeType, gifted)
+    local key = tostring(beeType or "") .. (gifted and "|g" or "")
+    if beeFaceCache[key] ~= nil then return beeFaceCache[key] end
+    local texture
+    local firstName = tostring(beeType or ""):match("^(%S+)")
+    if firstName and firstName ~= "" then
+        local beeTypes = ReplicatedStorage:FindFirstChild("BeeTypes")
+        if beeTypes then
+            local folder = beeTypes:FindFirstChild(gifted and "GiftedThumbnails" or "Thumbnails")
+            texture = textureOf(folder and folder:FindFirstChild(firstName))
+            if not texture and folder then
+                -- Khớp CHUẨN HÓA (tránh lệch "Basic Bee" / "BasicBee"):
+                -- so tên loại (bỏ đuôi "bee") với tên child đã chuẩn hóa.
+                local wanted = normalizeImageName(beeType)
+                local wantedBare = wanted:gsub("bee$", "")
+                for _, child in ipairs(folder:GetChildren()) do
+                    local n = normalizeImageName(child.Name)
+                    if n == wanted or n == wantedBare then
+                        texture = textureOf(child)
+                        break
+                    end
+                end
+            end
+            if not texture then
+                local decals = beeTypes:FindFirstChild("TopDecals")
+                texture = textureOf(decals and decals:FindFirstChild(firstName))
+            end
+        end
+        if not texture then
+            local models = ReplicatedStorage:FindFirstChild("GiftedBeeModels")
+            texture = textureOf(models and models:FindFirstChild(firstName))
+        end
+    end
+    beeFaceCache[key] = texture or false
+    if not texture then
+        print("[BSS UI] bee icon not found for: " .. tostring(beeType) .. " (gifted=" .. tostring(gifted and true or false) .. ")")
+    end
+    return texture
+end
+local hiveCells
+do
+    local page = UI._pages.Hive
+    if page then
+        create("TextLabel", {
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 20),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            Text = "HIVE OVERVIEW",
+            TextColor3 = T.AccentDim,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, page)
+        hiveCells = {}
+        local hiveKeys = {
+            {"Bees", "BEES"},
+            {"Gifted", "GIFTED"},
+            {"AverageLevel", "AVG LEVEL"},
+            {"Blue", "BLUE"},
+            {"Red", "RED"},
+            {"Event", "EVENT"},
+        }
+        for index, entry in ipairs(hiveKeys) do
+            local rowIndex = math.ceil(index / 2)
+            local rowFrame = hiveCells["Row" .. rowIndex]
+            if not rowFrame then
+                rowFrame = create("Frame", {
+                    Name = "Row" .. rowIndex,
+                    LayoutOrder = 10 + rowIndex,
+                    Size = UDim2.new(1, 0, 0, 46),
+                    BackgroundTransparency = 1,
+                }, page)
+                create("UIListLayout", {
+                    FillDirection = Enum.FillDirection.Horizontal,
+                    Padding = UDim.new(0, 6),
+                }, rowFrame)
+                hiveCells["Row" .. rowIndex] = rowFrame
+            end
+            local cell = corner(create("Frame", {
+                Name = "Cell_" .. entry[1],
+                Size = UDim2.new(0.5, -3, 1, 0),
+                BackgroundColor3 = T.Panel,
+            }, rowFrame), R_CTRL)
+            strokeOf(cell, T.Stroke, 1, 0.6)
+            create("TextLabel", {
+                Size = UDim2.new(1, -14, 0, 14),
+                Position = UDim2.fromOffset(8, 6),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham,
+                Text = entry[2],
+                TextColor3 = T.TextDim,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            local valueLabel = create("TextLabel", {
+                Size = UDim2.new(1, -14, 0, 20),
+                Position = UDim2.fromOffset(8, 21),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                Text = "-",
+                TextColor3 = T.Text,
+                TextSize = 16,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, cell)
+            hiveCells[entry[1]] = valueLabel
+        end
+        -- SHOW HIVE: tổ ong lục giác 50 slot giống ảnh mẫu - flat-top, cột
+        -- chẵn/lẻ lệch nửa ô, màu theo rarity, GIFTED viền vàng + ✦, mặt ong
+        -- thật ở giữa, level góc dưới-trái có viền đen. Page tự scroll.
+        local gridFrame = corner(create("Frame", {
+            Name = "HiveGrid",
+            LayoutOrder = 20,
+            Size = UDim2.new(1, 0, 0, 21 + GRID_H + 12),
+            BackgroundColor3 = T.Panel,
+        }, page), R_CARD)
+        strokeOf(gridFrame, T.Stroke, 1, 0.6)
+        vGradient(gridFrame, 0, 0.12)
+        local hivePattern = resolveHivePattern()
+        if hivePattern then
+            create("ImageLabel", {
+                Name = "Pattern",
+                Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                Image = hivePattern,
+                ImageColor3 = T.Accent,
+                ImageTransparency = 0.9,
+                ScaleType = Enum.ScaleType.Tile,
+                TileSize = UDim2.fromOffset(58, 58),
+                ZIndex = 0,
+            }, gridFrame)
+        end
+        local gridCountLabel = create("TextLabel", {
+            Size = UDim2.new(1, -14, 0, 16),
+            Position = UDim2.fromOffset(8, 3),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold,
+            Text = "HONEYCOMB  -/50",
+            TextColor3 = T.TextDim,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, gridFrame)
+        hiveCells.GridCount = gridCountLabel
+        local gridHolder = create("Frame", {
+            Name = "Comb",
+            Size = UDim2.fromOffset(GRID_W, GRID_H),
+            Position = UDim2.new(0.5, -GRID_W / 2, 0, 21),
+            BackgroundTransparency = 1,
+        }, gridFrame)
+        hiveCells.GridSlot = {}
+        for slot = 1, 50 do
+            local col = (slot - 1) % GRID_COLS        -- X 1..5
+            local row = math.floor((slot - 1) / GRID_COLS) -- Y 1..10
+            local cx = col * COL_PITCH
+            local cy = row * ROW_PITCH + (col % 2 == 0 and COL_OFFSET or 0)
+            local cell = create("Frame", {
+                Name = "Slot" .. slot,
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(cx, cy),
+                Size = UDim2.fromOffset(HEX_W, HEX_H),
+                Visible = false,
+            }, gridHolder)
+            -- Viền (hex ngoài) + ruột (hex trong nhỏ hơn) = viền theo silhouette.
+            local border = makeHex(cell, 1)
+            local fill = makeHex(cell, 2)
+            layoutHex(border, HEX_W, HEX_H, 0, 0, T.Background)
+            layoutHex(fill, HEX_W - 4, HEX_H - 4, 2, 2, T.PanelLight)
+            local faceIcon = create("ImageLabel", {
+                Name = "Face",
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0.5, 0, 0.5, -1),
+                Size = UDim2.fromOffset(FACE_SIZE, FACE_SIZE),
+                BackgroundTransparency = 1,
+                Image = "",
+                ScaleType = Enum.ScaleType.Fit,
+                ZIndex = 3,
+            }, cell)
+            local levelText = create("TextLabel", {
+                Name = "Level",
+                Size = UDim2.fromOffset(36, 16),
+                Position = UDim2.fromOffset(8, HEX_H - 20),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                Text = "",
+                TextColor3 = Color3.new(1, 1, 1),
+                TextSize = 14,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextStrokeTransparency = 0,
+                TextStrokeColor3 = Color3.new(0, 0, 0),
+                ZIndex = 4,
+            }, cell)
+            local star = create("TextLabel", {
+                Name = "Star",
+                Size = UDim2.fromOffset(16, 16),
+                Position = UDim2.fromOffset(HEX_W - 22, 5),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                Text = "✦",
+                TextColor3 = GOLD,
+                TextSize = 13,
+                TextStrokeTransparency = 0.4,
+                TextStrokeColor3 = Color3.new(0, 0, 0),
+                Visible = false,
+                ZIndex = 4,
+            }, cell)
+            hiveCells.GridSlot[slot] = {
+                Frame = cell, Border = border, Fill = fill,
+                Level = levelText, Face = faceIcon, Star = star,
             }
         end
     end
-    return list
 end
 
--- Choose the best grinding quest for a level.
--- opts: {boss=bool, island=string, exclude=setName}
-function K.SelectQuest(list, level, opts)
-    opts = opts or {}
-    level = tonumber(level) or 0
-    local best, bestScore = nil, -math.huge
-    for _, q in ipairs(list or {}) do
-        local isGrinding = (q.Type == "Grinding") or (q.Type == nil)
-        if isGrinding and q.Goals and #q.Goals > 0 then
-            local okBoss = (not q.IsBoss) or opts.boss
-            local okIsland = (opts.island == nil or opts.island == "" or q.Island == opts.island)
-            local inRange = level >= (q.MinLevel or 0) and level <= (q.MaxLevel or math.huge)
-            local unlocked = level >= (q.MinLevel or 0)
-            if okBoss and okIsland and unlocked then
-                -- prefer quests whose range contains the level, then highest MinLevel
-                local score = (q.MinLevel or 0)
-                if inRange then score = score + 100000 end
-                if q.IsBoss and opts.boss then score = score + 5000 end
-                if opts.exclude and opts.exclude[q.Name] then score = score - 1000000 end
-                if score > bestScore then
-                    best, bestScore = q, score
-                end
-            end
-        end
-    end
-    return best
-end
+-- Toasts (góc phải trên, xếp chồng, tự biến mất)
+-- =============================================================================
+local toastHolder = create("Frame", {
+    Name = "Toasts",
+    Size = UDim2.fromOffset(300, 400),
+    Position = UDim2.new(1, -320, 0, 8),
+    BackgroundTransparency = 1,
+}, rootGui)
+create("UIListLayout", {
+    Padding = UDim.new(0, 6),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Right,
+}, toastHolder)
 
--- Distribute available stat points by weights, respecting per-stat caps.
--- weights: map stat->weight ; current: map stat->already invested ;
--- cap: optional max total per stat (nil = unlimited). Returns map stat->pointsToAdd.
-function K.DistributeStats(available, weights, current, cap)
-    available = math.max(0, math.floor(tonumber(available) or 0))
-    weights = weights or {}
-    current = current or {}
-    local result = {}
-    local totalWeight = 0
-    for _, w in pairs(weights) do totalWeight = totalWeight + (tonumber(w) or 0) end
-    if available == 0 or totalWeight <= 0 then return result end
-
-    -- ideal fractional allocation
-    local ideal, order = {}, {}
-    for stat, w in pairs(weights) do
-        w = tonumber(w) or 0
-        if w > 0 then
-            ideal[stat] = available * (w / totalWeight)
-            order[#order + 1] = stat
-        end
-    end
-    table.sort(order)
-
-    local assigned = 0
-    local floors = {}
-    for _, stat in ipairs(order) do
-        local room = available
-        if cap and cap[stat] then
-            room = math.max(0, cap[stat] - (tonumber(current[stat]) or 0))
-        end
-        local give = math.min(math.floor(ideal[stat]), room)
-        floors[stat] = give
-        assigned = assigned + give
-    end
-    -- hand out remaining points by largest fractional remainder, respecting caps
-    local remainder = available - assigned
-    local fracOrder = {}
-    for _, stat in ipairs(order) do
-        fracOrder[#fracOrder + 1] = { stat = stat, frac = ideal[stat] - math.floor(ideal[stat]) }
-    end
-    table.sort(fracOrder, function(a, b)
-        if a.frac == b.frac then return a.stat < b.stat end
-        return a.frac > b.frac
-    end)
-    local i = 1
-    while remainder > 0 and #fracOrder > 0 do
-        local entry = fracOrder[((i - 1) % #fracOrder) + 1]
-        local stat = entry.stat
-        local room = available
-        if cap and cap[stat] then
-            room = math.max(0, cap[stat] - (tonumber(current[stat]) or 0) - floors[stat])
-        end
-        if floors[stat] < room then
-            floors[stat] = floors[stat] + 1
-            remainder = remainder - 1
-        end
-        i = i + 1
-        if i > #fracOrder * (available + 1) then break end -- safety
-    end
-    for _, stat in ipairs(order) do
-        if floors[stat] > 0 then result[stat] = floors[stat] end
-    end
-    return result
-end
-
--- Score an enemy for farming priority. Higher = better target.
--- enemy: {Name, Level, Health, MaxHealth, Distance, IsBoss}
-function K.ScoreEnemy(enemy, goals, opts)
-    opts = opts or {}
-    if type(enemy) ~= "table" then return -math.huge end
-    local matches = false
-    for _, g in ipairs(goals or {}) do
-        if K.MatchName(enemy.Name, g) then matches = true break end
-    end
-    if not matches and not opts.allowAny then return -math.huge end
-    local hp = tonumber(enemy.Health) or 0
-    if hp <= 0 then return -math.huge end
-    local dist = tonumber(enemy.Distance) or math.huge
-    if opts.maxRange and dist > opts.maxRange then return -math.huge end
-    local score = 1000
-    score = score - dist * 0.5                       -- closer is better
-    local maxhp = tonumber(enemy.MaxHealth) or hp
-    if maxhp > 0 then score = score + (1 - hp / maxhp) * 200 end -- finish low hp
-    if enemy.IsBoss then score = score + (opts.boss and 300 or -200) end
-    if not matches then score = score - 500 end
-    return score
-end
-
--- Pick the best enemy from a list given quest goals.
-function K.PickEnemy(enemies, goals, opts)
-    local best, bestScore = nil, -math.huge
-    for _, e in ipairs(enemies or {}) do
-        local s = K.ScoreEnemy(e, goals, opts)
-        if s > bestScore then best, bestScore = e, s end
-    end
-    return best, bestScore
-end
-
--- Find enemies/bosses whose drop table contains itemName.
--- enemysInfo: flat map name->def with Rewards.Drops (list of {Item,Chance,Quantity})
-function K.FindItemDroppers(enemysInfo, itemName)
-    local out = {}
-    if type(enemysInfo) ~= "table" or not itemName or itemName == "" then return out end
-    local target = K.NormalizeName(itemName)
-    local function scanDrops(drops, name, def)
-        if type(drops) ~= "table" then return end
-        for _, d in pairs(drops) do
-            if type(d) == "table" then
-                local it = d.Item or d.Name or d.Tool
-                if it and K.NormalizeName(it) == target then
-                    out[#out + 1] = { Name = name, Chance = d.Chance, Quantity = d.Quantity, IsBoss = def and def.IsBoss }
-                end
-            end
-        end
-    end
-    for name, def in pairs(enemysInfo) do
-        if type(def) == "table" then
-            local rewards = def.Rewards
-            if type(rewards) == "table" then scanDrops(rewards.Drops, name, def) end
-            scanDrops(def.Drops, name, def)
-            if type(def.DropsSet) == "table" then scanDrops(def.DropsSet, name, def) end
-        end
-    end
-    return out
-end
-
--- Fallback progression (approximate level ranges from public wiki, mapped to the
--- new-build island names). Used ONLY when runtime QuestsInfo cannot be read.
-K.FallbackProgression = {
-    { Island = "Solmar Island",    MinLevel = 0,    Goals = { "Cutlass Pirate", "Flint Pirate", "Marine Recruit" } },
-    { Island = "Skull Island",     MinLevel = 25,   Goals = { "Boar", "Alpha Boar" } },
-    { Island = "Forbidden Island", MinLevel = 60,   Goals = { "Werewolf", "Fierce Werewolf" } },
-    { Island = "Circus Town",      MinLevel = 110,  Goals = { "Bugg Cutlass Pirate", "Bugg Flint Pirate", "Dual Katana Clown" } },
-    { Island = "Golden Dunes",     MinLevel = 180,  Goals = { "Desert Ruffian", "Desert Outlaw" } },
-    { Island = "Frost Island",     MinLevel = 255,  Goals = { "Viking Warrior", "Old Viking Warrior", "Haunted Knight" } },
-    { Island = "Marine Ford",      MinLevel = 330,  Goals = { "Marine Sergeant", "Marine Lieutenant" } },
-    { Island = "Windhaven",        MinLevel = 405,  Goals = { "Sky Royal Guard", "Elite Sky Royal Guard" } },
-    { Island = "Prison",           MinLevel = 455,  Goals = { "Elite Prison Guard", "Elite Prison Supervisor" } },
-    { Island = "Valoria Island",   MinLevel = 580,  Goals = { "Veteran Gladiator", "Elite Assassin Gladiator" } },
-    { Island = "Rustfall",         MinLevel = 630,  Goals = { "Iron Sentinel", "Old Iron Sentinel" } },
-    { Island = "Volcano Island",   MinLevel = 660,  Goals = { "Volcano Guard", "Volcano Supervisor" } },
-    { Island = "Shark Park",       MinLevel = 705,  Goals = { "Sharkman Patroller", "Sharkman Guard", "Elite Sharkman" } },
-    { Island = "Nerúvia",          MinLevel = 930,  Goals = { "VoidWalker Musket", "Elite VoidWalker Musket" } },
-}
-
-function K.FallbackQuest(level)
-    local best = K.FallbackProgression[1]
-    for _, e in ipairs(K.FallbackProgression) do
-        if level >= e.MinLevel then best = e end
-    end
-    return {
-        Name = best.Island .. " (fallback)",
-        Goals = best.Goals,
-        Giver = best.Island .. " Quest Giver",
-        MinLevel = best.MinLevel,
-        MaxLevel = math.huge,
-        IsBoss = false,
-        Type = "Grinding",
-        Island = best.Island,
+function UI.Notify(title, message, seconds, kind)
+    local palette = {
+        info = {Bar = T.Accent, Icon = "ℹ️"},
+        good = {Bar = T.Good, Icon = "✅"},
+        warn = {Bar = T.Bad, Icon = "⚠️"},
     }
+    local skin = palette[kind] or palette.info
+    local card = corner(create("Frame", {
+        Name = "Toast",
+        Size = UDim2.new(1, 0, 0, 54),
+        BackgroundColor3 = T.Panel,
+        Position = UDim2.new(1, 60, 0, 0),
+    }, toastHolder), R_CARD)
+    strokeOf(card, skin.Bar, 1, 0.2)
+    create("Frame", {
+        Size = UDim2.new(0, 4, 1, -10),
+        Position = UDim2.fromOffset(4, 5),
+        BackgroundColor3 = skin.Bar,
+        BorderSizePixel = 0,
+    }, card)
+    create("TextLabel", {
+        Size = UDim2.new(1, -44, 0, 18),
+        Position = UDim2.fromOffset(16, 6),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = tostring(title or ""),
+        TextColor3 = T.Text,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, card)
+    create("TextLabel", {
+        Size = UDim2.new(1, -44, 0, 26),
+        Position = UDim2.fromOffset(16, 24),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = tostring(message or ""),
+        TextColor3 = T.TextDim,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        TextWrapped = true,
+    }, card)
+    card.Position = UDim2.new(1, 60, 0, 0)
+    TweenService:Create(card, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Position = UDim2.new(0, 0, 0, 0),
+    }):Play()
+    if UI.Log then UI.Log(tostring(title or "") .. ": " .. tostring(message or ""), kind) end
+    task.delay(math.max(1.5, tonumber(seconds) or 4), function()
+        local out = TweenService:Create(card, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Position = UDim2.new(1, 60, 0, 0), BackgroundTransparency = 1,
+        })
+        out:Play()
+        out.Completed:Wait()
+        pcall(function() card:Destroy() end)
+    end)
 end
 
---==========================================================================
--- RUNTIME (Roblox only). Everything below guards against a non-Roblox env.
---==========================================================================
+-- =============================================================================
+-- Floating toggle pill (mặc định góc dưới-phải): ẩn/hiện cửa sổ, kéo được.
+-- =============================================================================
+local togglePill = corner(create("TextButton", {
+    Name = "TogglePill",
+    AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -16, 1, -16),
+    Size = UDim2.fromOffset(48, 48),
+    BackgroundColor3 = T.Panel,
+    Text = "🐝",
+    Font = Enum.Font.GothamBold,
+    TextSize = 22,
+    AutoButtonColor = false,
+}, rootGui), 14)
+strokeOf(togglePill, T.Accent, 1.5, 0.25)
+vGradient(togglePill, 0, 0.25)
+hoverify(togglePill, "Panel", "PanelHover")
+local pillMoved = false -- kéo pill rồi thả = KHÔNG toggle (chỉ click-thật mới)
 
-local Services = {}
-local LocalPlayer, ReplicatedStorage, Workspace, RunService, VirtualInput
-local QuestsInfo, EnemysInfo, ToolsInfo
-local questList = {}
-local activeQuest = nil
-local running = false
-local connections = {}
-
-local function log(level, ...)
-    if level <= (K.Config.LogLevel or 1) then
-        print("[VoxKaitun]", ...)
-    end
+do
+    local pillDragging, pillDragStart, pillStart
+    togglePill.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            pillDragging = true
+            pillMoved = false
+            pillDragStart = input.Position
+            pillStart = togglePill.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    if pillDragging then UI._saveSoon() end
+                    pillDragging = false
+                end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if pillDragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - pillDragStart
+            if delta.Magnitude > 6 then pillMoved = true end
+            -- Kéo theo Anchor(1,1): offset âm kể từ mép phải/dưới.
+            local x = math.clamp(pillStart.X.Offset - delta.X, 8, rootGui.AbsoluteSize.X - 8)
+            local y = math.clamp(pillStart.Y.Offset - delta.Y, 8, rootGui.AbsoluteSize.Y - 8)
+            togglePill.Position = UDim2.new(1, -x, 1, -y)
+        end
+    end)
 end
-K.Log = log
 
-local function safe(fn, ...)
-    local ok, err = pcall(fn, ...)
-    if not ok then log(2, "error:", err) end
-    return ok, err
+-- =============================================================================
+-- Persistence (bss_kaitun_ui.json): vị trí + collapse + theme + Values
+-- =============================================================================
+local saveQueued = false
+function UI._saveSoon()
+    if saveQueued or type(writefileFn) ~= "function" then return end
+    saveQueued = true
+    task.delay(0.5, function()
+        saveQueued = false
+        local payload = {
+            X = window.Position.X.Offset, Y = window.Position.Y.Offset,
+            Collapsed = collapsed or nil, Theme = currentThemeName,
+            PillX = -togglePill.Position.X.Offset, PillY = -togglePill.Position.Y.Offset,
+            Values = UI.Values,
+        }
+        local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
+        if ok and encoded then pcall(writefileFn, SAVE_NAME, encoded) end
+    end)
 end
-K.Safe = safe
 
-local function getService(name)
-    if Services[name] then return Services[name] end
-    local ok, svc = pcall(function() return game:GetService(name) end)
-    if ok then Services[name] = svc end
-    return svc
-end
-
--- Resolve a network remote by channel name from NetworkInstances (with fallback).
-local remoteCache = {}
-local function getRemote(name, wantFunction)
-    local key = name .. (wantFunction and "#F" or "#E")
-    if remoteCache[key] then return remoteCache[key] end
-    local rs = ReplicatedStorage or getService("ReplicatedStorage")
-    if not rs then return nil end
-    local ni = rs:FindFirstChild("NetworkInstances")
-    local found
-    if ni then
-        -- current build nests remotes under RemoteEvents / RemoteFunctions
-        local sub = ni:FindFirstChild(wantFunction and "RemoteFunctions" or "RemoteEvents")
-        if sub then found = sub:FindFirstChild(name) end
-        if not found then found = ni:FindFirstChild(name, true) end
-    end
-    if not found then found = rs:FindFirstChild(name, true) end
-    if not found then return nil end
-    local isF = found:IsA("RemoteFunction")
-    local isE = found:IsA("RemoteEvent") or found:IsA("UnreliableRemoteEvent")
-    if (wantFunction and isF) or (not wantFunction and isE) then
-        remoteCache[key] = found
-        return found
-    end
+local function loadSaved()
+    if type(readfileFn) ~= "function" then return nil end
+    local ok, content = pcall(readfileFn, SAVE_NAME)
+    if not ok or type(content) ~= "string" or content == "" then return nil end
+    local okDecode, data = pcall(function() return HttpService:JSONDecode(content) end)
+    if okDecode and type(data) == "table" then return data end
     return nil
 end
-K.GetRemote = getRemote
 
-local function fire(name, action, ...)
-    local r = getRemote(name, false)
-    if not r then log(2, "remote missing:", name) return false end
-    local args = { ... }
-    if r:IsA("RemoteFunction") then
-        return safe(function() return r:InvokeServer(action, table.unpack(args)) end)
+-- =============================================================================
+-- Public API
+-- =============================================================================
+local function formatCount(number)
+    number = tonumber(number) or 0
+    local abs = math.abs(number)
+    if abs >= 1e9 then return string.format("%.2fB", number / 1e9) end
+    if abs >= 1e6 then return string.format("%.2fM", number / 1e6) end
+    if abs >= 1e3 then return string.format("%.1fK", number / 1e3) end
+    return tostring(math.floor(number + 0.5))
+end
+
+function UI.SetStatus(stateText, detailText)
+    local combined = tostring(stateText or "")
+        .. (detailText and detailText ~= "" and (" | " .. tostring(detailText)) or "")
+    pcall(function() statusLabel.Text = combined end)
+    -- Dot màu theo trạng thái: đang farm = xanh, meteor/warn = đỏ.
+    local lower = string.lower(combined)
+    local color = T.Good
+    if string.find(lower, "meteor", 1, true) or string.find(lower, "avoid", 1, true) then
+        color = T.Bad
+    elseif string.find(lower, "convert", 1, true) or string.find(lower, "buy", 1, true) then
+        color = T.Accent
     end
-    return safe(function() r:FireServer(action, table.unpack(args)) end)
+    pcall(function()
+        TweenService:Create(statusDot, TweenInfo.new(0.3), {BackgroundColor3 = color}):Play()
+    end)
 end
-K.Fire = fire
 
-local function invoke(name, action, ...)
-    local r = getRemote(name, true)
-    if not r then return nil end
-    local args = { ... }
-    local ok, res = safe(function() return r:InvokeServer(action, table.unpack(args)) end)
-    if ok then return res end
-    return nil
-end
-K.Invoke = invoke
-
--- ---- Player data ---------------------------------------------------------
-local dataCache, dataStamp = nil, 0
-local function getData(force)
-    local now = os.clock()
-    if not force and dataCache and (now - dataStamp) < 0.5 then return dataCache end
-    local d = invoke("Elysium_DataStore", "FetchData")
-    if type(d) == "table" then
-        dataCache, dataStamp = d, now
+function UI.SetStats(stats)
+    if type(stats) ~= "table" then return end
+    for key, value in pairs(stats) do
+        local label = statCells[tostring(key)]
+        if label then
+            local rendered
+            if key == "Uptime" then
+                local seconds = math.max(0, math.floor(tonumber(value) or 0))
+                rendered = string.format("%02d:%02d:%02d",
+                    math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60)
+            elseif key == "Honey" or key == "Capacity" or key == "HoneyPerHour" then
+                rendered = formatCount(value)
+            else
+                rendered = tostring(value)
+            end
+            pcall(function() label.Text = rendered end)
+        end
     end
-    return dataCache
-end
-K.GetData = getData
-
-local function dig(t, ...)
-    for _, k in ipairs({ ... }) do
-        if type(t) ~= "table" then return nil end
-        t = t[k]
+    local honey = tonumber(stats.Honey)
+    local capacity = tonumber(stats.Capacity)
+    if honey and capacity and capacity > 0 then
+        local ratio = math.clamp(honey / capacity, 0, 1)
+        pcall(function()
+            bagFill.Size = UDim2.new(ratio, 0, 1, 0)
+            bagFill.BackgroundColor3 = ratio > 0.85 and T.Bad or T.Good
+            bagFillText.Text = string.format("bag %s / %s (%d%%)",
+                formatCount(honey), formatCount(capacity), math.floor(ratio * 100 + 0.5))
+        end)
     end
-    return t
+    -- Sparkline: ghi mẫu honey/h mới rồi vẽ lại (giữ tối đa 40 mẫu).
+    local hph = tonumber(stats.HoneyPerHour)
+    if hph and renderHoneyGraph then
+        table.insert(honeyHistory, hph)
+        if #honeyHistory > 40 then table.remove(honeyHistory, 1) end
+        pcall(renderHoneyGraph)
+    end
 end
 
-local function readLevelFallback()
-    if not LocalPlayer then return 0 end
-    local ls = LocalPlayer:FindFirstChild("leaderstats")
-    if ls then
-        for _, v in ipairs(ls:GetChildren()) do
-            if K.MatchName(v.Name, "Level") then
-                local n = tonumber(v.Value)
-                if n then return n end
+function UI.SetGear(text)
+    pcall(function() gearLine.Text = "next gear: " .. tostring(text or "-") end)
+end
+
+-- Log panel (Status): UI.Log("message", "info"|"good"|"warn"|"dim"). Giữ 40 dòng.
+function UI.Log(message, kind)
+    if logAppend then pcall(logAppend, message, kind) end
+end
+
+-- Hive tab: main đẩy {Bees, Gifted, AverageLevel, Blue, Red, Event}.
+function UI.SetHive(stats)
+    if type(stats) ~= "table" or type(hiveCells) ~= "table" then return end
+    for key, value in pairs(stats) do
+        local label = hiveCells[tostring(key)]
+        if label then
+            local rendered
+            if key == "AverageLevel" then
+                rendered = string.format("%.1f", tonumber(value) or 0)
+            else
+                rendered = tostring(value)
+            end
+            pcall(function() label.Text = rendered end)
+        end
+    end
+end
+
+-- SHOW HIVE: vẽ tổ ong lục giác 50 slot. entries = mảng {
+--   Type = "Basic Bee", Gifted = true/false, Level = 7,
+--   X = col 1-5, Y = row 1-10 (tuỳ chọn - thiếu thì điền tuần tự)}.
+-- Màu theo rarity, gifted = viền vàng dày + ✦ + tint kim, mặt ong thật ở giữa.
+function UI.SetHiveGrid(entries, existingSlots)
+    if type(hiveCells) ~= "table" or type(hiveCells.GridSlot) ~= "table" then return end
+    local darkBorder = T.Background
+    local emptyFill = T.PanelLight
+    -- Reset: ẩn hết, chỉ hiện slot đã MỞ trong hive (tổ thật chỉ có ô đã
+    -- unlock). existingSlots = mảng {X=,Y=} các ô tồn tại; nil = hiện đủ 50.
+    for slot = 1, 50 do
+        local cell = hiveCells.GridSlot[slot]
+        pcall(function()
+            cell.Frame.Visible = false
+            layoutHex(cell.Border, HEX_W, HEX_H, 0, 0, darkBorder)
+            layoutHex(cell.Fill, HEX_W - 4, HEX_H - 4, 2, 2, emptyFill)
+            cell.Face.Image = ""
+            cell.Level.Text = ""
+            cell.Star.Visible = false
+        end)
+    end
+    if type(existingSlots) == "table" then
+        for _, slot in ipairs(existingSlots) do
+            if type(slot) == "table" and type(slot.X) == "number" and type(slot.Y) == "number" then
+                -- 5 cột × 10 hàng: index = (Y-1)*5 + X.
+                local index = math.clamp(math.floor((slot.Y - 1) * 5 + slot.X + 0.5), 1, 50)
+                local cell = hiveCells.GridSlot[index]
+                if cell then pcall(function() cell.Frame.Visible = true end) end
             end
         end
-    end
-    local a = tonumber(LocalPlayer:GetAttribute("Level"))
-    if a then return a end
-    return 0
-end
-
-local function getLevel()
-    local d = getData()
-    local lvl = tonumber(dig(d, "Statistics", "Level"))
-    if lvl then return lvl end
-    return readLevelFallback()
-end
-K.GetLevel = getLevel
-
-local function getAvailablePoints()
-    local d = getData()
-    return tonumber(dig(d, "Statistics", "AvailablePoints")) or 0
-end
-
-local function getActiveQuests()
-    local d = getData()
-    local q = dig(d, "Quests", "Actives")
-    return type(q) == "table" and q or {}
-end
-K.GetActiveQuests = getActiveQuests
-
--- ---- Require game data modules ------------------------------------------
-local function requirePath(root, path)
-    local node = root
-    for part in path:gmatch("[^%.]+") do
-        if not node then return nil end
-        node = node:FindFirstChild(part)
-    end
-    if not node then return nil end
-    if node:IsA("ModuleScript") then
-        local ok, res = pcall(require, node)
-        if ok then return res end
-    elseif node:IsA("Folder") then
-        local init = node:FindFirstChild("init")
-        if init and init:IsA("ModuleScript") then
-            local ok, res = pcall(require, init)
-            if ok then return res end
-        end
-    end
-    return nil
-end
-
-local function loadDataModules()
-    local rs = ReplicatedStorage
-    if not rs then return end
-    QuestsInfo = requirePath(rs, "Shared.MainModules.ProgressUtils.QuestsInfo")
-    EnemysInfo = requirePath(rs, "Shared.MainModules.EnemysUtils.EnemysInfo")
-    ToolsInfo = requirePath(rs, "Shared.MainModules.Tools.ToolsInfo")
-    if QuestsInfo then
-        questList = K.BuildQuestList(QuestsInfo)
-        log(1, "loaded quests:", #questList)
     else
-        log(1, "QuestsInfo unavailable — using fallback progression")
-    end
-end
-
--- ---- Quest selection / accept / repeat ----------------------------------
-local function chooseQuest()
-    local level = getLevel()
-    local opts = { boss = K.Config.BossFarm, island = K.Config.PreferredIsland }
-    local q = K.SelectQuest(questList, level, opts)
-    if not q then q = K.FallbackQuest(level) end
-    return q
-end
-K.ChooseQuest = chooseQuest
-
-local function hasActiveQuest(name)
-    local actives = getActiveQuests()
-    for k, v in pairs(actives) do
-        if K.MatchName(k, name) then return true end
-        if type(v) == "table" and (K.MatchName(v.Name, name) or K.MatchName(v.QuestName, name)) then
-            return true
+        for slot = 1, 50 do
+            local cell = hiveCells.GridSlot[slot]
+            pcall(function() cell.Frame.Visible = true end)
         end
     end
-    return false
-end
-
--- Position of an NPC model: HRP, PrimaryPart, any BasePart, or pivot.
-local function npcPosition(m)
-    local hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-    if hrp then return hrp end
-    for _, d in ipairs(m:GetDescendants()) do
-        if d:IsA("BasePart") then return d end
-    end
-    return nil
-end
-
-local function npcMatches(m, name)
-    if K.MatchName(m.Name, name) then return true end
-    local ok, disp = pcall(function()
-        return m:GetAttribute("NPCName") or m:GetAttribute("DisplayName")
-    end)
-    if ok and type(disp) == "string" and K.MatchName(disp, name) then return true end
-    return false
-end
-
--- Private areas root: live layout is IgnoreList.Int.PrivateAreas.<Island>.<Area>,
--- older builds use workspace.PrivateAreas directly.
-local function privateAreasRoot()
-    if not Workspace then return nil end
-    local pa = Workspace:FindFirstChild("PrivateAreas")
-    if pa then return pa end
-    local ignore = Workspace:FindFirstChild("IgnoreList")
-    local int = ignore and ignore:FindFirstChild("Int")
-    return int and int:FindFirstChild("PrivateAreas") or nil
-end
-
--- Saved Enter positions harvested from Studio (2026-11-15), one entry per area:
--- entrance = outside door to walk to, destination = inside spawn after Enter.
--- Stored as {x,y,z} so the table loads without Vector3.
-K.EnterPoints = {
-    WitchHouse            = { island = "Forbidden Island", entrance = {6282.3, 132.3, -5187.3},   destination = {6091.5, -569.6, -4640.6} },
-    Crypt                 = { island = "Forbidden Island", entrance = {6578.2, 93.3, -4729.3},    destination = {6036.3, -725.5, -4132.7} },
-    Barber                = { island = "Harbor Island",    entrance = {5681.5, 40.1, 3302.9},     destination = {5686.3, -776.4, 4167.2} },
-    Pawnshop              = { island = "Harbor Island",    entrance = {5658.0, 40.1, 3213.3},     destination = {5691.6, -804.7, 2808.7} },
-    Tailor                = { island = "Harbor Island",    entrance = {5677.9, 40.1, 3602.2},     destination = {6283.4, -776.5, 3170.9} },
-    Bank                  = { island = "Harbor Island",    entrance = {5967.7, 42.4, 3304.1},     destination = {5351.8, -768.8, 3440.2} },
-    HarborBoatShop        = { island = "Harbor Island",    entrance = {5849.9, 40.2, 3663.5},     destination = {6281.2, -1368.1, 3579.2} },
-    KrakensRestBoatShop   = { island = "Kraken's rest",    entrance = {15713.6, 40.1, 4322.8},    destination = {17420.7, -1484.7, 5669.6} },
-    KrakensRestBarber     = { island = "Kraken's rest",    entrance = {15881.2, 39.7, 4350.3},    destination = {15839.6, -1002.4, 4291.5} },
-    KrakensRestTailor     = { island = "Kraken's rest",    entrance = {16415.1, 159.5, 3902.9},   destination = {15212.0, -777.4, 3451.9} },
-    KrakensRestPawnshop   = { island = "Kraken's rest",    entrance = {16173.4, 107.0, 4300.1},   destination = {15383.3, -806.5, 3879.4} },
-    MayorHouse            = { island = "Circus Town",      entrance = {-7380.4, 75.9, -8988.1},   destination = {-9819.2, -510.8, -5912.5} },
-    Circus                = { island = "Circus Town",      entrance = {-7601.0, 164.3, -9347.1},  destination = {-8490.3, -628.5, -8356.3} },
-    Pyramid               = { island = "Golden Dunes",     entrance = {-7221.0, 55.0, 11909.0},   destination = {-7040.0, -1406.0, 12741.0} },
-    BlackMarket           = { island = "Golden Dunes",     entrance = {-7551.8, 55.1, 11493.8},   destination = {-7636.4, -751.1, 11356.9} },
-    SkyLift               = { island = "Rustfall",         entrance = {6637.7, 24.0, 10673.1},    destination = {6545.0, 1353.3, 10652.0} },
-    SolmarBoatShop        = { island = "Solmar Island",    entrance = {-92.3, 26.4, 400.4},       destination = {-143.8, -1250.2, -482.1} },
-    MarineBase            = { island = "Solmar Island",    entrance = {-196.6, 37.0, 680.1},      destination = {191.4, -389.4, -3106.2} },
-    ElderHouse            = { island = "Solmar Island",    entrance = {-323.0, 16.7, 320.0},      destination = {-320.4, -764.6, -33.1} },
-    OldLadyHouse          = { island = "Solmar Island",    entrance = {21.8, 25.6, 538.7},        destination = {353.7, -864.8, 19.0} },
-    RoyalForge            = { island = "Frost Island",     entrance = {-19272.6, 482.2, 158.9},   destination = {-19409.2, -1123.9, -2726.2} },
-    ThroneRoom            = { island = "Frost Island",     entrance = {-19012.2, 482.2, 186.7},   destination = {-22950.9, -1178.8, -1883.8} },
-    BlazeboundArena       = { island = "Volcano Island",   entrance = {-17620.8, -9606.1, 11355.8}, destination = {-16976.2, -11407.9, 12237.2} },
-    VolcanoInterior       = { island = "Volcano Island",   entrance = {-16992.5, 339.7, 10178.3}, destination = {-18135.0, -9547.5, 10318.7} },
-    VolcanoBossRoom       = { island = "Volcano Island",   entrance = {-18133.1, -9534.6, 11502.7}, destination = {-18973.0, -4709.5, 10300.5} },
-}
--- WolfBossRoom / CavernRoof / CavernShell have no Enter door (reached via other
--- areas); their Leave exits: WolfBossRoom -> (6569.2,93.3,-4729.3),
--- CavernRoof/CavernShell -> (718.0,30.6,6495.0).
-
--- Area containers and doors share names with NPCs/areas but are not talkable
--- characters; never target them.
-local function isAreaContainerOrDoor(m)
-    local pa = privateAreasRoot()
-    if pa then
-        if m.Parent == pa then return true end
-        -- island layout: area containers hold Enter/Leave folders, NPCs do not
-        if m.Parent and m.Parent.Parent == pa and m:FindFirstChild("Enter") then return true end
-    end
-    local pd = Workspace and Workspace:FindFirstChild("PrivateAreaDoors")
-    if pd then
-        local p = m
-        while p do
-            if p == pd then return true end
-            p = p.Parent
-        end
-    end
-    return false
-end
-
-local function findGiver(giverName)
-    if not giverName or not Workspace then return nil end
-    local best, bestDist = nil, math.huge
-    local char = LocalPlayer and LocalPlayer.Character
-    local pos = char and char:GetPivot().Position
-    for _, m in ipairs(Workspace:GetDescendants()) do
-        if m:IsA("Model") and npcMatches(m, giverName) and not isAreaContainerOrDoor(m) then
-            local hrp = npcPosition(m)
-            if hrp then
-                local d = pos and (hrp.Position - pos).Magnitude or 0
-                if d < bestDist then best, bestDist = m, d end
+    local list = type(entries) == "table" and entries or {}
+    local filled = 0
+    for index, entry in ipairs(list) do
+        if type(entry) == "table" and entry.Type then
+            filled += 1
+            local slot = index
+            if type(entry.X) == "number" and type(entry.Y) == "number" then
+                slot = math.clamp(math.floor((entry.Y - 1) * 5 + entry.X + 0.5), 1, 50)
+            end
+            local cell = hiveCells.GridSlot[slot]
+            if cell then
+                local gifted = entry.Gifted and true or false
+                local base = RARITY_COLORS[rarityOf(entry.Type)] or RARITY_COLORS.Common
+                local fillC = gifted and base:Lerp(GOLD, 0.28) or base
+                local borderC = gifted and GOLD or darkBorder
+                local b = gifted and 4 or 2
+                -- Mặt ong thật: bản gifted riêng (nền vàng) khi có ✦.
+                local face = beeFaceTexture(entry.Type, gifted)
+                pcall(function()
+                    cell.Frame.Visible = true
+                    layoutHex(cell.Border, HEX_W, HEX_H, 0, 0, borderC)
+                    layoutHex(cell.Fill, HEX_W - 2 * b, HEX_H - 2 * b, b, b, fillC)
+                    cell.Face.Image = face or ""
+                    cell.Level.Text = tostring(tonumber(entry.Level) or "")
+                    cell.Star.Visible = gifted
+                end)
             end
         end
     end
-    return best
+    if hiveCells.GridCount then
+        pcall(function() hiveCells.GridCount.Text = string.format("HONEYCOMB  %d/50", filled) end)
+    end
 end
-K.FindGiver = findGiver
 
--- Interest points are invisible Parts named e.g. "VillageChief" (no spaces).
-local function findInterestPoint(name)
-    if not name or not Workspace then return nil end
-    local best, bestDist = nil, math.huge
-    local char = LocalPlayer and LocalPlayer.Character
-    local pos = char and char:GetPivot().Position
-    for _, p in ipairs(Workspace:GetDescendants()) do
-        if p:IsA("BasePart") and K.MatchName(p.Name, name) then
-            local d = pos and (p.Position - pos).Magnitude or 0
-            if d < bestDist then best, bestDist = p, d end
+-- =============================================================================
+-- AUTO HIVE: đọc TRỰC TIẾP hive thật trong game (không cần main đẩy gì).
+-- Công thức giống hệt hiveBeeCells của script chính: cell tên "C<x>,<y>",
+-- loại ở CellType/BeeType, gifted = có con "GiftedCell", level ở
+-- Level/BeeLevel/CellLevel (fallback qua ObjectValue "Bee"). Poll nhẹ mỗi
+-- 2.5s và tự cập nhật cả 6 ô stat + comb 50 slot.
+-- =============================================================================
+-- Level fallback: module stats của game - stats.Honeycomb["x,y"].Level
+-- (công thức hiveCellData của script chính). Lazy require, không yield.
+local statCacheModule
+local function getStatCache()
+    if statCacheModule ~= nil then return statCacheModule end
+    local module = ReplicatedStorage:FindFirstChild("ClientStatCache")
+    if not module then return nil end
+    local ok, result = pcall(require, module)
+    statCacheModule = (ok and type(result) == "table") and result or false
+    return statCacheModule
+end
+
+local statCacheLastUpdate = 0
+local function statHiveLevel(x, y)
+    local cache = getStatCache()
+    if type(cache) ~= "table" then return nil end
+    -- Get trước; nếu chưa có bảng Honeycomb (cache lạnh) thì Update một
+    -- nhịp rồi Get lại - đúng vòng getStats của script chính.
+    local ok, stats = pcall(cache.Get, cache)
+    if not ok or type(stats) ~= "table" or type(stats.Honeycomb) ~= "table" then
+        if type(cache.Update) == "function" and os.clock() - statCacheLastUpdate > 2 then
+            statCacheLastUpdate = os.clock()
+            pcall(cache.Update, cache)
+            ok, stats = pcall(cache.Get, cache)
         end
     end
-    return best
-end
-K.FindInterestPoint = findInterestPoint
-
--- NPCs that live inside a building are under the PrivateAreas root (flat
--- workspace.PrivateAreas.<Area> or IgnoreList.Int.PrivateAreas.<Island>.<Area>).
--- Tweening straight to them is rejected by the server (kick to lobby); we must
--- enter through the area's door instead. Return the area name, or nil if the
--- instance is in the overworld.
--- Area whose Enter.Destination is closest to pos. Interior NPCs are stored under
--- IgnoreList.Int.NPCs (NOT inside the PrivateAreas tree), so match by position.
-local function areaNearPosition(pos)
-    local pa = privateAreasRoot()
-    if not pa or not pos then return nil end
-    local best, bestDist
-    for _, island in ipairs(pa:GetChildren()) do
-        for _, area in ipairs(island:GetChildren()) do
-            local enter = area:FindFirstChild("Enter")
-            local dst = enter and enter:FindFirstChild("Destination")
-            if dst and dst:IsA("BasePart") then
-                local d = (dst.Position - pos).Magnitude
-                if d < 200 and (not bestDist or d < bestDist) then
-                    best, bestDist = area.Name, d
-                end
-            end
+    if not ok or type(stats) ~= "table" then return nil end
+    local honeycomb = stats.Honeycomb
+    if type(honeycomb) ~= "table" then return nil end
+    -- Dạng THẬT của bảng (khám phá từ atlas): Honeycomb["x<col>"]["y<row>"],
+    -- level field tên "Lvl". Thử đủ các biến thể key cho chắc.
+    local column = honeycomb["x" .. tostring(x)]
+        or honeycomb[x] or honeycomb[tostring(x)]
+        or honeycomb[tostring(x) .. "," .. tostring(y)]
+    local cell = nil
+    if type(column) == "table" then
+        cell = column["y" .. tostring(y)]
+            or column[y] or column[tostring(y)]
+    end
+    if type(cell) ~= "table" and type(column) == "table" then
+        cell = column -- dạng phẳng "x,y" trả thẳng cell
+    end
+    if type(cell) ~= "table" then
+        local row = honeycomb[x] or honeycomb[tostring(x)]
+        if type(row) == "table" then
+            cell = row[y] or row[tostring(y)]
         end
     end
-    return best
-end
-
-local function interiorAreaName(inst)
-    if not inst then return nil end
-    local flat = Workspace and Workspace:FindFirstChild("PrivateAreas")
-    local pa = privateAreasRoot()
-    if pa then
-        local p = inst
-        while p do
-            if p.Parent == pa then return p.Name end
-            -- island layout only: the area sits one level below the island folder
-            if pa ~= flat and p.Parent and p.Parent.Parent == pa then return p.Name end
-            p = p.Parent
-        end
-    end
-    local ignore = Workspace and Workspace:FindFirstChild("IgnoreList")
-    local intRoot = ignore and ignore:FindFirstChild("Int")
-    if intRoot then
-        local p = inst
-        while p do
-            if p == intRoot then
-                local part = inst:IsA("BasePart") and inst or npcPosition(inst)
-                return part and areaNearPosition(part.Position) or nil
-            end
-            p = p.Parent
-        end
-    end
-    return nil
-end
-K.InteriorAreaName = interiorAreaName
-
--- The outside door position for a private area: legacy PrivateAreaDoors folder,
--- live <Area>.Enter.Entrance part, or the saved K.EnterPoints table as fallback.
-local function findAreaDoor(areaName)
-    if not areaName then return nil end
-    local char = LocalPlayer and LocalPlayer.Character
-    local pos = char and char:GetPivot().Position
-    local best, bestDist
-    local doors = Workspace and Workspace:FindFirstChild("PrivateAreaDoors")
-    if doors then
-        for _, d in ipairs(doors:GetChildren()) do
-            if K.MatchName(d.Name, areaName) then
-                local part = d:IsA("BasePart") and d or d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart", true)
-                if part then
-                    local dist = pos and (part.Position - pos).Magnitude or 0
-                    if not bestDist or dist < bestDist then best, bestDist = part, dist end
-                end
-            end
-        end
-    end
-    if best then return best end
-    local pa = privateAreasRoot()
-    if pa then
-        for _, island in ipairs(pa:GetChildren()) do
-            local area = island:FindFirstChild(areaName)
-            local enter = area and area:FindFirstChild("Enter")
-            local part = enter and enter:FindFirstChild("Entrance")
-            if part and part:IsA("BasePart") then return part end
-        end
-    end
-    local saved = K.EnterPoints[areaName]
-    if saved then
-        local e = saved.entrance
-        return { Position = Vector3.new(e[1], e[2], e[3]) }
-    end
-    return nil
-end
-K.FindAreaDoor = findAreaDoor
-
-local function teleportTo(cf)
-    local char = LocalPlayer and LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if hrp then
-        safe(function()
-            hrp.CFrame = cf
-            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        end)
-    end
-end
-
--- Ground surface Y at (x, z) by raycasting straight down from fromY. Returns nil
--- when raycast is unavailable (some executors block it) or misses, so callers can
--- fall back instead of trusting a buried destination Y.
-local function groundYAt(x, z, fromY)
-    local gy
-    safe(function()
-        if not Workspace or not Workspace.Raycast then return end
-        local char = LocalPlayer and LocalPlayer.Character
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        if char then params.FilterDescendantsInstances = { char } end
-        local hit = Workspace:Raycast(Vector3.new(x, fromY, z), Vector3.new(0, -1000, 0), params)
-        if hit then gy = hit.Position.Y end
-    end)
-    return gy
-end
-K.GroundYAt = groundYAt
-
--- Keep a destination on the ground so we never glide underground. Lift a buried
--- interest-point Y onto the real surface; if raycast is blocked, never dive more
--- than a few studs below the character's current height.
-local function groundSafePos(pos)
-    local char = LocalPlayer and LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local curY = hrp and hrp.Position.Y or pos.Y
-    local gy = groundYAt(pos.X, pos.Z, pos.Y + 300)
-    if gy then
-        local standY = gy + 3
-        if standY > pos.Y then return Vector3.new(pos.X, standY, pos.Z) end
-        return pos
-    end
-    local floorY = curY - 5
-    if pos.Y < floorY then return Vector3.new(pos.X, floorY, pos.Z) end
-    return pos
-end
-K.GroundSafePos = groundSafePos
-
--- Phase through walls/objects while gliding so the character never gets stuck
--- on geometry. Collision is restored once the glide finishes.
-local function setNoclip(on)
-    if not K.Config.Noclip then return end
-    local char = LocalPlayer and LocalPlayer.Character
-    if not char then return end
-    for _, d in ipairs(char:GetDescendants()) do
-        if d:IsA("BasePart") then
-            safe(function() d.CanCollide = not on end)
-        end
-    end
-end
-K.SetNoclip = setNoclip
-
--- Glide to a CFrame at walking pace by stepping the root part directly. The root
--- is anchored for the whole glide: with noclip on, an unanchored character gets
--- pulled through the floor by gravity (the "tween underground" bug), while an
--- anchored root moved by CFrame passes through walls/objects without sticking.
--- Every step is clamped to the real ground surface so we never travel under the
--- map, and the pace (studs/sec ~= WalkSpeed) keeps the server from reading it as
--- a teleport and snapping the character back to spawn.
-local gliding = false
-local function moveTo(cf)
-    local char = LocalPlayer and LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    local dest = groundSafePos(cf.Position)
-    if K.Config.MoveMode == "Teleport" then
-        teleportTo(CFrame.new(dest))
-        return
-    end
-    local startPos = hrp.Position
-    local dist = (startPos - dest).Magnitude
-    if dist < 1 then return end
-    if gliding then return end
-    gliding = true
-
-    local speed = K.Config.TweenSpeed or 32
-    local stepTime = 0.05
-    local duration = dist / speed
-    local maxTime = K.Config.TweenMaxTime or 20
-    if duration > maxTime then duration = maxTime end
-    local steps = math.max(1, math.floor(duration / stepTime))
-    local dx, dy, dz = dest.X - startPos.X, dest.Y - startPos.Y, dest.Z - startPos.Z
-
-    local wasAnchored = false
-    safe(function() wasAnchored = hrp.Anchored; hrp.Anchored = true end)
-    setNoclip(true)
-    for i = 1, steps do
-        if not hrp.Parent then break end
-        local a = i / steps
-        local x, y, z = startPos.X + dx * a, startPos.Y + dy * a, startPos.Z + dz * a
-        local gy = groundYAt(x, z, y + 5)
-        if gy and y < gy + 3 then y = gy + 3 end
-        safe(function()
-            hrp.CFrame = CFrame.new(x, y, z)
-            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        end)
-        task.wait(stepTime)
-    end
-    -- final placement clamped to the surface, then hand physics back
-    local fy = dest.Y
-    local gy = groundYAt(dest.X, dest.Z, fy + 5)
-    if gy and fy < gy + 3 then fy = gy + 3 end
-    safe(function() hrp.CFrame = CFrame.new(dest.X, fy, dest.Z) end)
-    setNoclip(false)
-    safe(function() hrp.Anchored = wasAnchored end)
-    gliding = false
-end
-
--- True when an instance lives inside one of our own GUIs (never click those).
-local function inOurUI(inst)
-    local p = inst
-    while p do
-        if p.Name == "VoxKaitunUI" then return true end
-        p = p.Parent
-    end
-    return false
-end
-
--- True only when the instance and every GUI ancestor are shown (the game hides
--- whole interface groups, so a button can be Visible=true inside a hidden panel).
-local function guiVisible(inst)
-    local p = inst
-    while p do
-        if p.Visible == false then return false end
-        p = p.Parent
-    end
-    return true
-end
-
--- Click the single best accept-like option in an open NPC converse dialog.
-local function proceedConverse()
-    local clicked = false
-    safe(function()
-        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-        if not pg then return end
-        local bestBtn, bestScore = nil, 0
-        for _, d in ipairs(pg:GetDescendants()) do
-            if d:IsA("TextButton") and d.Visible and not inOurUI(d) then
-                local t = K.NormalizeName(d.Text)
-                local score = 0
-                if t == "accept" or t:find("accept quest") then score = 5
-                elseif t:find("accept") then score = 4
-                elseif t == "yes" or t == "ok" then score = 3
-                elseif t:find("continue") or t:find("next") or t:find("proceed") then score = 2 end
-                if score > bestScore then bestBtn, bestScore = d, score end
-            end
-        end
-        if bestBtn and bestScore >= 2 and firesignal then
-            firesignal(bestBtn.MouseButton1Click)
-            clicked = true
-        end
-    end)
-    return clicked
-end
-K.ProceedConverse = proceedConverse
-
--- Fire a GUI button for real: its click signal plus a physical click at its
--- center (so InputBegan-style handlers also run).
-local function pressButton(btn)
-    local clicked = false
-    safe(function()
-        if firesignal then
-            firesignal(btn.MouseButton1Click)
-            clicked = true
-        end
-    end)
-    safe(function()
-        local pos, size = btn.AbsolutePosition, btn.AbsoluteSize
-        local x, y = pos.X + size.X / 2, pos.Y + size.Y / 2
-        if VirtualInput then
-            VirtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(0.02)
-            VirtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
-            clicked = true
-        elseif mouse1click then
-            mouse1click()
-            clicked = true
-        end
-    end)
-    return clicked
-end
-
--- The game's NPC interaction is a custom Talk button (InteractionHUD.
--- InteractionButton with a Label), not a ProximityPrompt. Click it for real.
-local function clickTalkButton()
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return false end
-    local btn
-    for _, d in ipairs(pg:GetDescendants()) do
-        if (d:IsA("TextButton") or d:IsA("ImageButton")) and not inOurUI(d) then
-            local visible = true
-            pcall(function() visible = d.Visible end)
-            if visible ~= false then
-                local t = ""
-                pcall(function() t = K.NormalizeName(d.Text or "") end)
-                if t == "" then
-                    local lbl = d:FindFirstChild("Label", true) or d:FindFirstChildWhichIsA("TextLabel", true)
-                    if lbl then pcall(function() t = K.NormalizeName(lbl.Text or "") end) end
-                end
-                if t == "talk" or t == "interact" or t == "speak" or d.Name == "InteractionButton" then
-                    btn = d
+    if type(cell) ~= "table" then
+        for _, entry in pairs(honeycomb) do
+            if type(entry) == "table" then
+                local cx = tonumber(entry.CellX or entry.X or entry.Column)
+                local cy = tonumber(entry.CellY or entry.Y or entry.Row)
+                if cx == x and cy == y then
+                    cell = entry
                     break
                 end
             end
         end
     end
-    if not btn then return false end
-    return pressButton(btn)
-end
-K.ClickTalkButton = clickTalkButton
-
--- The intro / NPC converse (InteractionHUD.Converse) lists response options as
--- ImageButtons under Converse.Options (cloned Template, each with a Label). Their
--- text is the player's line ("Me? What's up?"), not accept/proceed keywords, so
--- click the option itself to advance the dialogue one segment.
-local function advanceConverse()
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return false end
-    local converse
-    for _, d in ipairs(pg:GetDescendants()) do
-        if d.Name == "Converse" and not inOurUI(d) then converse = d break end
-    end
-    if not converse then return false end
-    if not guiVisible(converse) then return false end
-    local btn
-    local options = converse:FindFirstChild("Options", true)
-    if options then
-        for _, ch in ipairs(options:GetChildren()) do
-            if (ch:IsA("ImageButton") or ch:IsA("TextButton")) and ch.Name ~= "Template" then
-                if guiVisible(ch) then btn = ch break end
-            end
-        end
-    end
-    if not btn then
-        -- narration / single-option segments expose a Continue control instead
-        for _, d in ipairs(converse:GetDescendants()) do
-            if (d:IsA("ImageButton") or d:IsA("TextButton")) and not inOurUI(d) and guiVisible(d) then
-                local t = ""
-                pcall(function() t = K.NormalizeName(d.Text or "") end)
-                if t == "" then
-                    local lbl = d:FindFirstChild("Label", true)
-                    if lbl then pcall(function() t = K.NormalizeName(lbl.Text or "") end) end
-                end
-                if d.Name == "Continue" or t == "continue" then btn = d break end
-            end
-        end
-    end
-    if not btn then return false end
-    return pressButton(btn)
-end
-K.AdvanceConverse = advanceConverse
-
--- At a building door the game shows a hold "Enter Area" context on the same
--- InteractionButton. Hold it so the hold completes and the server teleports us
--- into the private area (the only legitimate way to reach an interior NPC).
-local function clickEnterArea()
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return false end
-    local btn
-    for _, d in ipairs(pg:GetDescendants()) do
-        if (d:IsA("TextButton") or d:IsA("ImageButton")) and not inOurUI(d) and guiVisible(d) then
-            if d.Name == "InteractionButton" then
-                local t = ""
-                pcall(function() t = K.NormalizeName(d.Text or "") end)
-                if t == "" then
-                    local lbl = d:FindFirstChild("Label", true)
-                    if lbl then pcall(function() t = K.NormalizeName(lbl.Text or "") end) end
-                end
-                if t:find("enter", 1, true) then btn = d break end
-            end
-        end
-    end
-    if not btn then return false end
-    local clicked = false
-    safe(function()
-        if firesignal then firesignal(btn.MouseButton1Click) clicked = true end
-    end)
-    safe(function()
-        local pos, size = btn.AbsolutePosition, btn.AbsoluteSize
-        local x, y = pos.X + size.X / 2, pos.Y + size.Y / 2
-        if VirtualInput then
-            VirtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(1.0)
-            VirtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
-            clicked = true
-        elseif mouse1click then
-            mouse1click()
-            clicked = true
-        end
-    end)
-    return clicked
-end
-K.ClickEnterArea = clickEnterArea
-
-local function acceptQuest(quest)
-    if not quest then return false end
-    if hasActiveQuest(quest.Name) then return true end
-    -- 1) direct accept attempt (some builds expose Quests/Accept)
-    fire("Quests", "Accept", quest.Name)
-    -- 2) walk to giver and interact, then proceed the converse
-    local giver = findGiver(quest.Giver)
-    if giver then
-        local hrp = giver:FindFirstChild("HumanoidRootPart") or giver.PrimaryPart
-        if hrp then
-            teleportTo(hrp.CFrame * CFrame.new(0, 0, 3))
-            task.wait(0.2)
-            local prompt = giver:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then
-                safe(function()
-                    if fireproximityprompt then
-                        fireproximityprompt(prompt)
-                    else
-                        prompt:InputHoldBegin()
-                        task.wait(prompt.HoldDuration + 0.05)
-                        prompt:InputHoldEnd()
-                    end
-                end)
-            end
-            task.wait(0.3)
-            proceedConverse()
-        end
-    end
-    task.wait(0.3)
-    return hasActiveQuest(quest.Name)
-end
-K.AcceptQuest = acceptQuest
-
-local function repeatQuest(quest)
-    if not quest then return false end
-    return fire("Quests", "Repeat", quest.Name)
-end
-K.RepeatQuest = repeatQuest
-
--- ---- Live game objective (quest tracker HUD) ------------------------------
--- Read the objective the game is currently showing, e.g. "Talk to the Village
--- Chief". The tracker lives in PlayerGui; skip our own panel labels.
-local function getGameObjective()
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return nil end
-    for _, d in ipairs(pg:GetDescendants()) do
-        if (d:IsA("TextLabel") or d:IsA("TextButton")) and not inOurUI(d) then
-            local ok, txt = pcall(function() return d.Text end)
-            if ok and type(txt) == "string" then
-                local obj = K.ParseObjective(txt)
-                if obj then return obj end
-            end
-        end
+    if type(cell) == "table" then
+        return tonumber(cell.Lvl or cell.Level or cell.BeeLevel or cell.CellLevel)
     end
     return nil
 end
-K.GetGameObjective = getGameObjective
 
--- Walk to a named NPC (or its interest point), fire its prompt, proceed dialog.
-local npcCache = { name = nil, npc = nil, point = nil, t = 0 }
-local lastNpcWarn = 0
-local function interactWithNpc(name)
-    if npcCache.name ~= name or os.clock() - npcCache.t > 5 then
-        npcCache.name = name
-        npcCache.npc = findGiver(name)
-        npcCache.point = findInterestPoint(name)
-        npcCache.t = os.clock()
+local function readHiveCell(cell)
+    local x, y = cell.Name:match("^C(%d+),(%d+)$")
+    if not x or not y then return nil end
+    local cellType = cell:FindFirstChild("CellType") or cell:FindFirstChild("BeeType")
+    if not (cellType and cellType:IsA("ValueBase")) then return nil end
+    local beeType = tostring(cellType.Value)
+    -- Cell trống của game ghi "Empty" - phải lọc đủ cả 4 dạng (v1.2
+    -- beeTypePresent) kẻo 50 ô "Empty" + COMB 50/50 như bản trước.
+    local normalizedType = normalizeImageName(beeType)
+    if normalizedType == "" or normalizedType == "none"
+        or normalizedType == "empty" or normalizedType == "nil" then
+        return nil
     end
-    local npc, point = npcCache.npc, npcCache.point
-    local area = npc and interiorAreaName(npc) or nil
-    local char = LocalPlayer and LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local nroot = npc and npcPosition(npc)
-    -- Already inside the private area (the Enter teleport landed): stay and talk,
-    -- do not walk back out to the door.
-    local inside = (area and root and nroot
-        and (nroot.Position - root.Position).Magnitude < 100) or false
-    local dest
-    if inside then
-        dest = groundSafePos(nroot.Position)
-    elseif point then
-        -- the objective marker sits at the building entrance (outside)
-        dest = groundSafePos(point.Position)
-    elseif npc and not area then
-        if nroot then dest = groundSafePos(nroot.Position) end
-    elseif npc and area then
-        local door = findAreaDoor(area)
-        if door then dest = groundSafePos(door.Position) end
-    end
-    if not dest then
-        if os.clock() - lastNpcWarn > 10 then
-            lastNpcWarn = os.clock()
-            log(1, "NPC/interest point not found:", name)
-        end
-        return false
-    end
-    moveTo(CFrame.new(dest))
-    task.wait(0.3)
-    -- Interior NPC: hold Enter at the door and let the server teleport us in.
-    -- Tweening straight to the interior coordinates gets us kicked to lobby.
-    if not inside and (area or point) then
-        for _ = 1, 3 do
-            if not clickEnterArea() then break end
-            task.wait(1.5)
-        end
-        if area then npc = findGiver(name) or npc end
-        -- Once the Enter teleport has actually landed us inside (NPC now close),
-        -- close the last gap to it. While still outside, never glide inward.
-        if area and npc then
-            local nr = npcPosition(npc)
-            if root and nr and (nr.Position - root.Position).Magnitude < 100 then
-                moveTo(CFrame.new(groundSafePos(nr.Position)))
-            end
+    local level
+    for _, name in ipairs({"Level", "BeeLevel", "CellLevel"}) do
+        local value = cell:FindFirstChild(name)
+        if value and value:IsA("ValueBase") and tonumber(value.Value) then
+            level = tonumber(value.Value)
+            break
         end
     end
-    -- interest point only: the NPC stands nearby — pick the closest prompt holder
-    if not npc then
-        local char = LocalPlayer and LocalPlayer.Character
-        local pos = char and char:GetPivot().Position
-        local best, bestDist = nil, 25
-        for _, m in ipairs(Workspace:GetDescendants()) do
-            if m:IsA("Model") and m:FindFirstChildWhichIsA("ProximityPrompt", true) then
-                local hrp = npcPosition(m)
-                if hrp and pos then
-                    local d = (hrp.Position - pos).Magnitude
-                    if d < bestDist then best, bestDist = m, d end
+    if not level then
+        local bee = cell:FindFirstChild("Bee")
+        if bee and bee:IsA("ObjectValue") and bee.Value then
+            for _, name in ipairs({"Level", "BeeLevel"}) do
+                local value = bee.Value:FindFirstChild(name)
+                if value and value:IsA("ValueBase") and tonumber(value.Value) then
+                    level = tonumber(value.Value)
+                    break
                 end
             end
         end
-        npc = best
     end
-    if npc then
-        local prompt = npc:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if prompt then
-            safe(function()
-                if fireproximityprompt then
-                    fireproximityprompt(prompt)
-                else
-                    prompt:InputHoldBegin()
-                    task.wait(prompt.HoldDuration + 0.05)
-                    prompt:InputHoldEnd()
-                end
-            end)
-        end
+    if not level then
+        level = statHiveLevel(tonumber(x), tonumber(y))
     end
-    task.wait(0.3)
-    clickTalkButton()
-    task.wait(0.2)
-    proceedConverse()
-    for _ = 1, 8 do
-        if not advanceConverse() then break end
-        task.wait(0.35)
-    end
-    return true
+    return {
+        X = tonumber(x), Y = tonumber(y),
+        Type = beeType,
+        Gifted = cell:FindFirstChild("GiftedCell") ~= nil,
+        Level = level,
+    }
 end
-K.InteractWithNpc = interactWithNpc
 
--- ---- Enemies -------------------------------------------------------------
-local function getEnemies()
-    local out = {}
-    if not Workspace then return out end
-    local folder = Workspace:FindFirstChild("Playability")
-    folder = folder and folder:FindFirstChild("Enemys")
-    if not folder then return out end
-    local char = LocalPlayer and LocalPlayer.Character
-    local pos = char and char:GetPivot().Position
-    for _, m in ipairs(folder:GetChildren()) do
-        if m:IsA("Model") then
-            local hum = m:FindFirstChildOfClass("Humanoid")
-            local hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-            if hum and hrp and hum.Health > 0 then
-                local name = m:GetAttribute("OriginalName") or m:GetAttribute("Name") or m.Name
-                out[#out + 1] = {
-                    Model = m, Humanoid = hum, Root = hrp,
-                    Name = name,
-                    Level = tonumber(m:GetAttribute("Level")) or 0,
-                    Health = hum.Health, MaxHealth = hum.MaxHealth,
-                    IsBoss = m:GetAttribute("IsBoss") == true,
-                    Distance = pos and (hrp.Position - pos).Magnitude or math.huge,
+local autoHiveRunning = false
+function UI.AutoHive(intervalSeconds)
+    if autoHiveRunning then return end
+    autoHiveRunning = true
+    task.spawn(function()
+        while rootGui.Parent do
+            local reference = Player and Player:FindFirstChild("Honeycomb")
+            local hive = reference and reference:IsA("ObjectValue") and reference.Value
+            local cellsFolder = hive and hive:FindFirstChild("Cells")
+            if cellsFolder then
+                local entries = {}
+                local slotList = {}
+                local bees, giftedCount = 0, 0
+                local blueCount, redCount, eventCount = 0, 0, 0
+                local levelTotal, levelCount = 0, 0
+                for _, cell in ipairs(cellsFolder:GetChildren()) do
+                    local entry = readHiveCell(cell)
+                    if entry then
+                        table.insert(entries, entry)
+                        table.insert(slotList, {X = entry.X, Y = entry.Y})
+                        bees += 1
+                        if entry.Gifted then giftedCount += 1 end
+                        if entry.Level then
+                            levelTotal += entry.Level
+                            levelCount += 1
+                        end
+                        local n = normalizeImageName(entry.Type)
+                        local bare = n:gsub("bee$", "")
+                        if HIVE_EVENT_MARKS[n] or HIVE_EVENT_MARKS[bare] then
+                            eventCount += 1
+                        elseif n:find("blue", 1, true) then
+                            blueCount += 1
+                        elseif n:find("red", 1, true) then
+                            redCount += 1
+                        end
+                    else
+                        -- Ô đã mở nhưng trống: vẫn vẽ placeholder cho đúng
+                        -- hình dáng tổ thật.
+                        local ex, ey = cell.Name:match("^C(%d+),(%d+)$")
+                        if ex and ey then
+                            table.insert(slotList, {X = tonumber(ex), Y = tonumber(ey)})
+                        end
+                    end
+                end
+                UI.SetHiveGrid(entries, slotList)
+                UI.SetHive{
+                    Bees = bees,
+                    Gifted = giftedCount,
+                    AverageLevel = levelCount > 0 and (levelTotal / levelCount) or 0,
+                    Blue = blueCount,
+                    Red = redCount,
+                    Event = eventCount,
                 }
             end
+            task.wait(math.max(1, tonumber(intervalSeconds) or 2.5))
         end
-    end
-    return out
-end
-K.GetEnemies = getEnemies
-
--- ---- Attack --------------------------------------------------------------
-local lastAttack = 0
-local comboIndex = 0
-
-local function faceTarget(root)
-    local char = LocalPlayer and LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if hrp and root then
-        safe(function()
-            local look = CFrame.lookAt(hrp.Position, Vector3.new(root.Position.X, hrp.Position.Y, root.Position.Z))
-            hrp.CFrame = look
-        end)
-    end
-end
-
-local function screenCenter()
-    local cam = Workspace and Workspace.CurrentCamera
-    if cam then
-        local v = cam.ViewportSize
-        return v.X / 2, v.Y / 2
-    end
-    return 0, 0
-end
-
-local function simulateClick()
-    safe(function()
-        local x, y = screenCenter()
-        if VirtualInput then
-            VirtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(0.01)
-            VirtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
-        elseif mouse1click then
-            mouse1click()
-        end
+        autoHiveRunning = false
     end)
 end
 
--- Simulate skill key presses so the game's own SkillsSystem casts validly.
-local skillKeys = { "Z", "X", "C", "V", "F" }
-local skillIdx = 0
-local lastSkill = 0
-local function simulateSkills()
-    if not K.Config.UseSkills then return end
-    local now = os.clock()
-    if now - lastSkill < 0.6 then return end
-    lastSkill = now
-    skillIdx = (skillIdx % #skillKeys) + 1
-    local key = skillKeys[skillIdx]
-    safe(function()
-        if VirtualInput then
-            VirtualInput:SendKeyEvent(true, key, false, game)
-            task.wait(0.03)
-            VirtualInput:SendKeyEvent(false, key, false, game)
-        elseif keypress then
-            keypress(key)
+function UI.SetPlanters(entries)
+    for slot = 1, 3 do
+        local entry = type(entries) == "table" and entries[slot] or nil
+        local cell = planterCells[slot]
+        if cell then
+            pcall(function()
+                if entry then
+                    cell.Name.Text = tostring(entry.Name or "Planter")
+                    cell.Field.Text = tostring(entry.Field or "")
+                    cell.Fill.Size = UDim2.new(math.clamp(tonumber(entry.Percent) or 0, 0, 1), 0, 1, 0)
+                    cell.Icon.Image = resolveGameImage(tostring(entry.Name or "")) or ""
+                else
+                    cell.Name.Text = "-"
+                    cell.Field.Text = ""
+                    cell.Fill.Size = UDim2.new(0, 0, 1, 0)
+                    cell.Icon.Image = ""
+                end
+            end)
         end
-    end)
-end
-
-local function serverTime()
-    if Workspace then
-        local ok, t = pcall(function() return Workspace:GetServerTimeNow() end)
-        if ok and t then return t end
     end
-    return os.clock()
 end
 
-local function remoteCombo()
-    comboIndex = (comboIndex % 4) + 1
-    local args = {
-        Combo = comboIndex,
-        CurrentCombo = comboIndex,
-        CallTime = serverTime(),
-        DelayTime = K.Config.ComboDelay,
+-- Public: lấy asset string (rbxassetid://...) của icon item trong game - gán
+-- trực tiếp vào bất kỳ ImageLabel.Image nào, không cần tải file.
+function UI.GetGameImage(itemName)
+    return resolveGameImage(itemName)
+end
+
+function UI.DefineControls(definitions)
+    if type(definitions) ~= "table" then return end
+    -- Đóng popup dropdown đang mở (parent = rootGui, không nằm trong row).
+    for _, closer in pairs(dropdownPopups) do pcall(closer) end
+    dropdownPopups = {}
+    for _, rows in pairs(UI._built) do
+        for _, row in ipairs(rows) do pcall(function() row:Destroy() end) end
+    end
+    UI._built = {}
+    local builders = {
+        Toggle = buildToggle, Slider = buildSlider, Section = buildSection,
+        Button = buildButton, Textbox = buildTextbox, Input = buildTextbox,
+        Dropdown = buildDropdown, Keybind = buildKeybind,
     }
-    fire(K.Config.AttackRemote or "CombatTools", K.Config.AttackAction or "DefaultCombo", args)
-end
-
-local function attackOnce()
-    local now = os.clock()
-    if now - lastAttack < (K.Config.AttackDelay or 0.12) then return end
-    lastAttack = now
-    if K.Config.UseRemoteAttack then
-        remoteCombo()
-    else
-        simulateClick()
-    end
-    simulateSkills()
-end
-K.AttackOnce = attackOnce
-
--- ---- Stats ---------------------------------------------------------------
-local function autoStats()
-    if not K.Config.AutoStats then return end
-    local pts = getAvailablePoints()
-    if pts <= 0 then return end
-    local d = getData()
-    local current = dig(d, "Statistics") or {}
-    local add = K.DistributeStats(pts, K.Config.StatWeights, current, nil)
-    if not next(add) then return end
-    fire("StatisticsData", "UpgradeStats", add)
-    fire("StatisticsData", "SaveStats", add)
-    log(2, "allocated stats points:", pts)
-end
-K.AutoStats = autoStats
-
--- ---- Haki ----------------------------------------------------------------
-local function autoHaki()
-    if not K.Config.AutoHaki then return end
-    local char = LocalPlayer and LocalPlayer.Character
-    if not char then return end
-    local on = char:GetAttribute("Busoshoku")
-    if on == false or on == nil then
-        if not fire(K.Config.HakiRemote or "Busoshoku", K.Config.HakiAction or "Toggle") then
-            fire("Abilitys", "Toggle", "Busoshoku") -- older builds
+    for index, def in ipairs(definitions) do
+        local page = UI._pages[tostring(def.Tab)]
+        local kind = tostring(def.Kind or "Toggle")
+        local build = builders[kind] or buildToggle
+        -- Section chỉ cần Label; các kind khác cần Key.
+        if page and def.Tab ~= "Status" and (def.Key or kind == "Section") then
+            local row = build(page, def, 100 + index)
+            local list = UI._built[tostring(def.Tab)] or {}
+            table.insert(list, row)
+            UI._built[tostring(def.Tab)] = list
         end
     end
 end
 
--- ---- Equip best weapon ---------------------------------------------------
-local function toolType(tool)
-    if ToolsInfo and type(ToolsInfo) == "table" then
-        local def = ToolsInfo[tool.Name]
-        if type(def) == "table" and def.ToolType then return def.ToolType end
-    end
-    return tool:GetAttribute("ToolType") or "Sword"
-end
-
-local function autoEquip()
-    if not K.Config.AutoEquip then return end
-    local char = LocalPlayer and LocalPlayer.Character
-    if not char then return end
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not backpack then return end
-    local current = char:FindFirstChildOfClass("Tool")
-    local pref = K.Config.WeaponPreference
-    local function rank(t)
-        local ty = toolType(t)
-        for i, p in ipairs(pref) do
-            if K.MatchName(ty, p) then return i end
-        end
-        return #pref + 1
-    end
-    if current and rank(current) == 1 then return end
-    local best, bestRank = current, current and rank(current) or math.huge
-    for _, t in ipairs(backpack:GetChildren()) do
-        if t:IsA("Tool") then
-            local r = rank(t)
-            if r < bestRank then best, bestRank = t, r end
-        end
-    end
-    if best and best ~= current then
-        safe(function()
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum:EquipTool(best) end
-        end)
+function UI.OnChange(key, callback)
+    if type(key) == "string" and type(callback) == "function" then
+        UI._callbacks[key] = callback
+        task.spawn(function() pcall(callback, UI.Values[key]) end)
     end
 end
 
--- ---- Collect drops -------------------------------------------------------
-local function autoCollect()
-    if not K.Config.AutoCollect then return end
-    if not Workspace then return end
-    local folder = Workspace:FindFirstChild("Playability")
-    folder = folder and folder:FindFirstChild("DroppedTools")
-    if not folder then return end
-    local char = LocalPlayer and LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    for _, d in ipairs(folder:GetChildren()) do
-        local part = d:IsA("BasePart") and d or (d:IsA("Model") and (d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart")))
-        if part then
-            local dist = (part.Position - hrp.Position).Magnitude
-            if dist <= (K.Config.CollectRange or 60) then
-                local prompt = d:FindFirstChildWhichIsA("ProximityPrompt", true)
-                if prompt then
-                    teleportTo(part.CFrame * CFrame.new(0, 2, 0))
-                    safe(function()
-                        if fireproximityprompt then fireproximityprompt(prompt) end
-                    end)
-                end
-            end
-        end
+function UI.SetValues(values)
+    if type(values) ~= "table" then return end
+    for key, value in pairs(values) do
+        UI.Values[key] = value
+        local ref = UI._refs[tostring(key)]
+        if ref and ref.Render then pcall(ref.Render, value) end
     end
 end
 
--- ---- FPS boost -----------------------------------------------------------
-local fpsApplied = false
-local function applyFPSBoost()
-    if not K.Config.FPSBoost or fpsApplied then return end
-    fpsApplied = true
-    safe(function()
-        local lighting = getService("Lighting")
-        if lighting then
-            lighting.GlobalShadows = false
-            lighting.FogEnd = 1e6
-        end
-    end)
-    safe(function()
-        for _, v in ipairs(Workspace:GetDescendants()) do
-            if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Beam")
-                or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") then
-                v.Enabled = false
-            end
-        end
-    end)
-    safe(function()
-        if settings and settings().Rendering then
-            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-        end
-    end)
-    log(1, "FPS boost applied")
-end
-K.ApplyFPSBoost = applyFPSBoost
-
--- ---- Farm loop -----------------------------------------------------------
-local currentGoals = {}
-local objectiveMode = "farm"   -- "farm" | "talk" | "collect"
-local lastObjectiveRaw = nil
-
-local function refreshGoals()
-    local goals = activeQuest and activeQuest.Goals or {}
-    if K.Config.ItemFarm and K.Config.TargetItem ~= "" and EnemysInfo then
-        local droppers = K.FindItemDroppers(EnemysInfo, K.Config.TargetItem)
-        if #droppers > 0 then
-            goals = {}
-            for _, dr in ipairs(droppers) do goals[#goals + 1] = dr.Name end
-        end
-    end
-    currentGoals = goals
-end
-
--- slow loop: quest management + stats / haki / equip / collect
-local function farmTick()
-    -- New-account intro / any open converse: click through the response options
-    -- until the dialogue closes (each click advances one segment).
-    if K.Config.AutoConverse then
-        for _ = 1, 8 do
-            if not advanceConverse() then break end
-            task.wait(0.35)
-        end
-    end
-    -- Follow the game's live objective first (talk / kill / collect).
-    if K.Config.FollowGameQuest then
-        local obj = getGameObjective()
-        if obj then
-            if obj.raw ~= lastObjectiveRaw then
-                lastObjectiveRaw = obj.raw
-                log(1, "objective:", obj.raw)
-            end
-            if obj.action == "kill" then
-                objectiveMode = "farm"
-                currentGoals = { obj.target }
-                if obj.target:sub(-1) == "s" then
-                    currentGoals[#currentGoals + 1] = obj.target:sub(1, -2)
-                end
-            elseif obj.action == "talk" or obj.action == "find" then
-                objectiveMode = "talk"
-                currentGoals = {}
-                interactWithNpc(obj.target)
-            elseif obj.action == "collect" then
-                objectiveMode = "collect"
-                currentGoals = {}
-                autoCollect()
-            end
-            autoStats()
-            autoHaki()
-            autoEquip()
-            applyFPSBoost()
-            return
-        end
-    end
-    objectiveMode = "farm"
-    if K.Config.AutoQuest then
-        local level = getLevel()
-        -- Accept (teleport to giver) only when we have no quest or out-leveled it.
-        -- Otherwise keep the quest and re-accept via Repeat, which needs no teleport,
-        -- so the character stays on the mob instead of jittering back to the giver.
-        local outgrown = activeQuest and tonumber(activeQuest.MaxLevel) and level > activeQuest.MaxLevel
-        if not activeQuest or outgrown then
-            activeQuest = chooseQuest()
-            if activeQuest then
-                acceptQuest(activeQuest)
-                log(1, "quest:", activeQuest.Name, "goals:", table.concat(activeQuest.Goals, ", "))
-            end
+local uiVisible = true
+local windowHome = nil -- vị trí thật của window (trước khi slide-out ẩn đi)
+function UI.Toggle(visible)
+    pcall(function()
+        if visible == nil then visible = not uiVisible end
+        visible = visible and true or false
+        if visible == uiVisible then return end
+        uiVisible = visible
+        if visible then
+            local home = windowHome or window.Position
+            windowHome = nil
+            window.Position = home
+            window.Visible = true
+            shadow.Visible = true
+            window.Position = UDim2.new(home.X.Scale, home.X.Offset + 70,
+                home.Y.Scale, home.Y.Offset)
+            TweenService:Create(window, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                Position = home,
+            }):Play()
+            TweenService:Create(shadow, TweenInfo.new(0.35), {BackgroundTransparency = 0.82}):Play()
         else
-            repeatQuest(activeQuest)
-        end
-    end
-    if not activeQuest then activeQuest = chooseQuest() end
-    refreshGoals()
-    autoStats()
-    autoHaki()
-    autoEquip()
-    autoCollect()
-    applyFPSBoost()
-end
-K.FarmTick = farmTick
-
--- fast loop: reposition to the best target and attack
-local function combatTick()
-    if not K.Config.AutoFarm then return end
-    if objectiveMode ~= "farm" then return end
-    local enemies = getEnemies()
-    local opts = { maxRange = K.Config.MaxFarmRange, boss = K.Config.BossFarm }
-    opts.allowAny = (#currentGoals == 0)
-    local target = K.PickEnemy(enemies, currentGoals, opts)
-    if not target and K.Config.FarmAnyFallback then
-        opts.allowAny = true
-        target = K.PickEnemy(enemies, currentGoals, opts)
-    end
-    if target then
-        local root = target.Root
-        moveTo(root.CFrame * CFrame.new(0, 0, K.Config.FarmDistance or 6))
-        faceTarget(root)
-        attackOnce()
-    end
-end
-K.CombatTick = combatTick
-
--- ---- Main loop -----------------------------------------------------------
-local function startLoop()
-    if running then return end
-    running = true
-    task.spawn(function()
-        while running do
-            local ok = safe(farmTick)
-            if not ok then task.wait(0.5) end
-            task.wait(K.Config.QuestRefresh or 1.0)
-        end
-    end)
-    task.spawn(function()
-        while running do
-            safe(combatTick)
-            task.wait(K.Config.FastAttack and (K.Config.AttackDelay or 0.12) or 0.4)
-        end
-    end)
-end
-
-local function stopLoop()
-    running = false
-end
-K.Stop = stopLoop
-K.Resume = startLoop
-
--- ---- Anti-AFK / auto-rejoin ----------------------------------------------
-local rejoining = false
-local function doRejoin()
-    if rejoining then return end
-    rejoining = true
-    log(1, "death loop detected — rejoining")
-    safe(function()
-        local ts = getService("TeleportService")
-        if ts then ts:Teleport(game.PlaceId, LocalPlayer) end
-    end)
-end
-K.Rejoin = doRejoin
-
-local deathTimes = {}
-local function trackCharacter(char)
-    if not char then return end
-    safe(function()
-        local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
-        if not hum then return end
-        hum.Died:Connect(function()
-            local now = os.clock()
-            deathTimes[#deathTimes + 1] = now
-            while #deathTimes > 0 and now - deathTimes[1] > 60 do
-                table.remove(deathTimes, 1)
-            end
-            if K.Config.AutoRejoin and #deathTimes >= 5 then doRejoin() end
-        end)
-    end)
-end
-
-local function setupUtility()
-    if K.Config.AntiAFK then
-        safe(function()
-            local vu = getService("VirtualUser")
-            LocalPlayer.Idled:Connect(function()
-                if vu then
-                    vu:Button2Down(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
-                    task.wait(0.1)
-                    vu:Button2Up(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
+            -- Nhớ vị trí thật trước khi trượt ra ngoài màn hình.
+            windowHome = window.Position
+            local slideOut = UDim2.new(windowHome.X.Scale, windowHome.X.Offset + 70,
+                windowHome.Y.Scale, windowHome.Y.Offset)
+            TweenService:Create(window, TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Position = slideOut,
+            }):Play()
+            TweenService:Create(shadow, TweenInfo.new(0.28), {BackgroundTransparency = 1}):Play()
+            task.delay(0.32, function()
+                if not uiVisible then
+                    window.Visible = false
+                    shadow.Visible = false
                 end
             end)
-        end)
-    end
-    safe(function()
-        if LocalPlayer.Character then trackCharacter(LocalPlayer.Character) end
-        LocalPlayer.CharacterAdded:Connect(trackCharacter)
-    end)
-end
-
--- ---- UI ------------------------------------------------------------------
-local panelGui
-local function buildUI()
-    safe(function()
-        local pg = LocalPlayer:WaitForChild("PlayerGui")
-        local gui = Instance.new("ScreenGui")
-        gui.Name = "VoxKaitunUI"
-        gui.ResetOnSpawn = false
-        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-        gui.Parent = pg
-        panelGui = gui
-
-        local main = Instance.new("Frame")
-        main.Size = UDim2.new(0, 230, 0, 320)
-        main.Position = UDim2.new(0, 20, 0.5, -160)
-        main.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
-        main.BorderSizePixel = 0
-        main.Active = true
-        main.Draggable = true
-        main.Parent = gui
-        Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
-
-        local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(1, 0, 0, 30)
-        title.BackgroundTransparency = 1
-        title.Text = "Vox Seas Kaitun"
-        title.TextColor3 = Color3.fromRGB(120, 200, 255)
-        title.Font = Enum.Font.GothamBold
-        title.TextSize = 16
-        title.Parent = main
-
-        local scroll = Instance.new("ScrollingFrame")
-        scroll.Size = UDim2.new(1, -16, 1, -70)
-        scroll.Position = UDim2.new(0, 8, 0, 34)
-        scroll.BackgroundTransparency = 1
-        scroll.ScrollBarThickness = 4
-        scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-        scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-        scroll.Parent = main
-        local layout = Instance.new("UIListLayout")
-        layout.Padding = UDim.new(0, 4)
-        layout.Parent = scroll
-
-        local toggles = {
-            "AutoFarm", "AutoQuest", "FastAttack", "AutoStats", "AutoHaki",
-            "AutoEquip", "AutoCollect", "UseRemoteAttack", "UseSkills",
-            "BossFarm", "ItemFarm", "AntiAFK", "AutoRejoin", "FPSBoost",
-        }
-        for _, name in ipairs(toggles) do
-            local btn = Instance.new("TextButton")
-            btn.Size = UDim2.new(1, 0, 0, 26)
-            btn.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
-            btn.TextColor3 = Color3.fromRGB(230, 230, 230)
-            btn.Font = Enum.Font.Gotham
-            btn.TextSize = 13
-            btn.Text = "  " .. name .. ": " .. (K.Config[name] and "ON" or "OFF")
-            btn.Parent = scroll
-            Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
-            btn.MouseButton1Click:Connect(function()
-                K.Config[name] = not K.Config[name]
-                btn.Text = "  " .. name .. ": " .. (K.Config[name] and "ON" or "OFF")
-                btn.BackgroundColor3 = K.Config[name] and Color3.fromRGB(40, 70, 90) or Color3.fromRGB(35, 38, 50)
-            end)
-        end
-
-        local status = Instance.new("TextLabel")
-        status.Size = UDim2.new(1, -90, 0, 28)
-        status.Position = UDim2.new(0, 8, 1, -32)
-        status.BackgroundTransparency = 1
-        status.TextColor3 = Color3.fromRGB(160, 170, 190)
-        status.Font = Enum.Font.Gotham
-        status.TextSize = 12
-        status.TextXAlignment = Enum.TextXAlignment.Left
-        status.Text = "Lv ? | starting..."
-        status.Parent = main
-
-        local stopBtn = Instance.new("TextButton")
-        stopBtn.Size = UDim2.new(0, 74, 0, 24)
-        stopBtn.Position = UDim2.new(1, -82, 1, -30)
-        stopBtn.BackgroundColor3 = Color3.fromRGB(90, 40, 40)
-        stopBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
-        stopBtn.Font = Enum.Font.GothamBold
-        stopBtn.TextSize = 12
-        stopBtn.Text = "STOP"
-        stopBtn.Parent = main
-        Instance.new("UICorner", stopBtn).CornerRadius = UDim.new(0, 5)
-        stopBtn.MouseButton1Click:Connect(function()
-            if running then
-                stopLoop()
-                stopBtn.Text = "RESUME"
-                stopBtn.BackgroundColor3 = Color3.fromRGB(40, 80, 50)
-            else
-                startLoop()
-                stopBtn.Text = "STOP"
-                stopBtn.BackgroundColor3 = Color3.fromRGB(90, 40, 40)
-            end
-        end)
-
-        task.spawn(function()
-            while gui.Parent do
-                local q = activeQuest and activeQuest.Name or "-"
-                status.Text = string.format("Lv %d | %s", getLevel(), q)
-                task.wait(1)
-            end
-        end)
-    end)
-end
-
--- ---- Auto start: click the game's START GAME menu so a player spawns ------
-local function clickGameStart()
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return false end
-    for _, d in ipairs(pg:GetDescendants()) do
-        if d:IsA("TextButton") and d.Visible and not inOurUI(d) then
-            local t = K.NormalizeName(d.Text)
-            if t == "start game" or t == "start" or t == "play" then
-                local clicked = false
-                safe(function()
-                    if firesignal then
-                        firesignal(d.MouseButton1Click)
-                        clicked = true
-                    end
-                end)
-                if clicked then return true end
-            end
-        end
-    end
-    return false
-end
-K.ClickGameStart = clickGameStart
-
-local function hasCharacter()
-    local c = LocalPlayer and LocalPlayer.Character
-    return c ~= nil and c:FindFirstChild("HumanoidRootPart") ~= nil
-end
-K.HasCharacter = hasCharacter
-
--- Wait for the player to exist (game start menu), auto-clicking START if enabled.
-local function startWatcher()
-    task.spawn(function()
-        local tries = 0
-        while not hasCharacter() and tries < 300 do
-            if K.Config.AutoStartGame then
-                if not clickGameStart() then
-                    safe(function()
-                        local r = getRemote("StartGame", false)
-                        if r then r:FireServer() end
-                    end)
-                end
-            end
-            task.wait(1)
-            tries = tries + 1
-        end
-        if hasCharacter() then
-            log(1, "player spawned — farming")
-            startLoop()
         end
     end)
 end
 
--- ---- Init / Start --------------------------------------------------------
-local initialized = false
-function K.Init()
-    if initialized then return true end
-    local ok = pcall(function()
-        LocalPlayer = getService("Players").LocalPlayer
-        ReplicatedStorage = getService("ReplicatedStorage")
-        Workspace = getService("Workspace")
-        RunService = getService("RunService")
-        VirtualInput = getService("VirtualInputManager")
+togglePill.MouseButton1Click:Connect(function()
+    -- Kéo-để-di-chuyển không được tính là click toggle.
+    if pillMoved then pillMoved = false return end
+    -- Feedback nảy nhẹ rồi toggle.
+    TweenService:Create(togglePill, TweenInfo.new(0.1, Enum.EasingStyle.Quad), {
+        Size = UDim2.fromOffset(42, 42),
+    }):Play()
+    task.delay(0.1, function()
+        TweenService:Create(togglePill, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(48, 48),
+        }):Play()
     end)
-    if not ok or not LocalPlayer then return false end
-    loadDataModules()
-    setupUtility()
-    buildUI()
-    initialized = true
-    return true
-end
-
-function K.Start()
-    if not K.Init() then
-        log(0, "not in Roblox / no LocalPlayer — idle")
-        return false
-    end
-    log(1, "started. level:", getLevel())
-    startLoop()
-    return true
-end
-
---==========================================================================
--- AUTO-RUN (only inside Roblox). Returns K for external testing otherwise.
---==========================================================================
-local inRoblox = false
-pcall(function()
-    if game and game:GetService("Players") and game:GetService("Players").LocalPlayer then
-        inRoblox = true
-    end
+    UI.Toggle()
 end)
-if inRoblox then
-    if K.Init() then
-        startWatcher()
+
+function UI.CycleTheme()
+    local names = {}
+    for name in pairs(THEMES) do table.insert(names, name) end
+    table.sort(names)
+    local index = table.find(names, currentThemeName) or 1
+    UI.SetTheme(names[index % #names + 1])
+end
+
+function UI.SetTheme(name)
+    local palette = THEMES[name] or THEMES.Honey
+    local oldPalette = T
+    currentThemeName = name
+    T = palette
+    -- Repaint TOÀN CÂY (mọi card/stroke/control/hex/toast/pill/scrollbar).
+    repaintTheme(oldPalette, palette)
+    for _, listener in ipairs(UI._themeListeners) do
+        pcall(listener, palette)
+    end
+    UI.Notify("Theme", "Switched to " .. currentThemeName, 2, "info")
+    UI._saveSoon()
+end
+
+function UI.Destroy()
+    pcall(function() rootGui:Destroy() end)
+    if ENV.BSSKaitunUI == UI then ENV.BSSKaitunUI = nil end
+end
+
+-- =============================================================================
+-- Boot
+-- =============================================================================
+-- 1) Config từ main (nếu đặt trước) rồi file lưu đè lên các khóa đã lưu.
+if type(ENV.BSS_KAITUN_CONFIG) == "table" then
+    for key, value in pairs(ENV.BSS_KAITUN_CONFIG) do UI.Values[key] = value end
+end
+local saved = loadSaved()
+if saved then
+    if type(saved.Values) == "table" then
+        for key, value in pairs(saved.Values) do UI.Values[key] = value end
+    end
+    if type(saved.X) == "number" and type(saved.Y) == "number" then
+        local maxX = math.max(80, rootGui.AbsoluteSize.X - 80)
+        local maxY = math.max(40, rootGui.AbsoluteSize.Y - 40)
+        local x = math.clamp(saved.X, -WINDOW_SIZE.X.Offset + 80, maxX)
+        local y = math.clamp(saved.Y, 0, maxY)
+        window.Position = UDim2.fromOffset(x, y)
+        shadow.Position = UDim2.fromOffset(x - 5, y - 6)
+    end
+    if type(saved.PillX) == "number" and type(saved.PillY) == "number" then
+        local px = math.clamp(saved.PillX, 8, math.max(8, rootGui.AbsoluteSize.X - 8))
+        local py = math.clamp(saved.PillY, 8, math.max(8, rootGui.AbsoluteSize.Y - 8))
+        togglePill.Position = UDim2.new(1, -px, 1, -py)
+    end
+    if saved.Theme and THEMES[saved.Theme] then
+        currentThemeName = saved.Theme
+        T = THEMES[saved.Theme]
     end
 end
 
-return K
+-- Collapse (sau khi restore vị trí, áp trạng thái lưu).
+themeButton.MouseButton1Click:Connect(function() UI.CycleTheme() end)
+collapseButton.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    setText(collapseButton, collapsed and "+" or "—")
+    TweenService:Create(bodyHolder, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {
+        Size = collapsed and UDim2.new(1, 0, 0, 0) or UDim2.new(1, 0, 1, -40),
+    }):Play()
+    TweenService:Create(window, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {
+        Size = collapsed and UDim2.fromOffset(WINDOW_SIZE.X.Offset, 40) or WINDOW_SIZE,
+    }):Play()
+    TweenService:Create(shadow, TweenInfo.new(0.28, Enum.EasingStyle.Quad), {
+        Size = collapsed and UDim2.fromOffset(WINDOW_SIZE.X.Offset + 10, 46)
+            or WINDOW_SIZE + UDim2.fromOffset(10, 12),
+    }):Play()
+    UI._saveSoon()
+end)
+
+-- Animation mở cửa sổ lần đầu: trượt từ phải + fade shadow.
+if not (saved and saved.Collapsed) then
+    local finalX = window.Position
+    window.Position = UDim2.new(finalX.X.Scale, finalX.X.Offset + 60, finalX.Y.Scale, finalX.Y.Offset)
+    shadow.BackgroundTransparency = 1
+    TweenService:Create(window, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        Position = finalX,
+    }):Play()
+    TweenService:Create(shadow, TweenInfo.new(0.45), {BackgroundTransparency = 0.82}):Play()
+else
+    collapsed = true
+    setText(collapseButton, "+")
+    bodyHolder.Size = UDim2.new(1, 0, 0, 0)
+    window.Size = UDim2.fromOffset(WINDOW_SIZE.X.Offset, 40)
+    shadow.Size = UDim2.fromOffset(WINDOW_SIZE.X.Offset + 10, 46)
+end
+
+-- Auto hive data: đọc comb thật mỗi 2.5s ngay khi UI load (main vẫn có thể
+-- đè bằng SetHiveGrid/SetHive riêng nếu muốn).
+UI.AutoHive()
+
+ENV.BSSKaitunUI = UI
+ENV.__BSSKaitunUI_Cleanup = function()
+    pcall(function() rootGui:Destroy() end)
+    if ENV.BSSKaitunUI == UI then ENV.BSSKaitunUI = nil end
+    ENV.__BSSKaitunUI_Cleanup = nil
+end
+
+return UI
