@@ -349,7 +349,10 @@ local DEFAULT_CONFIG = {
     FireflyScanInterval = 0.25,
     FireflyLandingVelocity = 0.15,
     FireflyMaxFieldHeight = 4,
+    -- Idle window: đàn bay mà không có tiến triển quá X giây thì bỏ pass.
     FireflyFarmBudget = 18,
+    -- Hard cap cho 1 pass follow đàn đom đóm (atlas dùng 120s).
+    FireflyFollowMaxSeconds = 120,
     FireflyTouchTimeout = 2.5,
     FireflyTokenWindow = 3,
     FireflyRetryCooldown = 1.25,
@@ -3911,6 +3914,30 @@ local function getField()
     local field = zones:FindFirstChild(fieldName) or zones:FindFirstChild(Config.FarmField) or zones:FindFirstChildWhichIsA("BasePart")
     Runtime.CurrentField = field and field.Name or fieldName
     return field
+end
+
+-- Honey farm đẩy tiến trình mua item: field blue theo số ong.
+-- >15 ong -> Pine Tree Forest, >=5 -> Bamboo Field, còn lại Blue Flower Field.
+-- Field boost (x2 pollen) vẫn ưu tiên; DynamicField=false thì giữ FarmField cấu hình.
+local function honeyFarmField()
+    if Runtime.BoostedField and os.clock() < (Runtime.BoostedFieldUntil or 0)
+        and fieldUnlocked(Runtime.BoostedField) then
+        return findField(Runtime.BoostedField)
+    end
+    if not Config.DynamicField then return findField(Config.FarmField) end
+    local count = beeCount()
+    local candidates
+    if count > 15 then
+        candidates = {"Pine Tree Forest", "Bamboo Field", "Blue Flower Field"}
+    elseif count >= 5 then
+        candidates = {"Bamboo Field", "Blue Flower Field"}
+    else
+        candidates = {"Blue Flower Field"}
+    end
+    for _, name in ipairs(candidates) do
+        if fieldUnlocked(name) then return findField(name) end
+    end
+    return findField("Blue Flower Field")
 end
 
 local function fieldPoint(field)
@@ -8083,7 +8110,14 @@ function MaterialSystem.ClaimBlender()
     return false
 end
 
+-- Honeysuckle + các loại Wax rơi từ Puffshroom, KHÔNG farm field thường.
+-- Khi quest/craft cần thì canh puff để kiếm (FarmSource route sang FarmPuffshroom).
+MaterialSystem.PuffMaterials = {
+    Honeysuckle = true, SoftWax = true, HardWax = true, CausticWax = true, SwirledWax = true,
+}
+
 function MaterialSystem.Field(material)
+    if MaterialSystem.PuffMaterials[material] then return nil end
     local candidates = {
         SunflowerSeed = {"Sunflower Field"},
         Strawberry = {"Strawberry Field", "Mushroom Field"},
@@ -8091,7 +8125,6 @@ function MaterialSystem.Field(material)
         -- Pineapple tokens exist ONLY in Pineapple Patch; farming elsewhere can
         -- never produce them.
         Pineapple = {"Pineapple Patch"},
-        Honeysuckle = {"Sunflower Field", "Blue Flower Field", "Rose Field"},
         Coconut = {"Coconut Field"},
         MagicBean = {"Clover Field", "Sunflower Field"},
         -- RJ material farm (user spec): Pine Tree Forest khi zone đã unlock
@@ -8130,6 +8163,7 @@ function MaterialSystem.HasGatherableMaterial(deficits)
     for material in pairs(deficits or {}) do
         local canonical = MaterialSystem.Canonical(material) or material
         if special[canonical] or special[material] then return true end
+        if MaterialSystem.PuffMaterials[canonical] or MaterialSystem.PuffMaterials[material] then return true end
         if MaterialSystem.Recipes[canonical] then return true end -- blender-craftable
         if MaterialSystem.Field(material) ~= nil then return true end
     end
@@ -8284,11 +8318,22 @@ end
 Runtime.ScanSprout = MaterialSystem.FindSprout
 Runtime.FarmSprout = MaterialSystem.FarmSprout
 
-function MaterialSystem.FindFirefly()
+-- group: snapshot các đom đóm của đàn đang follow. Khi còn thành viên sống
+-- thì CHỈ chọn trong đàn (không nhảy sang đàn khác đậu ở field cũ); hết đàn
+-- thì ưu tiên field cũ rồi mới tới gần nhất toàn cục.
+function MaterialSystem.FindFirefly(preferField, group)
     local folder = workspace:FindFirstChild("NPCBees")
     local _, _, root = getCharacter(1)
     if not folder or not root then return nil end
+    local groupHasMembers = false
+    if group then
+        for member in pairs(group) do
+            if member.Parent then groupHasMembers = true break end
+        end
+    end
     local best, bestField, bestDistance
+    local prefBest, prefField, prefDistance
+    local groupBest, groupField, groupDistance
     local now = os.clock()
     local landingSpeed = math.max(0, tonumber(Config.FireflyLandingVelocity) or 0.15)
     local maxHeight = math.max(1, tonumber(Config.FireflyMaxFieldHeight) or 4)
@@ -8306,13 +8351,24 @@ function MaterialSystem.FindFirefly()
                 local surfaceHeight = field and fieldSurfaceOffset(field, position) or nil
                 local distance = (root.Position - position).Magnitude
                 if field and fieldUnlocked(field.Name) and surfaceHeight
-                    and surfaceHeight >= -2 and surfaceHeight <= maxHeight
-                    and (not bestDistance or distance < bestDistance) then
-                    best, bestField, bestDistance = firefly, field, distance
+                    and surfaceHeight >= -2 and surfaceHeight <= maxHeight then
+                    if group and group[firefly] then
+                        if not groupDistance or distance < groupDistance then
+                            groupBest, groupField, groupDistance = firefly, field, distance
+                        end
+                    elseif preferField and field.Name == preferField.Name then
+                        if not prefDistance or distance < prefDistance then
+                            prefBest, prefField, prefDistance = firefly, field, distance
+                        end
+                    elseif not bestDistance or distance < bestDistance then
+                        best, bestField, bestDistance = firefly, field, distance
+                    end
                 end
             end
         end
     end
+    if groupHasMembers then return groupBest, groupField end
+    if prefBest then return prefBest, prefField end
     return best, bestField
 end
 
@@ -8375,55 +8431,107 @@ function MaterialSystem.FarmFirefly()
     if not firefly or not field then Runtime.FireflyPending = false return false end
 
     Runtime.FireflyBusy = true
+    -- Snapshot cả đàn trong field: follow đúng nhóm này xuyên field
+    -- (atlas-style), không nhảy sang đom đóm gần nhất toàn cục sau mỗi lần loot.
+    local group = {}
+    local npcFolder = workspace:FindFirstChild("NPCBees")
+    if npcFolder then
+        for _, npc in ipairs(npcFolder:GetChildren()) do
+            local position = npc.Name == "Firefly" and objectPosition(npc)
+            if position and fieldContainsPosition(field, position, 15) then
+                group[npc] = true
+            end
+        end
+    end
     local handled = false
-    local budgetDeadline = os.clock() + math.max(3, tonumber(Config.FireflyFarmBudget) or 9)
+    local hardDeadline = os.clock() + math.max(10, tonumber(Config.FireflyFollowMaxSeconds) or 120)
+    local idleWindow = math.max(3, tonumber(Config.FireflyFarmBudget) or 18)
+    local lastProgressAt = os.clock()
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
-        and firefly and field and os.clock() < budgetDeadline do
-        local position = objectPosition(firefly)
-        if not position or not fieldUnlocked(field.Name) then break end
-        -- Update the formation center while the group is still in the field.
-        local center = MaterialSystem.FireflyFormationCenter(field)
-        if center then
+        and os.clock() < hardDeadline do
+        if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
+            Runtime.Digging = false
+            convertPollen()
+            lastProgressAt = os.clock()
+        end
+        if firefly and field then
+            local position = objectPosition(firefly)
+            if not position or not fieldUnlocked(field.Name) then
+                firefly, field = nil, nil
+            else
+                -- Update the formation center while the group is still in the field.
+                local center = MaterialSystem.FireflyFormationCenter(field)
+                if center then
+                    Runtime.FireflyCenter = center
+                    Runtime.FireflyCenterAt = os.clock()
+                end
+                Runtime.CurrentField = field.Name
+                Runtime.Digging = true
+                setStatus("Auto Fireflies", "Waiting for Firefly to land | " .. field.Name)
+                local moved = tweenTo(CFrame.new(position + Vector3.new(0, 1.5, 0)), Config.TokenTweenSpeed, "Firefly")
+                Runtime.FireflyCooldowns[firefly] = os.clock()
+                    + math.max(0.5, tonumber(Config.FireflyRetryCooldown) or 1.25)
+                if moved then
+                    handled = true
+                    lastProgressAt = os.clock()
+                    Runtime.FirefliesCollected += 1
+                    -- Stay on the Firefly until it starts flying again; that signals
+                    -- the touch registered and a Moon Charm may have spawned.
+                    local touchDeadline = os.clock() + math.max(0.5, tonumber(Config.FireflyTouchTimeout) or 2.5)
+                    while firefly.Parent and not Runtime.MeteorPriorityActive and os.clock() < touchDeadline do
+                        local velocity = firefly:FindFirstChild("BodyVelocity", true)
+                        local speed = velocity and velocity.Velocity.Magnitude or math.huge
+                        if speed > math.max(0, tonumber(Config.FireflyLandingVelocity) or 0.15) then break end
+                        local _, humanoid = getCharacter(1)
+                        if humanoid then humanoid:MoveTo(position) end
+                        task.wait(0.08)
+                    end
+                    Runtime.DigOnce()
+
+                    local tokenDeadline = math.min(hardDeadline,
+                        os.clock() + math.max(1, tonumber(Config.FireflyTokenWindow) or 3))
+                    local moonCollected = false
+                    repeat
+                        local token = MaterialSystem.FindMoonCharmToken(field, position, 45)
+                        if token then
+                            moonCollected = collectToken(token, "FireflyMoonCharm") or moonCollected
+                        else
+                            task.wait(0.1)
+                        end
+                    until not Runtime.Running or Runtime.MeteorPriorityActive or os.clock() >= tokenDeadline
+                    if not moonCollected and Config.AutoTokens then sweepTokens(1, "FireflyDrop") end
+                    lastProgressAt = os.clock()
+                end
+                if Runtime.MeteorPriorityActive then break end
+                firefly, field = MaterialSystem.FindFirefly(field, group)
+            end
+        end
+        if not firefly and not Runtime.MeteorPriorityActive then
+            -- Cả đàn đang bay: bám theo tâm đàn (trung bình vị trí các con
+            -- còn sống) chờ đàn đậu lại, thay vì bỏ về field farm.
+            local sum, count = Vector3.zero, 0
+            for member in pairs(group) do
+                if not member.Parent then
+                    group[member] = nil
+                else
+                    local position = objectPosition(member)
+                    if position then
+                        sum += position
+                        count += 1
+                    end
+                end
+            end
+            if count == 0 then break end
+            local center = sum / count
             Runtime.FireflyCenter = center
             Runtime.FireflyCenterAt = os.clock()
+            if os.clock() - lastProgressAt > idleWindow then break end
+            Runtime.Digging = true
+            setStatus("Auto Fireflies", "Following firefly group")
+            tweenTo(CFrame.new(center + Vector3.new(0, 3, 0)), Config.TokenTweenSpeed, "Firefly")
+            task.wait(0.2)
+            firefly, field = MaterialSystem.FindFirefly(field, group)
         end
-        Runtime.CurrentField = field.Name
-        Runtime.Digging = true
-        setStatus("Auto Fireflies", "Waiting for Firefly to land | " .. field.Name)
-        local moved = tweenTo(CFrame.new(position + Vector3.new(0, 1.5, 0)), Config.TokenTweenSpeed, "Firefly")
-        Runtime.FireflyCooldowns[firefly] = os.clock()
-            + math.max(0.5, tonumber(Config.FireflyRetryCooldown) or 1.25)
-        if moved then
-            handled = true
-            Runtime.FirefliesCollected += 1
-            -- Stay on the Firefly until it starts flying again; that signals
-            -- the touch registered and a Moon Charm may have spawned.
-            local touchDeadline = os.clock() + math.max(0.5, tonumber(Config.FireflyTouchTimeout) or 2.5)
-            while firefly.Parent and not Runtime.MeteorPriorityActive and os.clock() < touchDeadline do
-                local velocity = firefly:FindFirstChild("BodyVelocity", true)
-                local speed = velocity and velocity.Velocity.Magnitude or math.huge
-                if speed > math.max(0, tonumber(Config.FireflyLandingVelocity) or 0.15) then break end
-                local _, humanoid = getCharacter(1)
-                if humanoid then humanoid:MoveTo(position) end
-                task.wait(0.08)
-            end
-            Runtime.DigOnce()
-
-            local tokenDeadline = math.min(budgetDeadline,
-                os.clock() + math.max(1, tonumber(Config.FireflyTokenWindow) or 3))
-            local moonCollected = false
-            repeat
-                local token = MaterialSystem.FindMoonCharmToken(field, position, 45)
-                if token then
-                    moonCollected = collectToken(token, "FireflyMoonCharm") or moonCollected
-                else
-                    task.wait(0.1)
-                end
-            until not Runtime.Running or Runtime.MeteorPriorityActive or os.clock() >= tokenDeadline
-            if not moonCollected and Config.AutoTokens then sweepTokens(1, "FireflyDrop") end
-        end
-        if Runtime.MeteorPriorityActive then break end
-        firefly, field = MaterialSystem.FindFirefly()
     end
 
     -- The whole group has flown up (no landed fireflies left): rewards spawn at the
@@ -9811,6 +9919,12 @@ function MaterialSystem.FarmSource(action, entry)
     if (material == "MagicBean" or material == "RoyalJelly" or material == "MoonCharm"
         or material == "Neonberry" or material == "Bitterberry")
         and MaterialSystem.FarmSprout() then return true end
+    if MaterialSystem.PuffMaterials[material] then
+        -- Honeysuckle/Wax chỉ kiếm từ puffshroom: có puff thì canh farm, không
+        -- thì nhường cho việc khác (scanner vẫn canh puff, earmark tự hết hạn 120s).
+        if Config.AutoFarmPuffshrooms and Runtime.FarmPuffshroom() then return true end
+        return false
+    end
     if material == "MoonCharm" and farmFlowerEffect() then return true end
     local field = MaterialSystem.Field(material)
     if field == nil then
@@ -12544,7 +12658,7 @@ local function progressionWork(reason, allowSideJobs)
         setStatus("Farm progression", reason or "Saving honey for gear/egg/hive slot")
         -- Short bursts: quest turn-ins, conversions and affordable-gear purchases
         -- are re-evaluated between bursts instead of after one long 10s block.
-        farmStep(math.max(2, tonumber(Config.FarmBurstSeconds) or 5))
+        farmStep(math.max(2, tonumber(Config.FarmBurstSeconds) or 5), honeyFarmField())
     else
         setStatus("Progression waiting", "Enable Auto Farm or add resources")
         task.wait(1)
@@ -12792,7 +12906,7 @@ task.spawn(function()
             elseif Config.AutoQuest and questWork(Config.QuestFarmSeconds) then
                 -- Quest job already used the shared mover/farmer.
             elseif Config.AutoFarm then
-                farmStep(3)
+                farmStep(3, honeyFarmField())
             else
                 setStatus("Ready", "Set AutoFarm=true in config")
                 task.wait(0.5)
