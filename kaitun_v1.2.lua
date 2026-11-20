@@ -12907,10 +12907,14 @@ do
             pillMoved = false
             pillDragStart = input.Position
             pillStart = togglePill.Position
-            input.Changed:Connect(function()
+            -- PERF/leak: mỗi lần tap pill tạo 1 input.Changed connection; phải
+            -- disconnect khi End, nếu không chúng tích lũy theo số lần chạm.
+            local changedConn
+            changedConn = input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     if pillDragging then UI._saveSoon() end
                     pillDragging = false
+                    if changedConn then changedConn:Disconnect() changedConn = nil end
                 end
             end)
         end
@@ -13056,6 +13060,11 @@ end
 -- Màu theo rarity, gifted = viền vàng dày + ✦ + tint kim, mặt ong thật ở giữa.
 function UI.SetHiveGrid(entries, existingSlots)
     if type(hiveCells) ~= "table" or type(hiveCells.GridSlot) ~= "table" then return end
+    -- PERF: grid mặc định ẨN (hiveShown = false). Mỗi lần vẽ lại tốn ~2500
+    -- property write + 50 texture lookup; bỏ qua hết khi người dùng không xem
+    -- tổ ong (AutoHive vẫn gọi mỗi 2.5s). Đây là nguồn tụt FPS lớn nhất của UI.
+    local gridFrame = hiveCells.GridFrame
+    if gridFrame and not gridFrame.Visible then return end
     local darkBorder = T.Background
     local emptyFill = T.PanelLight
     -- Reset: ẩn hết, chỉ hiện slot đã MỞ trong hive (tổ thật chỉ có ô đã
@@ -13243,6 +13252,14 @@ function UI.AutoHive(intervalSeconds)
     autoHiveRunning = true
     task.spawn(function()
         while rootGui.Parent do
+            -- PERF: tab Hive đang đóng thì khỏi đọc comb + vẽ grid altogether.
+            -- Mặc định mở tab Status, nên gần như luôn skip -> UI gần như 0 cost
+            -- nền. Mở tab Hive xong tick kế (<=2.5s) tự populate.
+            local hivePage = UI._pages and UI._pages.Hive
+            if hivePage and not hivePage.Visible then
+                task.wait(math.max(1, tonumber(intervalSeconds) or 2.5))
+                continue
+            end
             local reference = Player and Player:FindFirstChild("Honeycomb")
             local hive = reference and reference:IsA("ObjectValue") and reference.Value
             local cellsFolder = hive and hive:FindFirstChild("Cells")
@@ -13406,6 +13423,12 @@ function UI.Toggle(visible)
             end)
         end
     end)
+end
+
+-- PERF: cho main biết cửa sổ có đang hiện không để gate feed thread (ẩn = khỏi
+-- cập nhật stats/gear/planters, UI gần như 0 cost nền khi collapse về pill).
+function UI.IsVisible()
+    return uiVisible and rootGui.Parent ~= nil and true or false
 end
 
 togglePill.MouseButton1Click:Connect(function()
@@ -13639,7 +13662,7 @@ task.spawn(function()
             end
             UI.SetPlanters(planters)
         end)
-        task.wait(1)
+        task.wait(2)
     end
 end)
 
