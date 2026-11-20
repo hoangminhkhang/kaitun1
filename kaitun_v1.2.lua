@@ -2339,6 +2339,38 @@ function Runtime.Shutdown()
     if ENV.__BSS_KAITUN == Runtime then ENV.__BSS_KAITUN = nil end
 end
 
+-- PERF: Runtime.Connections là mảng STRONG giữ MỌI connection tạo qua connect().
+-- Watch per-object (keepDisabled cho mỗi emitter/trail/beam/light, Animator mỗi
+-- bee, ChildAdded mỗi folder...) chết theo instance, nhưng connection object vẫn
+-- nằm lại mảng và closure ghim instance chết -> mảng phình VÔ HẠN theo session
+-- (sprinkler flood sinh hàng nghìn emitter) -> GC pressure -> drop FPS lũy tiến
+-- ("farm một lúc rồi lag"). Prune connection đã chết (Connected = false: instance
+-- bị destroy hoặc đã Disconnect) định kỳ để giải phóng closure + instance.
+-- Compact 2 con trỏ O(n), không yield giữa chừng nên atomic với connect() khác.
+local function pruneConnections()
+    local conns = Runtime.Connections
+    local n = #conns
+    if n == 0 then return 0 end
+    local write = 0
+    for read = 1, n do
+        local conn = conns[read]
+        local alive = false
+        pcall(function() alive = conn.Connected end)
+        if alive then
+            write += 1
+            conns[write] = conn
+        end
+    end
+    for i = write + 1, n do conns[i] = nil end
+    return n - write
+end
+task.spawn(function()
+    while Runtime.Running do
+        task.wait(20)
+        pruneConnections()
+    end
+end)
+
 function getPackage(entry)
     return {Category = entry.Category, Type = entry.Type, Amount = entry.Amount}
 end
@@ -7968,6 +8000,170 @@ function MaterialSystem.Deficits(entry, stats)
     return deficits, requirements
 end
 
+-- =============================================================================
+-- ITEM CATALOG (tab "Items"): liệt kê TẤT CẢ item trong game + mats owned/req.
+-- Nguồn: workspace.Shops (ground truth) gộp curated milestones + Gear mats.
+-- Mats req: Requirements (live ItemPackages.GetCost -> entry.Materials curated).
+-- Cloud phone hay chặn GetCost -> curated Gear là fallback tĩnh cho item lớn.
+-- =============================================================================
+local ITEM_CATEGORY_ORDER = {
+    "Collector", "Mask", "Guard", "Belt", "Boots", "Backpack",
+    "Sprinkler", "Planter", "Bee", "Other",
+}
+
+-- Group mịn để UI nhóm (không dùng cho GetCost).
+function MaterialSystem.InferGroup(name)
+    local n = string.lower(tostring(name or ""))
+    if n:find("planter", 1, true) then return "Planter" end
+    if n:find("sprinkler", 1, true) or n:find("soaker", 1, true) or n:find("gusher", 1, true) then return "Sprinkler" end
+    if n:find("guard", 1, true) then return "Guard" end
+    if n:find("mask", 1, true) or n:find("helmet", 1, true) or n:find("hat", 1, true) then return "Mask" end
+    if n:find("belt", 1, true) then return "Belt" end
+    if n:find("boots", 1, true) or n:find("clogs", 1, true) or n:find("shoes", 1, true) then return "Boots" end
+    if n:find("backpack", 1, true) or n:find("canister", 1, true) or n:find("port-o-hive", 1, true)
+        or n:find("jug", 1, true) or n:find("pocket", 1, true) or n:find("bag", 1, true) then return "Backpack" end
+    if n:find("wand", 1, true) or n:find("dipper", 1, true) or n:find("scooper", 1, true)
+        or n:find("rake", 1, true) or n:find("clippers", 1, true) or n:find("vacuum", 1, true)
+        or n:find("pulsar", 1, true) or n:find("scissors", 1, true) or n:find("popper", 1, true) then return "Collector" end
+    if n:find("egg", 1, true) or n:find("bee", 1, true) or n:find("jelly", 1, true) or n:find("treat", 1, true) then return "Bee" end
+    return "Other"
+end
+
+-- Category thô đúng namespace ItemPackages (GetCost cần "Accessory"/"Collector"...).
+function MaterialSystem.PackageCategory(name)
+    local n = string.lower(tostring(name or ""))
+    if n:find("sprinkler", 1, true) or n:find("soaker", 1, true) or n:find("gusher", 1, true) then return "Sprinkler" end
+    if n:find("planter", 1, true) then return "Planter" end
+    if n:find("wand", 1, true) or n:find("dipper", 1, true) or n:find("scooper", 1, true)
+        or n:find("rake", 1, true) or n:find("clippers", 1, true) or n:find("vacuum", 1, true)
+        or n:find("pulsar", 1, true) or n:find("scissors", 1, true) or n:find("popper", 1, true) then return "Collector" end
+    return "Accessory"
+end
+
+-- PURE: gộp shopItems + curated + gearMats, dedup theo Type, gắn badge owned, sort.
+function MaterialSystem.BuildItemCatalog(shopItems, curated, completed, gearMats)
+    local byType = {}
+    local function ensure(typeName, shop, item)
+        typeName = tostring(typeName or item or "")
+        if typeName == "" then return nil end
+        local entry = byType[typeName]
+        if not entry then
+            entry = {
+                Type = typeName, Item = tostring(item or typeName), Shop = shop,
+                Group = MaterialSystem.InferGroup(typeName),
+                Category = MaterialSystem.PackageCategory(typeName),
+            }
+            byType[typeName] = entry
+        end
+        if shop and not entry.Shop then entry.Shop = shop end
+        return entry
+    end
+    for _, c in ipairs(curated or {}) do
+        local entry = ensure(c.Type or c.Item, c.Shop, c.Item)
+        if entry then
+            entry.HoneyCost = c.HoneyCost or entry.HoneyCost
+            if c.Category then entry.Category = c.Category end
+            if c.Materials then entry.Materials = c.Materials end
+            entry.InProgression = true
+        end
+    end
+    for typeName, mats in pairs(gearMats or {}) do
+        local entry = ensure(typeName, nil, typeName)
+        if entry and not entry.Materials then entry.Materials = mats end
+    end
+    for _, s in ipairs(shopItems or {}) do
+        ensure(s.Item, s.Shop, s.Item)
+    end
+    local list = {}
+    for _, entry in pairs(byType) do
+        entry.Completed = (completed and completed[entry.Type]) and true or false
+        table.insert(list, entry)
+    end
+    local rank = {}
+    for i, c in ipairs(ITEM_CATEGORY_ORDER) do rank[c] = i end
+    table.sort(list, function(a, b)
+        local ra, rb = rank[a.Group] or 99, rank[b.Group] or 99
+        if ra ~= rb then return ra < rb end
+        local ca, cb = tonumber(a.HoneyCost) or 0, tonumber(b.HoneyCost) or 0
+        if ca ~= cb then return ca < cb end
+        return tostring(a.Item) < tostring(b.Item)
+    end)
+    return list
+end
+
+-- Glue: enumerate workspace.Shops.<Shop>.Items.<Item> (tất cả item thật).
+function MaterialSystem.CollectShopItems()
+    local result = {}
+    local shops = workspace:FindFirstChild("Shops")
+    if not shops then return result end
+    for _, shop in ipairs(shops:GetChildren()) do
+        local items = shop:FindFirstChild("Items", true)
+        if items then
+            for _, item in ipairs(items:GetChildren()) do
+                table.insert(result, {Shop = shop.Name, Item = item.Name})
+            end
+        end
+    end
+    return result
+end
+
+function MaterialSystem.ItemCatalog(force)
+    if not force and Runtime.ItemCatalogCache
+        and os.clock() - (Runtime.ItemCatalogAt or 0) < 30 then
+        return Runtime.ItemCatalogCache
+    end
+    local curated = {}
+    for _, milestone in ipairs(Config.ProgressionMilestones or {}) do
+        for _, entry in ipairs(milestone.Items or {}) do table.insert(curated, entry) end
+    end
+    for _, entry in ipairs(Config.SprinklerSequence or {}) do table.insert(curated, entry) end
+    local shopItems = MaterialSystem.CollectShopItems()
+    local list = MaterialSystem.BuildItemCatalog(shopItems, curated, Runtime.CompletedGear, MaterialSystem.Gear)
+    Runtime.ItemCatalogCache = list
+    Runtime.ItemCatalogAt = os.clock()
+    return list
+end
+
+-- Detail 1 item: mats owned/required/missing + nguồn kiếm. HasMatData=false khi
+-- không đọc được req (GetCost blocked + không curated) -> UI báo "chưa có data".
+function MaterialSystem.ItemDetail(entry, stats)
+    if type(entry) ~= "table" then return nil end
+    stats = stats or MaterialSystem.Stats(false)
+    local requirements = MaterialSystem.Requirements(entry, stats)
+    local rows, hasData = {}, false
+    for _, material in ipairs(MaterialSystem.OrderedKeys(requirements)) do
+        local required = tonumber(requirements[material]) or 0
+        if required > 0 then
+            hasData = true
+            local canonical = MaterialSystem.Canonical(material)
+            local owned = MaterialSystem.Amount(canonical, stats)
+            local source
+            if MaterialSystem.PuffMaterials and MaterialSystem.PuffMaterials[canonical] then
+                source = "Puffshroom"
+            elseif MaterialSystem.Recipe(canonical) then
+                source = "Blender"
+            else
+                local field = MaterialSystem.Field(canonical)
+                source = field and field.Name or "Farm"
+            end
+            table.insert(rows, {
+                Material = canonical,
+                Display = MaterialSystem.Display(canonical),
+                Owned = owned, Required = required,
+                Missing = math.max(0, required - owned),
+                Source = source,
+            })
+        end
+    end
+    return {
+        Item = entry.Item or entry.Type, Type = entry.Type, Shop = entry.Shop,
+        Group = entry.Group or MaterialSystem.InferGroup(entry.Type or entry.Item),
+        HoneyCost = entry.HoneyCost,
+        Completed = (Runtime.CompletedGear and Runtime.CompletedGear[entry.Type]) and true or false,
+        Rows = rows, HasMatData = hasData,
+    }
+end
+
 function MaterialSystem.Resolve(material, required, reservations, stats, visiting)
     material = MaterialSystem.Canonical(material)
     required = math.max(0, tonumber(required) or 0)
@@ -10946,9 +11142,9 @@ local function applyLowGraphics(enabled)
                         local folder = workspace:FindFirstChild("Collectibles")
                         tokens = folder and #folder:GetChildren() or 0
                     end)
-                    warn(string.format("[BSS Kaitun] fps %d LOW | %s | %s | tokens=%d | %s - throttling scanners + re-hide",
+                    warn(string.format("[BSS Kaitun] fps %d LOW | %s | %s | tokens=%d | conns=%d | %s - throttling scanners + re-hide",
                         math.floor(fps + 0.5), tostring(Runtime.State),
-                        tostring(Runtime.Detail), tokens, tostring(Runtime.CurrentField)))
+                        tostring(Runtime.Detail), tokens, #Runtime.Connections, tostring(Runtime.CurrentField)))
                 elseif Config.FixLagAdaptive and goodWindows >= 2 and Runtime.FpsLow then
                     Runtime.FpsLow = false
                     warn(string.format("[BSS Kaitun] fps %d recovered - full speed",
@@ -11514,6 +11710,7 @@ local TAB_DEFS = {
     {Name = "Hive", Icon = "🍯"},
     {Name = "Lag", Icon = "⚡"},
     {Name = "Planter", Icon = "🪴"},
+    {Name = "Items", Icon = "🎒"},
 }
 
 do
@@ -11529,12 +11726,12 @@ do
         local button = corner(create("TextButton", {
             Name = def.Name,
             LayoutOrder = index,
-            Size = UDim2.new(0, 72, 1, 0),
+            Size = UDim2.new(0, 64, 1, 0),
             BackgroundColor3 = T.PanelLight,
             Font = Enum.Font.GothamMedium,
             Text = def.Icon .. " " .. def.Name,
             TextColor3 = T.TextDim,
-            TextSize = 11,
+            TextSize = 10,
         }, tabBar), R_CTRL)
         local underline = corner(create("Frame", {
             Name = "Underline",
@@ -13342,6 +13539,392 @@ function UI.GetGameImage(itemName)
     return resolveGameImage(itemName)
 end
 
+-- =============================================================================
+-- ITEMS TAB: master-detail browser. List tất cả item -> bấm vào -> mats owned/req.
+-- Perf: chỉ build/refresh khi tab Items visible; row pool tái sử dụng (không
+-- Instance.new mỗi lần refresh); detail lazy (chỉ build khi bấm); 1 icon/detail.
+-- =============================================================================
+local itemsSource = nil
+local itemsCatalog = {}
+local itemsRows = {}
+local itemsMatRows = {}
+local itemsListFrame, itemsRowsHolder, itemsDetailFrame
+local itemsSearch, itemsCount
+local itemsMatsHolder, itemsNoData
+local itemsHeaderIcon, itemsHeaderTitle, itemsHeaderSub
+local itemsCurrentEntry, itemsCurrentType = nil, nil
+local itemsOpen, itemsClose, itemsRefresh, itemsApplyFilter
+
+local function itemsMakeRow(parent, order)
+    local button = corner(create("TextButton", {
+        Name = "ItemRow",
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 38),
+        BackgroundColor3 = T.Panel,
+        AutoButtonColor = false,
+        Text = "",
+    }, parent), R_CTRL)
+    strokeOf(button, T.Stroke, 1, 0.7)
+    local name = create("TextLabel", {
+        Size = UDim2.new(1, -132, 1, 0),
+        Position = UDim2.fromOffset(10, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        Text = "",
+        TextColor3 = T.Text,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, button)
+    local meta = create("TextLabel", {
+        Size = UDim2.new(0, 120, 1, 0),
+        Position = UDim2.new(1, -126, 0, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = "",
+        TextColor3 = T.TextDim,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, button)
+    local row = {Root = button, Name = name, Meta = meta, Entry = nil}
+    hoverify(button, "Panel", "PanelHover")
+    button.MouseButton1Click:Connect(function()
+        if row.Entry then itemsOpen(row.Entry) end
+    end)
+    return row
+end
+
+local function itemsMakeMatRow(parent, order)
+    local frame = corner(create("Frame", {
+        Name = "MatRow",
+        LayoutOrder = order,
+        Size = UDim2.new(1, 0, 0, 34),
+        BackgroundColor3 = T.Panel,
+    }, parent), R_CTRL)
+    strokeOf(frame, T.Stroke, 1, 0.7)
+    local name = create("TextLabel", {
+        Size = UDim2.new(1, -122, 0, 16),
+        Position = UDim2.fromOffset(10, 3),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        Text = "",
+        TextColor3 = T.Text,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, frame)
+    local source = create("TextLabel", {
+        Size = UDim2.new(1, -122, 0, 12),
+        Position = UDim2.fromOffset(10, 19),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = "",
+        TextColor3 = T.TextDim,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, frame)
+    local count = create("TextLabel", {
+        Size = UDim2.new(0, 110, 1, 0),
+        Position = UDim2.new(1, -116, 0, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "",
+        TextColor3 = T.Text,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, frame)
+    return {Root = frame, Name = name, Source = source, Count = count}
+end
+
+-- Grow pool tới n, ẩn phần thừa. Không phá row cũ -> không Instance.new lại.
+local function itemsEnsureRows(pool, make, parent, n)
+    for i = #pool + 1, n do pool[i] = make(parent, i) end
+    for i = 1, #pool do pool[i].Root.Visible = (i <= n) end
+end
+
+itemsApplyFilter = function()
+    if not itemsRowsHolder then return end
+    local query = string.lower(tostring(itemsSearch and itemsSearch.Text or ""))
+    query = query:gsub("^%s+", ""):gsub("%s+$", "")
+    local filtered = {}
+    for _, entry in ipairs(itemsCatalog) do
+        if query == "" then
+            table.insert(filtered, entry)
+        else
+            local hay = string.lower(tostring(entry.Item or "") .. " " .. tostring(entry.Type or "")
+                .. " " .. tostring(entry.Group or "") .. " " .. tostring(entry.Shop or ""))
+            if hay:find(query, 1, true) then table.insert(filtered, entry) end
+        end
+    end
+    itemsEnsureRows(itemsRows, itemsMakeRow, itemsRowsHolder, #filtered)
+    for i, entry in ipairs(filtered) do
+        local row = itemsRows[i]
+        row.Entry = entry
+        local label = tostring(entry.Item or entry.Type or "?")
+        if entry.Completed then label = "✓ " .. label end
+        setText(row.Name, label)
+        row.Name.TextColor3 = entry.Completed and T.Good or T.Text
+        local meta
+        if tonumber(entry.HoneyCost) then
+            meta = formatCount(entry.HoneyCost) .. " honey"
+        else
+            meta = tostring(entry.Group or "")
+        end
+        setText(row.Meta, meta)
+    end
+    setText(itemsCount, tostring(#filtered) .. " items")
+end
+
+itemsOpen = function(entry)
+    if not itemsSource or type(itemsSource.GetDetail) ~= "function" then return end
+    local ok, detail = pcall(itemsSource.GetDetail, entry)
+    if not ok or type(detail) ~= "table" then return end
+    itemsCurrentEntry = entry
+    itemsListFrame.Visible = false
+    itemsDetailFrame.Visible = true
+    setText(itemsHeaderTitle, tostring(detail.Item or entry.Item or "?"))
+    local subParts = {}
+    if detail.Group then table.insert(subParts, tostring(detail.Group)) end
+    if detail.Shop then table.insert(subParts, tostring(detail.Shop)) end
+    if tonumber(detail.HoneyCost) then table.insert(subParts, formatCount(detail.HoneyCost) .. " honey") end
+    setText(itemsHeaderSub, table.concat(subParts, "  •  "))
+    -- Icon chỉ resolve khi đổi item (resolveGameImage quét EggTypes, không cache).
+    local itemType = detail.Type or detail.Item
+    if itemType ~= itemsCurrentType then
+        itemsCurrentType = itemType
+        pcall(function()
+            itemsHeaderIcon.Image = UI.GetGameImage(detail.Item or detail.Type or "") or ""
+        end)
+    end
+    local rows = detail.Rows or {}
+    local hasData = detail.HasMatData and #rows > 0
+    itemsEnsureRows(itemsMatRows, itemsMakeMatRow, itemsMatsHolder, hasData and #rows or 0)
+    if hasData then
+        for i, mat in ipairs(rows) do
+            local row = itemsMatRows[i]
+            setText(row.Name, tostring(mat.Display or mat.Material or "?"))
+            setText(row.Source, "nguồn: " .. tostring(mat.Source or "Farm"))
+            local owned = tonumber(mat.Owned) or 0
+            local required = tonumber(mat.Required) or 0
+            setText(row.Count, formatCount(owned) .. " / " .. formatCount(required))
+            row.Count.TextColor3 = (owned >= required) and T.Good or T.Bad
+        end
+    end
+    itemsMatsHolder.Visible = hasData
+    itemsNoData.Visible = not hasData
+end
+
+itemsClose = function()
+    if not itemsDetailFrame then return end
+    itemsDetailFrame.Visible = false
+    itemsListFrame.Visible = true
+end
+
+itemsRefresh = function(force)
+    local page = UI._pages and UI._pages.Items
+    if not page or not page.Visible then return end
+    if not itemsSource or type(itemsSource.GetCatalog) ~= "function" then return end
+    -- Đang xem detail 1 item -> chỉ refresh owned/req của item đó (rẻ hơn rebuild list).
+    if itemsDetailFrame and itemsDetailFrame.Visible then
+        if itemsCurrentEntry then itemsOpen(itemsCurrentEntry) end
+        return
+    end
+    local ok, list = pcall(itemsSource.GetCatalog, force)
+    if not ok or type(list) ~= "table" then return end
+    itemsCatalog = list
+    itemsApplyFilter()
+end
+
+function UI.BindItemSource(source)
+    if type(source) ~= "table" then return end
+    itemsSource = source
+end
+
+function UI.RefreshItems(force)
+    itemsRefresh(force and true or false)
+end
+
+do
+    local page = UI._pages.Items
+    if page then
+        itemsListFrame = create("Frame", {
+            Name = "ItemsList",
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+        }, page)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, itemsListFrame)
+
+        local searchRow = create("Frame", {
+            Name = "SearchRow",
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 34),
+            BackgroundTransparency = 1,
+        }, itemsListFrame)
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, searchRow)
+        itemsSearch = corner(create("TextBox", {
+            Name = "Search",
+            LayoutOrder = 1,
+            Size = UDim2.new(1, -90, 1, 0),
+            BackgroundColor3 = T.PanelLight,
+            Font = Enum.Font.Gotham,
+            PlaceholderText = "Search items...",
+            PlaceholderColor3 = T.TextDim,
+            Text = "",
+            TextColor3 = T.Text,
+            TextSize = 13,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ClearTextOnFocus = false,
+        }, searchRow), R_CTRL)
+        create("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)}, itemsSearch)
+        itemsCount = create("TextLabel", {
+            Name = "Count",
+            LayoutOrder = 2,
+            Size = UDim2.new(0, 84, 1, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = "0 items",
+            TextColor3 = T.TextDim,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Right,
+        }, searchRow)
+
+        itemsRowsHolder = create("Frame", {
+            Name = "Rows",
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+        }, itemsListFrame)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 4),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, itemsRowsHolder)
+
+        itemsDetailFrame = create("Frame", {
+            Name = "ItemsDetail",
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Visible = false,
+        }, page)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, itemsDetailFrame)
+
+        local backButton = corner(create("TextButton", {
+            Name = "Back",
+            LayoutOrder = 1,
+            Size = UDim2.new(0, 92, 0, 30),
+            BackgroundColor3 = T.PanelLight,
+            Font = Enum.Font.GothamMedium,
+            Text = "← Items",
+            TextColor3 = T.Text,
+            TextSize = 12,
+            AutoButtonColor = false,
+        }, itemsDetailFrame), R_CTRL)
+        hoverify(backButton, "PanelLight", "PanelHover")
+        backButton.MouseButton1Click:Connect(function() itemsClose() end)
+
+        local headerCard = corner(create("Frame", {
+            Name = "Header",
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 64),
+            BackgroundColor3 = T.Panel,
+        }, itemsDetailFrame), R_CARD)
+        strokeOf(headerCard, T.AccentDim, 1, 0.6)
+        itemsHeaderIcon = create("ImageLabel", {
+            Name = "Icon",
+            Size = UDim2.fromOffset(48, 48),
+            Position = UDim2.fromOffset(8, 8),
+            BackgroundTransparency = 1,
+            ScaleType = Enum.ScaleType.Fit,
+            Image = "",
+        }, headerCard)
+        itemsHeaderTitle = create("TextLabel", {
+            Name = "Title",
+            Size = UDim2.new(1, -72, 0, 22),
+            Position = UDim2.fromOffset(64, 8),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold,
+            Text = "",
+            TextColor3 = T.Text,
+            TextSize = 15,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, headerCard)
+        itemsHeaderSub = create("TextLabel", {
+            Name = "Sub",
+            Size = UDim2.new(1, -72, 0, 18),
+            Position = UDim2.fromOffset(64, 32),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = "",
+            TextColor3 = T.TextDim,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, headerCard)
+
+        itemsMatsHolder = create("Frame", {
+            Name = "Mats",
+            LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+        }, itemsDetailFrame)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 4),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, itemsMatsHolder)
+
+        itemsNoData = create("TextLabel", {
+            Name = "NoData",
+            LayoutOrder = 4,
+            Size = UDim2.new(1, 0, 0, 44),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = "Chưa có data mats cho item này (GetCost bị chặn trên cloud phone và item chưa có trong curated list).",
+            TextColor3 = T.TextDim,
+            TextSize = 12,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Visible = false,
+        }, itemsDetailFrame)
+
+        local searchToken = 0
+        itemsSearch:GetPropertyChangedSignal("Text"):Connect(function()
+            searchToken += 1
+            local token = searchToken
+            task.delay(0.15, function()
+                if token == searchToken and page.Visible and itemsListFrame.Visible then
+                    itemsApplyFilter()
+                end
+            end)
+        end)
+
+        local itemsTab = UI._tabs.Items
+        if itemsTab then
+            itemsTab.MouseButton1Click:Connect(function()
+                itemsClose()
+                UI.RefreshItems(true)
+            end)
+        end
+    end
+end
+
 function UI.DefineControls(definitions)
     if type(definitions) ~= "table" then return end
     -- Đóng popup dropdown đang mở (parent = rootGui, không nằm trong row).
@@ -13638,30 +14221,52 @@ for _, def in ipairs(controlDefs) do
     end
 end
 
+-- Items tab: bridge catalog/detail từ MaterialSystem (live GetCost -> curated Gear).
+pcall(function()
+    UI.BindItemSource{
+        GetCatalog = MaterialSystem.ItemCatalog,
+        GetDetail = MaterialSystem.ItemDetail,
+    }
+end)
+-- Refresh owned/req định kỳ CHỈ khi tab Items mở + cửa sổ hiện (cloud phone đỡ tốn).
+task.spawn(function()
+    while Runtime.Running do
+        local itemsPage = UI._pages and UI._pages.Items
+        if UI.IsVisible() and itemsPage and itemsPage.Visible then
+            pcall(function() UI.RefreshItems(false) end)
+        end
+        task.wait(5)
+    end
+end)
+
 -- Live status/stats/gear/planters feed (the Hive tab self-feeds via UI.AutoHive).
 task.spawn(function()
     while Runtime.Running do
-        pcall(function()
-            UI.SetStats{
-                HoneyPerHour = Runtime.HoneyPerHour(),
-                Uptime = os.clock() - (Runtime.StartedAt or os.clock()),
-                Bees = beeCount(),
-                Honey = liveCoreValue("Honey") or 0,
-                Capacity = liveCoreValue("Capacity") or 0,
-            }
-            UI.SetGear(Runtime.GearStatusText())
-            local planters = {}
-            for _, data in ipairs(MaterialSystem.PlanterData()) do
-                local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
-                local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
-                table.insert(planters, {
-                    Name = MaterialSystem.PlanterName(data),
-                    Field = field and field.Name or "",
-                    Percent = MaterialSystem.PlanterProgress(data) or 0,
-                })
-            end
-            UI.SetPlanters(planters)
-        end)
+        -- PERF: chỉ feed khi cửa sổ đang hiện. Ẩn (collapse về pill) hoặc GUI
+        -- đã destroy -> bỏ qua, khỏi tốn PlanterData/debug.getupvalues + sparkline.
+        if UI.IsVisible() then
+            pcall(function()
+                UI.SetStats{
+                    HoneyPerHour = Runtime.HoneyPerHour(),
+                    Uptime = os.clock() - (Runtime.StartedAt or os.clock()),
+                    Bees = beeCount(),
+                    Honey = liveCoreValue("Honey") or 0,
+                    Capacity = liveCoreValue("Capacity") or 0,
+                }
+                UI.SetGear(Runtime.GearStatusText())
+                local planters = {}
+                for _, data in ipairs(MaterialSystem.PlanterData()) do
+                    local position = typeof(data.Pos) == "Vector3" and data.Pos or objectPosition(data.PotModel)
+                    local field = position and flowerFieldAtPosition(position + Vector3.new(0, 4, 0), 8) or nil
+                    table.insert(planters, {
+                        Name = MaterialSystem.PlanterName(data),
+                        Field = field and field.Name or "",
+                        Percent = MaterialSystem.PlanterProgress(data) or 0,
+                    })
+                end
+                UI.SetPlanters(planters)
+            end)
+        end
         task.wait(2)
     end
 end)
