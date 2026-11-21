@@ -11414,7 +11414,10 @@ end
 -- =============================================================================
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local function normalizeImageName(text)
-    return string.lower(tostring(text or "")):gsub("[^%w]", "")
+    -- Ngoặc đơn ép gsub trả MỘT giá trị (string + count). Không có nó,
+    -- table.insert(words, normalizeImageName(w)) nhận 3 args -> crash
+    -- "number expected, got string", bị pcall nuốt -> mọi icon game mất tăm.
+    return (string.lower(tostring(text or "")):gsub("[^%w]", ""))
 end
 
 local function textureOf(instance)
