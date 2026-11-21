@@ -512,7 +512,10 @@ local DEFAULT_CONFIG = {
     FixLagPlasticMaterials = true,
     FixLagDisableLights = true,
     FixLagStopBeeAnimations = true,
-    FixLagScanBatch = 350,
+    -- Boot sweep chunk: so node optimize moi frame luc quet workspace. 200
+    -- (thay vi 350): cloud phone yeu, chunk cang nho frame cang nhe -> het
+    -- dung hinh luc anti-lag load lan dau.
+    FixLagScanBatch = 200,
     -- Anti-lag queue: DescendantAdded bursts (sprinkler token floods) are
     -- drained at most this many objects per tick instead of optimizing
     -- synchronously inside the event, which spiked the frame that spawned
@@ -10925,7 +10928,10 @@ local function applyLowGraphics(enabled)
     end
 
     local function fastHideTree(root)
-        fastWalk(root, fastHideNode, 1500)
+        -- 250 (thay vi 1500): 41k flower node ghi Transparency theo chunk.
+        -- Chunk 1500 = ca nghin property write/frame -> dong bang luc boot.
+        -- 250/frame quet dan trong vai giay thay vi freeze mot frame.
+        fastWalk(root, fastHideNode, 250)
     end
 
     -- RE-HIDE MAINTENANCE (the actual sink/regrow fix): dug flower tiles
@@ -10989,9 +10995,16 @@ local function applyLowGraphics(enabled)
         priorityHidden[folder] = true
         fastHideTree(folder)
     end
+    -- BOOT DEFER: cho client load/render frame dau tien truoc khi quet nang.
+    -- Neu quet ngay lap tuc luc spawn, hang nghin property write don vao dung
+    -- frame khoi tao -> dung hinh. Nghi mot nhip roi quet dan tung chunk nho.
+    task.wait()
     local priorityFolders = resolvePriorityFolders()
-    for _, folder in ipairs(priorityFolders) do hidePriorityFolder(folder) end
-    local scanBatch = math.max(50, tonumber(Config.FixLagScanBatch) or 350)
+    for _, folder in ipairs(priorityFolders) do
+        hidePriorityFolder(folder)
+        task.wait()
+    end
+    local scanBatch = math.max(50, tonumber(Config.FixLagScanBatch) or 200)
     for index, object in ipairs(workspace:GetDescendants()) do
         -- Priority-hidden nodes (41k flower descendants...) skip the full
         -- optimizeObject - one hash lookup instead of the whole cascade.
@@ -11000,7 +11013,12 @@ local function applyLowGraphics(enabled)
         end
         if index % scanBatch == 0 then task.wait() end
     end
-    for _, object in ipairs(Lighting:GetDescendants()) do pcall(optimizeObject, object) end
+    -- Lighting descendants: truoc day quet mot mach khong yield -> spike
+    -- frame. Chia chunk nhu workspace sweep de frame nhe.
+    for index, object in ipairs(Lighting:GetDescendants()) do
+        pcall(optimizeObject, object)
+        if index % scanBatch == 0 then task.wait() end
+    end
 
     -- Batched DescendantAdded queue: a sprinkler token flood used to run
     -- optimizeObject synchronously inside every event (hundreds of
@@ -11442,6 +11460,55 @@ local function resolveGameImage(itemName)
         end
     end
     return textureOf(best)
+end
+
+-- =============================================================================
+-- Icon item phủ MỌI category (cho tab Items + detail):
+--   1. EggTypes "<Name>Icon"  -> egg/planter/material/vial/wax/drive/treat/ticket...
+--   2. Buffs "<Item Name> Icon" -> mask/guard/belt/boots + drive/extract...
+--   3. Accessories "<Item Name>" -> vài mask/hat có Decal.
+-- Collector/backpack/sprinkler là model 3D màu, KHÔNG có icon Decal trong game
+-- -> trả nil, UI hiện placeholder chữ cái đầu (không đoán bừa asset id).
+-- Index dựng MỘT lần (lazy) rồi tra O(1); cache kết quả theo tên. Mọi bước
+-- pcall-guard để folder thiếu trên client lạ không crash.
+-- =============================================================================
+local itemImageCache = {}
+local buffIconIndex, accIconIndex
+local function buildIconIndex(folder)
+    local index = {}
+    if folder then
+        for _, child in ipairs(folder:GetChildren()) do
+            local ok, tex = pcall(textureOf, child)
+            if ok and tex then index[normalizeImageName(child.Name)] = tex end
+        end
+    end
+    return index
+end
+local function resolveItemImage(itemName)
+    if type(itemName) ~= "string" or itemName == "" then return nil end
+    local cached = itemImageCache[itemName]
+    if cached ~= nil then return cached or nil end
+    local texture = resolveGameImage(itemName)
+    -- Egg: EggTypes đặt tên "BasicIcon"/"SilverIcon" (không có chữ Egg) nên
+    -- "Basic Egg" không khớp full -> thử bỏ đuôi "egg" ("Basic" -> BasicIcon).
+    if not texture then
+        local bare = itemName:gsub("%s*[Ee]gg%s*$", "")
+        if bare ~= itemName and bare ~= "" then texture = resolveGameImage(bare) end
+    end
+    if not texture then
+        if not buffIconIndex then
+            buffIconIndex = buildIconIndex(ReplicatedStorage:FindFirstChild("Buffs"))
+        end
+        texture = buffIconIndex[normalizeImageName(itemName) .. "icon"]
+    end
+    if not texture then
+        if not accIconIndex then
+            accIconIndex = buildIconIndex(ReplicatedStorage:FindFirstChild("Accessories"))
+        end
+        texture = accIconIndex[normalizeImageName(itemName)]
+    end
+    itemImageCache[itemName] = texture or false
+    return texture
 end
 
 -- Texture nền honeycomb (nếu game có sẵn ảnh pattern) - tiled, rất mờ, làm
@@ -13557,6 +13624,12 @@ function UI.GetGameImage(itemName)
     return resolveGameImage(itemName)
 end
 
+-- Icon phủ mọi category (EggTypes + Buffs + Accessories); nil nếu game không
+-- có icon (collector/backpack/sprinkler) -> UI tự hiện placeholder.
+function UI.GetItemImage(itemName)
+    return resolveItemImage(itemName)
+end
+
 -- =============================================================================
 -- ITEMS TAB: master-detail browser. List tất cả item -> bấm vào -> mats owned/req.
 -- Perf: chỉ build/refresh khi tab Items visible; row pool tái sử dụng (không
@@ -13569,7 +13642,7 @@ local itemsMatRows = {}
 local itemsListFrame, itemsRowsHolder, itemsDetailFrame
 local itemsSearch, itemsCount
 local itemsMatsHolder, itemsNoData
-local itemsHeaderIcon, itemsHeaderTitle, itemsHeaderSub
+local itemsHeaderIcon, itemsHeaderTitle, itemsHeaderSub, itemsHeaderInitial
 local itemsCurrentEntry, itemsCurrentType = nil, nil
 local itemsOpen, itemsClose, itemsRefresh, itemsApplyFilter
 
@@ -13577,15 +13650,39 @@ local function itemsMakeRow(parent, order)
     local button = corner(create("TextButton", {
         Name = "ItemRow",
         LayoutOrder = order,
-        Size = UDim2.new(1, 0, 0, 38),
+        Size = UDim2.new(1, 0, 0, 42),
         BackgroundColor3 = T.Panel,
         AutoButtonColor = false,
         Text = "",
     }, parent), R_CTRL)
     strokeOf(button, T.Stroke, 1, 0.7)
+    -- Icon tile: ảnh game nếu có, không thì chữ cái đầu trên nền màu category.
+    local iconTile = corner(create("Frame", {
+        Name = "IconTile",
+        Size = UDim2.fromOffset(32, 32),
+        Position = UDim2.new(0, 6, 0.5, -16),
+        BackgroundColor3 = T.PanelLight,
+    }, button), R_CTRL)
+    local icon = create("ImageLabel", {
+        Name = "Icon",
+        Size = UDim2.new(1, -4, 1, -4),
+        Position = UDim2.fromOffset(2, 2),
+        BackgroundTransparency = 1,
+        ScaleType = Enum.ScaleType.Fit,
+        Image = "",
+    }, iconTile)
+    local initial = create("TextLabel", {
+        Name = "Initial",
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "?",
+        TextColor3 = T.AccentDim,
+        TextSize = 15,
+    }, iconTile)
     local name = create("TextLabel", {
-        Size = UDim2.new(1, -132, 1, 0),
-        Position = UDim2.fromOffset(10, 0),
+        Size = UDim2.new(1, -176, 1, 0),
+        Position = UDim2.fromOffset(46, 0),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamMedium,
         Text = "",
@@ -13605,12 +13702,30 @@ local function itemsMakeRow(parent, order)
         TextXAlignment = Enum.TextXAlignment.Right,
         TextTruncate = Enum.TextTruncate.AtEnd,
     }, button)
-    local row = {Root = button, Name = name, Meta = meta, Entry = nil}
+    local row = {Root = button, Name = name, Meta = meta, Icon = icon, Initial = initial, IconTile = iconTile, IconType = nil, Entry = nil}
     hoverify(button, "Panel", "PanelHover")
     button.MouseButton1Click:Connect(function()
         if row.Entry then itemsOpen(row.Entry) end
     end)
     return row
+end
+
+-- Gắn icon cho row: chỉ resolve/ghi khi đổi type (pool reuse + refresh rẻ).
+local function itemsSetRowIcon(row, entry)
+    local itemType = entry.Type or entry.Item
+    if row.IconType == itemType then return end
+    row.IconType = itemType
+    local tex = UI.GetItemImage(entry.Item or entry.Type or "")
+    if tex then
+        row.Icon.Image = tex
+        row.Icon.Visible = true
+        row.Initial.Visible = false
+    else
+        row.Icon.Image = ""
+        row.Icon.Visible = false
+        row.Initial.Visible = true
+        setText(row.Initial, string.upper(string.sub(tostring(entry.Item or entry.Type or "?"), 1, 1)))
+    end
 end
 
 local function itemsMakeMatRow(parent, order)
@@ -13691,6 +13806,7 @@ itemsApplyFilter = function()
             meta = tostring(entry.Group or "")
         end
         setText(row.Meta, meta)
+        itemsSetRowIcon(row, entry)
     end
     setText(itemsCount, tostring(#filtered) .. " items")
 end
@@ -13708,12 +13824,18 @@ itemsOpen = function(entry)
     if detail.Shop then table.insert(subParts, tostring(detail.Shop)) end
     if tonumber(detail.HoneyCost) then table.insert(subParts, formatCount(detail.HoneyCost) .. " honey") end
     setText(itemsHeaderSub, table.concat(subParts, "  •  "))
-    -- Icon chỉ resolve khi đổi item (resolveGameImage quét EggTypes, không cache).
+    -- Icon chỉ resolve khi đổi item (resolveItemImage có cache theo tên).
     local itemType = detail.Type or detail.Item
     if itemType ~= itemsCurrentType then
         itemsCurrentType = itemType
+        local tex = UI.GetItemImage(detail.Item or detail.Type or "")
         pcall(function()
-            itemsHeaderIcon.Image = UI.GetGameImage(detail.Item or detail.Type or "") or ""
+            itemsHeaderIcon.Image = tex or ""
+            itemsHeaderIcon.Visible = tex ~= nil
+            itemsHeaderInitial.Visible = tex == nil
+            if not tex then
+                setText(itemsHeaderInitial, string.upper(string.sub(tostring(detail.Item or detail.Type or "?"), 1, 1)))
+            end
         end)
     end
     local rows = detail.Rows or {}
@@ -13863,14 +13985,29 @@ do
             BackgroundColor3 = T.Panel,
         }, itemsDetailFrame), R_CARD)
         strokeOf(headerCard, T.AccentDim, 1, 0.6)
-        itemsHeaderIcon = create("ImageLabel", {
-            Name = "Icon",
+        local headerIconTile = corner(create("Frame", {
+            Name = "IconTile",
             Size = UDim2.fromOffset(48, 48),
             Position = UDim2.fromOffset(8, 8),
+            BackgroundColor3 = T.PanelLight,
+        }, headerCard), R_CTRL)
+        itemsHeaderIcon = create("ImageLabel", {
+            Name = "Icon",
+            Size = UDim2.new(1, -6, 1, -6),
+            Position = UDim2.fromOffset(3, 3),
             BackgroundTransparency = 1,
             ScaleType = Enum.ScaleType.Fit,
             Image = "",
-        }, headerCard)
+        }, headerIconTile)
+        itemsHeaderInitial = create("TextLabel", {
+            Name = "Initial",
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold,
+            Text = "?",
+            TextColor3 = T.AccentDim,
+            TextSize = 22,
+        }, headerIconTile)
         itemsHeaderTitle = create("TextLabel", {
             Name = "Title",
             Size = UDim2.new(1, -72, 0, 22),
