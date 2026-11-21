@@ -10630,12 +10630,13 @@ local function applyLowGraphics(enabled)
         -- game-bat/minh-tat o tan so signal = FPS DROP dung luc sprinkler
         -- chay. Sau vai lan thua thi NGUNG canh tranh (disconnect hook):
         -- vai emitter chay than thien hon hang nghin property war/frame.
+        -- Nguong 3 (thay vi 8): dau hang som hon, bot property war luc sprinkler.
         local reEnables = 0
         local conn
         conn = connect(object:GetPropertyChangedSignal("Enabled"), function()
             if Runtime.Running and Config.LowGraphics and object.Parent and object.Enabled then
                 reEnables += 1
-                if reEnables > 8 then
+                if reEnables > 3 then
                     Runtime.LowGraphicsWatched[object] = nil
                     pcall(function() conn:Disconnect() end)
                     return
@@ -11018,8 +11019,13 @@ local function applyLowGraphics(enabled)
     task.spawn(function()
         local batch = math.max(25, tonumber(Config.FixLagQueueBatch) or 150)
         while Runtime.Running do
+            -- Adaptive: FPS thấp -> xử ÍT object/tick + nghỉ DÀI để nhường CPU
+            -- cho renderer. Trước đây queue quay 150/frame task.wait(0) bất kể
+            -- FPS -> anti-lag tranh CPU đúng lúc lag -> spiral xuống sâu hơn.
+            local low = Config.FixLagAdaptive and Runtime.FpsLow
+            local tickBatch = low and math.max(10, math.floor(batch / 5)) or batch
             local processed = 0
-            while optimizeHead <= optimizeTail and processed < batch do
+            while optimizeHead <= optimizeTail and processed < tickBatch do
                 local object = optimizeQueue[optimizeHead]
                 optimizeQueue[optimizeHead] = nil
                 optimizeHead += 1
@@ -11031,7 +11037,11 @@ local function applyLowGraphics(enabled)
             if optimizeHead > optimizeTail then
                 optimizeQueue, optimizeHead, optimizeTail = {}, 1, 0
             end
-            task.wait(processed > 0 and 0 or 0.1)
+            if processed > 0 then
+                task.wait(low and 0.05 or 0)
+            else
+                task.wait(0.1)
+            end
         end
     end)
 
@@ -11095,7 +11105,15 @@ local function applyLowGraphics(enabled)
             for _, folder in ipairs(priorityFolders) do
                 if folder.Parent then
                     hidePriorityFolder(folder)
-                    fastWalk(folder, fastRehideNode, 2000)
+                    -- GetDescendants MỘT lần (1 array) thay vì fastWalk gọi
+                    -- GetChildren MỖI node: Flowers ~41k node = 41k lần cấp
+                    -- phát table mỗi pass -> GC churn nặng trên cloud phone.
+                    -- Cùng hành vi hide, chỉ rẻ hơn nhiều khi duyệt.
+                    local descendants = folder:GetDescendants()
+                    for i, node in ipairs(descendants) do
+                        fastRehideNode(node)
+                        if i % 2000 == 0 then task.wait() end
+                    end
                 end
             end
         end
