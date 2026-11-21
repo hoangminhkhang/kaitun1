@@ -8528,6 +8528,15 @@ Runtime.FarmSprout = MaterialSystem.FarmSprout
 -- group: snapshot các đom đóm của đàn đang follow. Khi còn thành viên sống
 -- thì CHỈ chọn trong đàn (không nhảy sang đàn khác đậu ở field cũ); hết đàn
 -- thì ưu tiên field cũ rồi mới tới gần nhất toàn cục.
+-- Firefly chỉ xuất hiện BAN ĐÊM theo clock game (cùng ngưỡng 19h-5h với
+-- Night Memory Match). Gate mọi nhánh firefly theo đêm: ban ngày không quét
+-- NPCBees/Collectibles đuổi theo đàn không tồn tại, không tốn CPU vô ích.
+local function isNightTime()
+    local ok, clock = pcall(function() return Lighting.ClockTime end)
+    if not ok or type(clock) ~= "number" then return true end
+    return clock >= 19 or clock <= 5
+end
+
 function MaterialSystem.FindFirefly(preferField, group)
     local folder = workspace:FindFirstChild("NPCBees")
     local _, _, root = getCharacter(1)
@@ -8624,6 +8633,10 @@ end
 
 function MaterialSystem.FarmFirefly()
     if not Config.AutoFarmFireflies or Runtime.FireflyBusy or Runtime.MeteorPriorityActive then return false end
+    if not isNightTime() then
+        Runtime.FireflyPending = false
+        return false
+    end
     local currentField = standingField()
     local looseMoonCharm = currentField and MaterialSystem.FindMoonCharmToken(currentField, nil, nil) or nil
     if looseMoonCharm then
@@ -8655,7 +8668,7 @@ function MaterialSystem.FarmFirefly()
     local idleWindow = math.max(3, tonumber(Config.FireflyFarmBudget) or 18)
     local lastProgressAt = os.clock()
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
-        and os.clock() < hardDeadline do
+        and os.clock() < hardDeadline and isNightTime() do
         if Config.AutoConvert and pollenRatio() >= Config.ConvertPercent then
             Runtime.Digging = false
             convertPollen()
@@ -8788,7 +8801,7 @@ task.spawn(function()
             Runtime.SproutMarker = false
             Runtime.SproutField = ""
         end
-        if enabled and Config.AutoFarmFireflies and not Runtime.FireflyBusy then
+        if enabled and Config.AutoFarmFireflies and not Runtime.FireflyBusy and isNightTime() then
             local npcBees = workspace:FindFirstChild("NPCBees")
             local exists = npcBees and npcBees:FindFirstChild("Firefly")
             if exists then Runtime.LastFireflySeen = os.clock() end
@@ -9470,7 +9483,12 @@ function Runtime.FarmPuffshroom()
     local lastPosition = job.Position
     while Runtime.Running and Config.Enabled and not Runtime.MeteorPriorityActive
         and os.clock() < deadline do
+        local iterStart = os.clock()
         if Config.AutoFarmFireflies and Runtime.FireflyPending and not Runtime.FireflyBusy then break end
+        -- Sprout pending: farmStep sẽ return NGAY lập tức mỗi vòng -> vòng puff
+        -- quay 20Hz (tween chồng tween + setStatus liên tục) = lag đúng lúc
+        -- farm Honeysuckle. Nhường sprout cho scheduler như firefly.
+        if Config.AutoFarmSprouts and Runtime.SproutPending and not Runtime.SproutBusy then break end
         local puff = job.Model
         if not (puff.Parent ~= nil and puff:IsDescendantOf(workspace)) then
             -- Burst: trail to an equal-or-higher rarity puff (atlas behavior),
@@ -9491,7 +9509,9 @@ function Runtime.FarmPuffshroom()
             Runtime.Digging = true
         else
             local _, _, root = getCharacter(1)
-            if root and (root.Position - job.Position).Magnitude > 12 then
+            if root and (root.Position - job.Position).Magnitude > 12
+                and os.clock() >= (Runtime.NextPuffApproachAt or 0) then
+                Runtime.NextPuffApproachAt = os.clock() + 0.5
                 tweenTo(CFrame.new(job.Position + Vector3.new(0, 2, 0)), Config.TweenSpeed, "Puffshroom")
             end
             if job.Field then
@@ -9502,7 +9522,11 @@ function Runtime.FarmPuffshroom()
             end
         end
         sweepTokens(1, "PuffDrop")
-        task.wait(0.05)
+        -- Nhịp tối thiểu 0.25s/vòng: farmStep có thể return sớm (convert/sprout
+        -- pending) khiến vòng lặp quay 20Hz; nghỉ bù cho đủ nhịp để không đốt
+        -- CPU + không spam tween/status mỗi 0.05s.
+        local elapsed = os.clock() - iterStart
+        task.wait(elapsed < 0.2 and (0.25 - elapsed) or 0.05)
     end
     if lastPosition and not Runtime.MeteorPriorityActive then
         Runtime.SweepAreaLoot(lastPosition, 25, 10, "PuffDrop")
@@ -11489,6 +11513,25 @@ local function buildIconIndex(folder)
     end
     return index
 end
+-- Icon trưng bày trong shop (Dapper bundle...): vài item chỉ có ảnh ở chính
+-- model trưng bày workspace.Shops.<shop>.Items.<item>.
+local shopIconIndex
+local function buildShopIconIndex()
+    local index = {}
+    local shops = workspace:FindFirstChild("Shops")
+    if shops then
+        for _, shop in ipairs(shops:GetChildren()) do
+            local items = shop:FindFirstChild("Items", true)
+            if items then
+                for _, item in ipairs(items:GetChildren()) do
+                    local ok, tex = pcall(textureOf, item)
+                    if ok and tex then index[normalizeImageName(item.Name)] = tex end
+                end
+            end
+        end
+    end
+    return index
+end
 local function resolveItemImage(itemName)
     if type(itemName) ~= "string" or itemName == "" then return nil end
     local cached = itemImageCache[itemName]
@@ -11512,6 +11555,12 @@ local function resolveItemImage(itemName)
         end
         texture = accIconIndex[normalizeImageName(itemName)]
     end
+    if not texture then
+        if not shopIconIndex then
+            shopIconIndex = buildShopIconIndex()
+        end
+        texture = shopIconIndex[normalizeImageName(itemName)]
+    end
     -- Event bee: "Photon Bee" -> Thumbnails.Photon (bỏ đuôi "bee"). Chỉ áp dụng
     -- khi tên kết thúc bằng "bee" để không nhầm item khác.
     if not texture then
@@ -11524,8 +11573,69 @@ local function resolveItemImage(itemName)
             texture = beeThumbIndex[wanted] or beeThumbIndex[wanted:gsub("bee$", "")]
         end
     end
+    -- Bulk pack ("Treat x10", "RoyalJelly x100"...): dùng icon của bản lẻ.
+    if not texture then
+        local base = itemName:gsub("%s*[xX]%s*%d+$", "")
+        if base ~= itemName and base ~= "" then texture = resolveItemImage(base) end
+    end
     itemImageCache[itemName] = texture or false
     return texture
+end
+
+-- Tool collect/backpack/sprinkler: game KHÔNG có icon Decal cho chúng, nhưng
+-- model thật nằm trong ReplicatedStorage (CollectorModels / BackpackModels /
+-- Sprinklers.Models) -> UI render model thật bằng ViewportFrame làm "ảnh".
+-- Index dựng một lần (lazy), cache theo tên; khớp tên gốc rồi tới bỏ tiền tố
+-- ("Coconut Canister" -> "Canister", "Blue Port-O-Hive" -> "Port-O-Hive").
+local toolModelIndex
+local itemModelCache = {}
+local function buildToolModelIndex()
+    local index = {}
+    local sprinklers = ReplicatedStorage:FindFirstChild("Sprinklers")
+    local folders = {
+        ReplicatedStorage:FindFirstChild("CollectorModels"),
+        ReplicatedStorage:FindFirstChild("BackpackModels"),
+        sprinklers and sprinklers:FindFirstChild("Models"),
+    }
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, child in ipairs(folder:GetChildren()) do
+                index[normalizeImageName(child.Name)] = child
+            end
+        end
+    end
+    -- Shop display: item không có model trong RS (Parachute/Glider...) vẫn có
+    -- model trưng bày ở workspace.Shops.<shop>.Items -> preview fallback.
+    local shops = workspace:FindFirstChild("Shops")
+    if shops then
+        for _, shop in ipairs(shops:GetChildren()) do
+            local items = shop:FindFirstChild("Items", true)
+            if items then
+                for _, item in ipairs(items:GetChildren()) do
+                    local key = normalizeImageName(item.Name)
+                    if not index[key] then index[key] = item end
+                end
+            end
+        end
+    end
+    return index
+end
+local function resolveItemModel(itemName)
+    if type(itemName) ~= "string" or itemName == "" then return nil end
+    local cached = itemModelCache[itemName]
+    if cached ~= nil then return cached or nil end
+    if not toolModelIndex then toolModelIndex = buildToolModelIndex() end
+    local model = toolModelIndex[normalizeImageName(itemName)]
+    if not model then
+        local words = {}
+        for word in itemName:gmatch("%S+") do table.insert(words, word) end
+        for i = 2, #words do
+            model = toolModelIndex[normalizeImageName(table.concat(words, " ", i))]
+            if model then break end
+        end
+    end
+    itemModelCache[itemName] = model or false
+    return model
 end
 
 -- Texture nền honeycomb (nếu game có sẵn ảnh pattern) - tiled, rất mờ, làm
@@ -13647,6 +13757,11 @@ function UI.GetItemImage(itemName)
     return resolveItemImage(itemName)
 end
 
+-- Model thật trong game cho item không có icon Decal -> ViewportFrame preview.
+function UI.GetItemModel(itemName)
+    return resolveItemModel(itemName)
+end
+
 -- =============================================================================
 -- ITEMS TAB: master-detail browser. List tất cả item -> bấm vào -> mats owned/req.
 -- Perf: chỉ build/refresh khi tab Items visible; row pool tái sử dụng (không
@@ -13660,6 +13775,7 @@ local itemsListFrame, itemsRowsHolder, itemsDetailFrame
 local itemsSearch, itemsCount
 local itemsMatsHolder, itemsNoData
 local itemsHeaderIcon, itemsHeaderTitle, itemsHeaderSub, itemsHeaderInitial
+local itemsHeaderViewport, itemsHeaderViewportModel
 local itemsCurrentEntry, itemsCurrentType = nil, nil
 local itemsOpen, itemsClose, itemsRefresh, itemsApplyFilter
 
@@ -13727,22 +13843,110 @@ local function itemsMakeRow(parent, order)
     return row
 end
 
+-- ViewportFrame render MODEL THẬT của game cho item không có icon Decal
+-- (collector/backpack/sprinkler). Chỉ tạo khi cần; clone + camera fit lại
+-- mỗi lần đổi item, clone cũ destroy để không tích instance trong pool.
+local function itemsFitViewport(viewport, model)
+    local clone = model:Clone()
+    for _, descendant in ipairs(clone:GetDescendants()) do
+        if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+            descendant:Destroy()
+        end
+    end
+    -- Tool trong RS là Accessory (không phải PVInstance) -> bản thân nó không
+    -- có PivotTo/GetBoundingBox. Bọc clone vào Model để pivot/bbox chạy trên
+    -- toàn bộ geometry (Handle + Model con); Model mới có pivot = tâm bbox nên
+    -- PivotTo(gốc) đưa tool về đúng tâm camera.
+    local root = Instance.new("Model")
+    clone.Parent = root
+    root:PivotTo(CFrame.new(0, 0, 0))
+    local _, size = root:GetBoundingBox()
+    local span = math.max(size.X, size.Y, size.Z, 1)
+    root.Parent = viewport
+    local camera = viewport:FindFirstChildOfClass("Camera")
+    if not camera then camera = create("Camera", {}, viewport) end
+    camera.CFrame = CFrame.lookAt(Vector3.new(span * 0.9, span * 0.6, span * 1.2), Vector3.zero)
+    viewport.CurrentCamera = camera
+    return root
+end
+
+local function itemsSetRowViewport(row, model)
+    if not model then
+        if row.Viewport then row.Viewport.Visible = false end
+        if row.ViewportModel then
+            pcall(function() row.ViewportModel:Destroy() end)
+            row.ViewportModel = nil
+        end
+        return nil
+    end
+    if not row.Viewport then
+        row.Viewport = create("ViewportFrame", {
+            Name = "Preview",
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Ambient = Color3.fromRGB(190, 190, 190),
+            LightColor = Color3.fromRGB(255, 255, 255),
+            LightDirection = Vector3.new(-1, -1, -1),
+        }, row.IconTile)
+    end
+    if row.ViewportModel then pcall(function() row.ViewportModel:Destroy() end) end
+    row.ViewportModel = itemsFitViewport(row.Viewport, model)
+    row.Viewport.Visible = true
+    return row.Viewport
+end
+
+local function itemsSetHeaderViewport(model)
+    if not model then
+        if itemsHeaderViewport then itemsHeaderViewport.Visible = false end
+        if itemsHeaderViewportModel then
+            pcall(function() itemsHeaderViewportModel:Destroy() end)
+            itemsHeaderViewportModel = nil
+        end
+        return nil
+    end
+    if not itemsHeaderViewport then
+        itemsHeaderViewport = create("ViewportFrame", {
+            Name = "Preview",
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Ambient = Color3.fromRGB(190, 190, 190),
+            LightColor = Color3.fromRGB(255, 255, 255),
+            LightDirection = Vector3.new(-1, -1, -1),
+        }, itemsHeaderIcon.Parent)
+    end
+    if itemsHeaderViewportModel then pcall(function() itemsHeaderViewportModel:Destroy() end) end
+    itemsHeaderViewportModel = itemsFitViewport(itemsHeaderViewport, model)
+    itemsHeaderViewport.Visible = true
+    return itemsHeaderViewport
+end
+
 -- Gắn icon cho row: chỉ resolve/ghi khi đổi type (pool reuse + refresh rẻ).
+-- IconType ghi SAU cùng: resolve ném lỗi thì row không bị khóa ở type đó,
+-- refresh sau còn thử lại được.
 local function itemsSetRowIcon(row, entry)
     local itemType = entry.Type or entry.Item
     if row.IconType == itemType then return end
-    row.IconType = itemType
     local tex = UI.GetItemImage(entry.Item or entry.Type or "")
     if tex then
+        itemsSetRowViewport(row, nil)
         row.Icon.Image = tex
         row.Icon.Visible = true
         row.Initial.Visible = false
     else
-        row.Icon.Image = ""
-        row.Icon.Visible = false
-        row.Initial.Visible = true
-        setText(row.Initial, string.upper(string.sub(tostring(entry.Item or entry.Type or "?"), 1, 1)))
+        local model = UI.GetItemModel(entry.Item or entry.Type or "")
+        if model and itemsSetRowViewport(row, model) then
+            row.Icon.Image = ""
+            row.Icon.Visible = false
+            row.Initial.Visible = false
+        else
+            itemsSetRowViewport(row, nil)
+            row.Icon.Image = ""
+            row.Icon.Visible = false
+            row.Initial.Visible = true
+            setText(row.Initial, string.upper(string.sub(tostring(entry.Item or entry.Type or "?"), 1, 1)))
+        end
     end
+    row.IconType = itemType
 end
 
 local function itemsMakeMatRow(parent, order)
@@ -13753,9 +13957,32 @@ local function itemsMakeMatRow(parent, order)
         BackgroundColor3 = T.Panel,
     }, parent), R_CTRL)
     strokeOf(frame, T.Stroke, 1, 0.7)
+    local iconTile = corner(create("Frame", {
+        Name = "IconTile",
+        Size = UDim2.fromOffset(24, 24),
+        Position = UDim2.new(0, 6, 0.5, -12),
+        BackgroundColor3 = T.PanelLight,
+    }, frame), R_CTRL)
+    local icon = create("ImageLabel", {
+        Name = "Icon",
+        Size = UDim2.new(1, -4, 1, -4),
+        Position = UDim2.fromOffset(2, 2),
+        BackgroundTransparency = 1,
+        ScaleType = Enum.ScaleType.Fit,
+        Image = "",
+    }, iconTile)
+    local initial = create("TextLabel", {
+        Name = "Initial",
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "?",
+        TextColor3 = T.AccentDim,
+        TextSize = 12,
+    }, iconTile)
     local name = create("TextLabel", {
-        Size = UDim2.new(1, -122, 0, 16),
-        Position = UDim2.fromOffset(10, 3),
+        Size = UDim2.new(1, -156, 0, 16),
+        Position = UDim2.fromOffset(38, 3),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamMedium,
         Text = "",
@@ -13765,8 +13992,8 @@ local function itemsMakeMatRow(parent, order)
         TextTruncate = Enum.TextTruncate.AtEnd,
     }, frame)
     local source = create("TextLabel", {
-        Size = UDim2.new(1, -122, 0, 12),
-        Position = UDim2.fromOffset(10, 19),
+        Size = UDim2.new(1, -156, 0, 12),
+        Position = UDim2.fromOffset(38, 19),
         BackgroundTransparency = 1,
         Font = Enum.Font.Gotham,
         Text = "",
@@ -13785,7 +14012,8 @@ local function itemsMakeMatRow(parent, order)
         TextSize = 13,
         TextXAlignment = Enum.TextXAlignment.Right,
     }, frame)
-    return {Root = frame, Name = name, Source = source, Count = count}
+    return {Root = frame, Name = name, Source = source, Count = count,
+        Icon = icon, Initial = initial, IconTile = iconTile, IconType = nil}
 end
 
 -- Grow pool tới n, ẩn phần thừa. Không phá row cũ -> không Instance.new lại.
@@ -13793,6 +14021,8 @@ local function itemsEnsureRows(pool, make, parent, n)
     for i = #pool + 1, n do pool[i] = make(parent, i) end
     for i = 1, #pool do pool[i].Root.Visible = (i <= n) end
 end
+
+local itemsBuildToken = 0
 
 itemsApplyFilter = function()
     if not itemsRowsHolder then return end
@@ -13808,24 +14038,62 @@ itemsApplyFilter = function()
             if hay:find(query, 1, true) then table.insert(filtered, entry) end
         end
     end
-    itemsEnsureRows(itemsRows, itemsMakeRow, itemsRowsHolder, #filtered)
-    for i, entry in ipairs(filtered) do
-        local row = itemsRows[i]
-        row.Entry = entry
-        local label = tostring(entry.Item or entry.Type or "?")
-        if entry.Completed then label = "✓ " .. label end
-        setText(row.Name, label)
-        row.Name.TextColor3 = entry.Completed and T.Good or T.Text
-        local meta
-        if tonumber(entry.HoneyCost) then
-            meta = formatCount(entry.HoneyCost) .. " honey"
-        else
-            meta = tostring(entry.Group or "")
-        end
-        setText(row.Meta, meta)
-        itemsSetRowIcon(row, entry)
-    end
+    -- Count label NGAY sau filter: không còn cảnh "0 items" treo giữa lúc
+    -- build row (list chưa bind xong vẫn hiện đúng số lượng).
     setText(itemsCount, tostring(#filtered) .. " items")
+    itemsBuildToken += 1
+    local token = itemsBuildToken
+    -- Chunk 12 row/frame: tạo ~100 row x 7 instance trong MỘT frame chính là
+    -- cú đóng băng lúc mở tab. Chunk đầu bind ngay để list hiện liền, phần
+    -- còn lại trải qua các frame sau; token hủy build cũ khi filter đổi.
+    local chunk = 12
+    local first = math.min(chunk, #filtered)
+    for i = first + 1, #itemsRows do itemsRows[i].Root.Visible = false end
+    local function bindRange(from, to)
+        for i = from, to do
+            local entry = filtered[i]
+            if not entry then break end
+            -- pcall từng row: một row lỗi (icon/instance) không được abort
+            -- cả list như trước (pcall ngoài nuốt lỗi -> list cụt giữa chừng).
+            local ok, err = pcall(function()
+                local row = itemsRows[i]
+                if not row then
+                    row = itemsMakeRow(itemsRowsHolder, i)
+                    itemsRows[i] = row
+                end
+                row.Root.Visible = true
+                row.Entry = entry
+                local label = tostring(entry.Item or entry.Type or "?")
+                if entry.Completed then label = "✓ " .. label end
+                setText(row.Name, label)
+                row.Name.TextColor3 = entry.Completed and T.Good or T.Text
+                local meta
+                if tonumber(entry.HoneyCost) then
+                    meta = formatCount(entry.HoneyCost) .. " honey"
+                else
+                    meta = tostring(entry.Group or "")
+                end
+                setText(row.Meta, meta)
+                itemsSetRowIcon(row, entry)
+            end)
+            if not ok then warn("[BSS Kaitun] items row " .. i .. ": " .. tostring(err)) end
+        end
+    end
+    bindRange(1, first)
+    if first < #filtered then
+        task.spawn(function()
+            local i = first + 1
+            while i <= #filtered do
+                if token ~= itemsBuildToken then return end
+                local page = UI._pages and UI._pages.Items
+                if not page or not page.Visible then return end
+                local last = math.min(i + chunk - 1, #filtered)
+                bindRange(i, last)
+                i = last + 1
+                task.wait()
+            end
+        end)
+    end
 end
 
 itemsOpen = function(entry)
@@ -13846,12 +14114,20 @@ itemsOpen = function(entry)
     if itemType ~= itemsCurrentType then
         itemsCurrentType = itemType
         local tex = UI.GetItemImage(detail.Item or detail.Type or "")
+        local model = nil
+        if not tex then model = UI.GetItemModel(detail.Item or detail.Type or "") end
         pcall(function()
             itemsHeaderIcon.Image = tex or ""
             itemsHeaderIcon.Visible = tex ~= nil
-            itemsHeaderInitial.Visible = tex == nil
-            if not tex then
-                setText(itemsHeaderInitial, string.upper(string.sub(tostring(detail.Item or detail.Type or "?"), 1, 1)))
+            if model then
+                itemsSetHeaderViewport(model)
+                itemsHeaderInitial.Visible = false
+            else
+                itemsSetHeaderViewport(nil)
+                itemsHeaderInitial.Visible = tex == nil
+                if not tex then
+                    setText(itemsHeaderInitial, string.upper(string.sub(tostring(detail.Item or detail.Type or "?"), 1, 1)))
+                end
             end
         end)
     end
@@ -13867,6 +14143,25 @@ itemsOpen = function(entry)
             local required = tonumber(mat.Required) or 0
             setText(row.Count, formatCount(owned) .. " / " .. formatCount(required))
             row.Count.TextColor3 = (owned >= required) and T.Good or T.Bad
+            -- Icon mats: EggTypes phủ gần hết (Strawberry/Enzymes/Glue/Extract...).
+            local matType = mat.Material or mat.Display
+            if row.IconType ~= matType then
+                row.IconType = matType
+                local okIcon = pcall(function()
+                    local mtex = UI.GetItemImage(mat.Display or mat.Material or "")
+                    if mtex then
+                        row.Icon.Image = mtex
+                        row.Icon.Visible = true
+                        row.Initial.Visible = false
+                    else
+                        row.Icon.Image = ""
+                        row.Icon.Visible = false
+                        row.Initial.Visible = true
+                        setText(row.Initial, string.upper(string.sub(tostring(mat.Display or mat.Material or "?"), 1, 1)))
+                    end
+                end)
+                if not okIcon then row.IconType = nil end
+            end
         end
     end
     itemsMatsHolder.Visible = hasData
