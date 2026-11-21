@@ -11470,13 +11470,15 @@ end
 --   1. EggTypes "<Name>Icon"  -> egg/planter/material/vial/wax/drive/treat/ticket...
 --   2. Buffs "<Item Name> Icon" -> mask/guard/belt/boots + drive/extract...
 --   3. Accessories "<Item Name>" -> vài mask/hat có Decal.
+--   4. BeeTypes.Thumbnails "<Tên>" -> event bee (Photon/Crimson/Cobalt...),
+--      cùng nguồn mặt ong của Show Hive.
 -- Collector/backpack/sprinkler là model 3D màu, KHÔNG có icon Decal trong game
 -- -> trả nil, UI hiện placeholder chữ cái đầu (không đoán bừa asset id).
 -- Index dựng MỘT lần (lazy) rồi tra O(1); cache kết quả theo tên. Mọi bước
 -- pcall-guard để folder thiếu trên client lạ không crash.
 -- =============================================================================
 local itemImageCache = {}
-local buffIconIndex, accIconIndex
+local buffIconIndex, accIconIndex, beeThumbIndex
 local function buildIconIndex(folder)
     local index = {}
     if folder then
@@ -11509,6 +11511,18 @@ local function resolveItemImage(itemName)
             accIconIndex = buildIconIndex(ReplicatedStorage:FindFirstChild("Accessories"))
         end
         texture = accIconIndex[normalizeImageName(itemName)]
+    end
+    -- Event bee: "Photon Bee" -> Thumbnails.Photon (bỏ đuôi "bee"). Chỉ áp dụng
+    -- khi tên kết thúc bằng "bee" để không nhầm item khác.
+    if not texture then
+        local wanted = normalizeImageName(itemName)
+        if wanted:sub(-3) == "bee" then
+            if not beeThumbIndex then
+                local beeTypes = ReplicatedStorage:FindFirstChild("BeeTypes")
+                beeThumbIndex = buildIconIndex(beeTypes and beeTypes:FindFirstChild("Thumbnails"))
+            end
+            texture = beeThumbIndex[wanted] or beeThumbIndex[wanted:gsub("bee$", "")]
+        end
     end
     itemImageCache[itemName] = texture or false
     return texture
